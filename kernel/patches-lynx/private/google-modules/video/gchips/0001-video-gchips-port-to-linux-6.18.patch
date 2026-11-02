@@ -1,15 +1,128 @@
 From: junkyard
 Subject: [PATCH] video/gchips: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/video/gchips to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - iommu_register_device_fault_handler() removed (6.8): use the pixel_iommu fault registry that samsung_iommu.ko exports
+  - driver_override moved into struct device (6.18)
+
+Files: bigo.c, bigo_iommu.c, bigo_iommu.h
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/bigo.c b/bigo.c
-index 1f295c5..d2bef16 100644
+index 1f295c5..1f75405 100644
 --- a/bigo.c
 +++ b/bigo.c
+@@ -9,6 +9,8 @@
+ 
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++#include <soc/google/gs_platform_compat.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
+ #include <linux/of_platform.h>
+@@ -66,7 +68,6 @@ static void bigo_sscd_release(struct device *dev)
+ 
+ static struct platform_device bigo_sscd_dev = {
+ 	.name            = BIGO_CHRDEV_NAME,
+-	.driver_override = SSCD_NAME,
+ 	.id              = -1,
+ 	.dev             = {
+ 		.platform_data = &bigo_sscd_platdata,
+@@ -847,7 +848,7 @@ static int bigo_probe(struct platform_device *pdev)
+ 		goto err_io;
+ 	}
+ 
+-	rc = iommu_register_device_fault_handler(&pdev->dev, bigo_iommu_fault_handler, core);
++	rc = pixel_iommu_register_fault_handler(&pdev->dev, bigo_iommu_fault_handler, core);
+ 	if (rc) {
+ 		pr_err("failed to register iommu fault handler: %d\n", rc);
+ 		goto err_fault_handler;
+@@ -861,7 +862,7 @@ static int bigo_probe(struct platform_device *pdev)
+ 		rc = 0;
+ 	}
+ 
+-	if(platform_device_register(&bigo_sscd_dev))
++	if (gs_platform_device_register_override(&bigo_sscd_dev, SSCD_NAME))
+ 		pr_warn("Failed to register bigo_sscd_dev.\n");
+ 
+ 	bigo_init_debugfs(core);
+@@ -874,7 +875,7 @@ static int bigo_probe(struct platform_device *pdev)
+ 	return rc;
+ 
+ err_pt_client:
+-	iommu_unregister_device_fault_handler(&pdev->dev);
++	pixel_iommu_unregister_fault_handler(&pdev->dev);
+ err_fault_handler:
+ 	pm_runtime_disable(&pdev->dev);
+ err_io:
+@@ -887,19 +888,18 @@ err:
+ 	return rc;
+ }
+ 
+-static int bigo_remove(struct platform_device *pdev)
++static void bigo_remove(struct platform_device *pdev)
+ {
+ 	struct bigo_core *core = (struct bigo_core *)platform_get_drvdata(pdev);
+ 
+ 	bigo_uninit_debugfs(core);
+ 	platform_device_unregister(&bigo_sscd_dev);
+ 	bigo_pt_client_unregister(core);
+-	iommu_unregister_device_fault_handler(&pdev->dev);
++	pixel_iommu_unregister_fault_handler(&pdev->dev);
+ 	pm_runtime_disable(&pdev->dev);
+ 	bigo_of_dt_release(core);
+ 	deinit_chardev(core);
+ 	platform_set_drvdata(pdev, NULL);
+-	return 0;
+ }
+ 
+ static const struct of_device_id bigo_dt_match[] = {
 @@ -927,4 +927,4 @@ module_platform_driver(bigo_driver);
  MODULE_LICENSE("GPL");
  MODULE_AUTHOR("Vinay Kalia <vinaykalia@google.com>");
  MODULE_DESCRIPTION("BigWave driver");
 -MODULE_IMPORT_NS(DMA_BUF);
 +MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/bigo_iommu.c b/bigo_iommu.c
+index f15f167..dd32c9b 100644
+--- a/bigo_iommu.c
++++ b/bigo_iommu.c
+@@ -198,7 +198,9 @@ int bigo_dma_sync(struct bigo_buf_sync *sync)
+ 	return ret;
+ }
+ 
+-int bigo_iommu_fault_handler(struct iommu_fault *fault, void *param)
++/* 6.8 removed iommu_register_device_fault_handler(); see pixel-iommu-fault.h */
++int bigo_iommu_fault_handler(struct device *dev, unsigned long iova, u32 pasid,
++			     int flags, void *param)
+ {
+ 	struct bigo_core *core = (struct bigo_core*)param;
+ 	struct bufinfo *binfo;
+diff --git a/bigo_iommu.h b/bigo_iommu.h
+index f55a698..4a43616 100644
+--- a/bigo_iommu.h
++++ b/bigo_iommu.h
+@@ -8,6 +8,7 @@
+ #ifndef _BIGO_IOMMU_H_
+ #define _BIGO_IOMMU_H_
+ 
++#include <linux/types.h>
+ #include <linux/dma-buf.h>
+ #include <linux/iommu.h>
+ 
+@@ -18,6 +19,7 @@ int bigo_map(struct bigo_core *core, struct bigo_inst *inst,
+ 	     struct bigo_ioc_mapping *mapping);
+ int bigo_unmap(struct bigo_inst *inst, struct bigo_ioc_mapping *mapping);
+ int bigo_dma_sync(struct bigo_buf_sync *sync);
+-int bigo_iommu_fault_handler(struct iommu_fault *fault, void *param);
++int bigo_iommu_fault_handler(struct device *dev, unsigned long iova, u32 pasid,
++			     int flags, void *param);
+ 
+ #endif //_BIGO_IOMMU_H_

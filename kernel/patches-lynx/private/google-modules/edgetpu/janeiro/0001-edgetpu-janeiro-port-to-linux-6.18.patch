@@ -1,7 +1,18 @@
 From: junkyard
 Subject: [PATCH] edgetpu/janeiro: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/edgetpu/janeiro to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - iommu_domain_alloc(bus) replaced by iommu_paging_domain_alloc(dev) (6.11)
+  - iommu_attach_device_pasid() takes an attach handle (6.11)
+
+Files: drivers/edgetpu/edgetpu-dmabuf.c, drivers/edgetpu/edgetpu-domain-pool.c, drivers/edgetpu/edgetpu-mobile-platform.c, drivers/edgetpu/janeiro-platform.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/drivers/edgetpu/edgetpu-dmabuf.c b/drivers/edgetpu/edgetpu-dmabuf.c
 index 1ba6e2a..5cd7c38 100644
@@ -14,3 +25,86 @@ index 1ba6e2a..5cd7c38 100644
 -MODULE_IMPORT_NS(DMA_BUF);
 +MODULE_IMPORT_NS("DMA_BUF");
  #endif
+diff --git a/drivers/edgetpu/edgetpu-domain-pool.c b/drivers/edgetpu/edgetpu-domain-pool.c
+index d8b0e49..bdb2faf 100644
+--- a/drivers/edgetpu/edgetpu-domain-pool.c
++++ b/drivers/edgetpu/edgetpu-domain-pool.c
+@@ -8,6 +8,7 @@
+ #include <linux/idr.h>
+ #include <linux/iommu.h>
+ #include <linux/slab.h>
++#include <linux/vmalloc.h>
+ 
+ #include "edgetpu-domain-pool.h"
+ #include "edgetpu-internal.h"
+@@ -33,8 +34,9 @@ int edgetpu_domain_pool_init(struct edgetpu_dev *etdev, struct edgetpu_domain_po
+ 		return -ENOMEM;
+ 	}
+ 	for (i = 0; i < size; i++) {
+-		domain = iommu_domain_alloc(pool->etdev->dev->bus);
+-		if (!domain) {
++		/* 6.11: iommu_domain_alloc(bus) -> iommu_paging_domain_alloc(dev), ERR_PTR */
++		domain = iommu_paging_domain_alloc(pool->etdev->dev);
++		if (IS_ERR(domain)) {
+ 			etdev_err(pool->etdev, "Failed to allocate iommu domain %d of %u\n", i + 1,
+ 				  size);
+ 			edgetpu_domain_pool_destroy(pool);
+@@ -63,8 +65,11 @@ struct iommu_domain *edgetpu_domain_pool_alloc(struct edgetpu_domain_pool *pool)
+ {
+ 	int id;
+ 
+-	if (!pool->size)
+-		return iommu_domain_alloc(pool->etdev->dev->bus);
++	if (!pool->size) {
++		struct iommu_domain *domain = iommu_paging_domain_alloc(pool->etdev->dev);
++
++		return IS_ERR(domain) ? NULL : domain;
++	}
+ 
+ 	id = ida_alloc_max(&pool->idp, pool->size - 1, GFP_KERNEL);
+ 
+@@ -134,7 +139,7 @@ int edgetpu_domain_pool_attach_domain(struct edgetpu_domain_pool *pool, struct i
+ 	if (pasid < 0)
+ 		return pasid;
+ 
+-	ret = iommu_attach_device_pasid(domain, pool->etdev->dev, pasid);
++	ret = iommu_attach_device_pasid(domain, pool->etdev->dev, pasid, NULL);
+ 	if (ret) {
+ 		ida_free(&pool->pasid_pool, pasid);
+ 		return ret;
+diff --git a/drivers/edgetpu/edgetpu-mobile-platform.c b/drivers/edgetpu/edgetpu-mobile-platform.c
+index 979c109..29eadbc 100644
+--- a/drivers/edgetpu/edgetpu-mobile-platform.c
++++ b/drivers/edgetpu/edgetpu-mobile-platform.c
+@@ -489,7 +489,7 @@ out_shutdown:
+ 	return ret;
+ }
+ 
+-static int edgetpu_mobile_platform_remove(struct platform_device *pdev)
++static void edgetpu_mobile_platform_remove(struct platform_device *pdev)
+ {
+ 	struct edgetpu_dev *etdev = platform_get_drvdata(pdev);
+ 	struct edgetpu_mobile_platform_dev *etmdev = to_mobile_dev(etdev);
+@@ -508,6 +508,4 @@ static int edgetpu_mobile_platform_remove(struct platform_device *pdev)
+ 	edgetpu_mobile_pm_destroy(etdev);
+ 
+ 	edgetpu_debug_pointer = NULL;
+-
+-	return 0;
+ }
+diff --git a/drivers/edgetpu/janeiro-platform.c b/drivers/edgetpu/janeiro-platform.c
+index a618a18..0095391 100644
+--- a/drivers/edgetpu/janeiro-platform.c
++++ b/drivers/edgetpu/janeiro-platform.c
+@@ -95,9 +95,9 @@ static int edgetpu_platform_probe(struct platform_device *pdev)
+ 	return edgetpu_mobile_platform_probe(pdev, etmdev);
+ }
+ 
+-static int edgetpu_platform_remove(struct platform_device *pdev)
++static void edgetpu_platform_remove(struct platform_device *pdev)
+ {
+-	return edgetpu_mobile_platform_remove(pdev);
++	edgetpu_mobile_platform_remove(pdev);
+ }
+ 
+ #if IS_ENABLED(CONFIG_PM_SLEEP)

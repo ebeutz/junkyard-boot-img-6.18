@@ -95,6 +95,43 @@ container_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # on a host that does have them, so pass them unconditionally.
 nspawn_compat="--register=no --keep-unit"
 
+# Egress-proxied build hosts (CI, sandboxed cloud builders): apt inside the
+# container shares the host's network namespace but not its environment, so
+# with no direct route out every in-sysroot `apt-get` fails with "Could not
+# resolve 'snapshot.debian.org'". When the host exports a proxy, forward it;
+# when it also names a CA bundle (a TLS-intercepting proxy), bind it read-only
+# and point apt at it through APT_CONFIG. Everything here is per-invocation —
+# nothing is written into the sysroot, so the image never ships the build
+# host's proxy settings. No proxy in the environment => no-op. (sudo strips
+# these unless sudoers env_keep's them.)
+proxy_args=""
+https_px="${https_proxy:-${HTTPS_PROXY:-}}"
+http_px="${http_proxy:-${HTTP_PROXY:-}}"
+no_px="${no_proxy:-${NO_PROXY:-}}"
+if [ -n "$https_px$http_px" ]; then
+    pxdir=/run/junkyard-nspawn
+    mkdir -p "$pxdir"
+    : > "$pxdir/apt-proxy.conf"
+    if [ -n "$https_px" ]; then
+        proxy_args="$proxy_args --setenv=https_proxy=$https_px"
+        echo "Acquire::https::Proxy \"$https_px\";" >> "$pxdir/apt-proxy.conf"
+    fi
+    if [ -n "$http_px" ]; then
+        proxy_args="$proxy_args --setenv=http_proxy=$http_px"
+        echo "Acquire::http::Proxy \"$http_px\";" >> "$pxdir/apt-proxy.conf"
+    fi
+    [ -n "$no_px" ] && proxy_args="$proxy_args --setenv=no_proxy=$no_px"
+    ca="${SSL_CERT_FILE:-${CURL_CA_BUNDLE:-}}"
+    if [ -n "$ca" ] && [ -f "$ca" ]; then
+        cp "$ca" "$pxdir/ca-bundle.crt"
+        proxy_args="$proxy_args --bind-ro=$pxdir/ca-bundle.crt:/run/host-proxy-ca.crt"
+        proxy_args="$proxy_args --setenv=SSL_CERT_FILE=/run/host-proxy-ca.crt --setenv=CURL_CA_BUNDLE=/run/host-proxy-ca.crt"
+        echo 'Acquire::https::CaInfo "/run/host-proxy-ca.crt";' >> "$pxdir/apt-proxy.conf"
+    fi
+    proxy_args="$proxy_args --bind-ro=$pxdir/apt-proxy.conf:/run/host-apt-proxy.conf --setenv=APT_CONFIG=/run/host-apt-proxy.conf"
+fi
+nspawn_compat="$nspawn_compat$proxy_args"
+
 # On a real host, wrap nspawn in a private mount namespace so its /dev tmpfs +
 # /nix/store bind don't leak back into the host's shared sysroot view. Inside
 # the build container (detected via /.dockerenv) call nspawn directly — the

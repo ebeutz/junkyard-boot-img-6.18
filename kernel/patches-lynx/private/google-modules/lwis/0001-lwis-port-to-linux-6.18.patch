@@ -1,7 +1,15 @@
 From: junkyard
 Subject: [PATCH] lwis: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/lwis to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - iommu_register_device_fault_handler() removed (6.8): use the pixel_iommu fault registry that samsung_iommu.ko exports
+
+Files: platform/busan/lwis_platform_busan.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/platform/busan/lwis_platform_busan.c b/platform/busan/lwis_platform_busan.c
 index ad1bf0f..174be7f 100644

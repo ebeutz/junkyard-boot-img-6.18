@@ -62,6 +62,42 @@ Two invocation traps worth knowing:
   becomes `lib/modules//…`, and the `find … -name '*.ko' -delete` in that recipe
   hits the whole module tree. Go through the `just` targets.
 
+## Device-only patches: `kernel/patches-<device>/`
+
+Same layout and the same apply rules, but only applied to that device's tree
+(`PATCH_FILES` in the Makefile picks up `kernel/patches-$(DEVICE)/` alongside
+this directory). Use it for a patch that is valid for one device's kernel
+branch only.
+
+**`kernel/patches-lynx/` is the gs201 port to Linux 6.18.** lynx builds
+GrapheneOS's `kernel_pixel_6.18` monorepo (see `devices/lynx.mk`), whose gs201
+drivers were never ported past the 6.1 tree. Each patch under it is one AOSP
+`repo` project from that monorepo's `aosp_manifest.xml`; the directory names the
+project and the patch applies with `git apply --directory=<project>` from the
+monorepo top, since inside the monorepo the project is a subdirectory, not its
+own git. `aosp/` is the ACK `common/` tree (its own git, as on felix).
+
+Most of it is mechanical API migration (callback signatures, renamed helpers,
+the 6.18 thermal/IOMMU/V4L2/UFS/DRM driver interfaces). Each patch header lists
+the changes it contains. The non-mechanical decisions are called out in their
+own headers:
+
+- `private/devices/google/gs201/0001-…`: pKVM S2MPU and GSA pKVM are turned
+  off. They target the 6.1 pKVM module ABI, which ACK 6.18 replaced, and the
+  images boot `kvm-arm.mode=nvhe` anyway.
+- `aosp/0001-…`, `aosp/0002-…`: GKI exports that the 6.1 Android GKI had and
+  that 6.18 lacks (`init_ipc_ns`/`put_ipc_ns` for rust_binder with IPC_NS on,
+  `dma_direct_alloc`/`dma_direct_free` for the WCN6740 driver).
+- `private/google-modules/aoc/0001-…`: keeps Laguna's arm-smmu-v3 package out
+  of the gs201 dependency graph.
+- `private/google-modules/soc/gs/…`: `samsung_iommu.ko` provides the same
+  `pixel_iommu_{,un}register_fault_handler()` registry that Laguna's
+  arm-smmu-v3 package does, replacing the removed
+  `iommu_register_device_fault_handler()` for every gs201 SysMMU client.
+
+**None of this has been run on hardware.** It compiles, links and passes
+modpost; that is all it has been shown to do.
+
 ## Verifying a DT patch actually landed
 
 Three traps, each of which produced a wrong answer once:

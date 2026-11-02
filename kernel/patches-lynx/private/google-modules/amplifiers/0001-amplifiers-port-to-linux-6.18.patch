@@ -1,7 +1,16 @@
 From: junkyard
 Subject: [PATCH] amplifiers: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/amplifiers to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - strlcpy() removed, use strscpy() (6.8)
+  - ASoC: snd_soc_rtd_to_*() and DAIFMT CBP/CBC naming
+
+Files: cs35l41/cs35l41.c, cs35l45/cs35l45.c, cs35l45/wm_adsp.c, cs40l25/snd-soc-codec-cs40l2x.c, drv2624/drv2624.c, snd_soc_wm_adsp/wm_adsp.c, tas256x/os_layer/src/tas256x-codec.c, tas25xx/src/tas25xx-logic.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/cs35l41/cs35l41.c b/cs35l41/cs35l41.c
 index c0332f8..d608d68 100644

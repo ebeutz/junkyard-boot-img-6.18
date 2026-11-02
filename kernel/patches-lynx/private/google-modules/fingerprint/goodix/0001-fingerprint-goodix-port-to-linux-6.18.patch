@@ -1,7 +1,16 @@
 From: junkyard
 Subject: [PATCH] fingerprint/goodix: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/fingerprint/goodix to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - devm_gpio_request() removed (6.18), use devm_gpio_request_one()
+
+Files: gw9608/gf_spi.c, gw9608/platform.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/gw9608/gf_spi.c b/gw9608/gf_spi.c
 index eb49a7f..ab62ded 100644

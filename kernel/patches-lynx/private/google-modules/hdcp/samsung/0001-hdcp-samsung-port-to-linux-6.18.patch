@@ -1,7 +1,15 @@
 From: junkyard
 Subject: [PATCH] hdcp/samsung: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/hdcp/samsung to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+
+Files: main.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/main.c b/main.c
 index bbeffa2..34fa4f3 100644

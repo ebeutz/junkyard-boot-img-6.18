@@ -1,7 +1,15 @@
 From: junkyard
 Subject: [PATCH] bluetooth/qcom: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/bluetooth/qcom to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+
+Files: btpower.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/btpower.c b/btpower.c
 index 17e17d3..f253305 100644

@@ -1,7 +1,15 @@
 From: junkyard
 Subject: [PATCH] bms: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/bms to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - strlcpy() removed, use strscpy() (6.8)
+
+Files: misc/gvotable.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/misc/gvotable.c b/misc/gvotable.c
 index f079a4d..c745aa9 100644

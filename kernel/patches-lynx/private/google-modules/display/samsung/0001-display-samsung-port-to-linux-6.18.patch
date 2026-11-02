@@ -1,13 +1,261 @@
 From: junkyard
 Subject: [PATCH] display/samsung: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/display/samsung to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - strlcpy() removed, use strscpy() (6.8)
+  - of_property_for_each_u32() takes 3 arguments (6.11)
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - <asm/unaligned.h> moved to <linux/unaligned.h> (6.12)
+  - iommu_register_device_fault_handler() removed (6.8): use the pixel_iommu fault registry that samsung_iommu.ko exports
+  - DRM: fb_create() takes the format info, get_format_info(u32, u64) (6.17)
+  - DRM: drm_dbg_printer(), struct_mutex and drm_driver.date removed
+  - drm_info()/drm_warn() now require a real struct drm_device
+
+Files: dp_audio/dp_dma.c, exynos_drm_debug.c, exynos_drm_decon.c, exynos_drm_dp.c, exynos_drm_dpp.c, exynos_drm_drv.c, exynos_drm_dsim.c, exynos_drm_fb.c, exynos_drm_gem.c, exynos_drm_tui.c, exynos_drm_writeback.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
+diff --git a/dp_audio/dp_dma.c b/dp_audio/dp_dma.c
+index 9b51c0c..5bdd05d 100644
+--- a/dp_audio/dp_dma.c
++++ b/dp_audio/dp_dma.c
+@@ -988,9 +988,8 @@ static int samsung_dp_dma_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int samsung_dp_dma_remove(struct platform_device *pdev)
++static void samsung_dp_dma_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct of_device_id samsung_dp_dma_match[] = {
+@@ -1140,12 +1139,11 @@ static int samsung_display_adma_probe(struct platform_device *pdev)
+ 	return of_platform_populate(np, NULL, NULL, dev);
+ }
+ 
+-static int samsung_display_adma_remove(struct platform_device *pdev)
++static void samsung_display_adma_remove(struct platform_device *pdev)
+ {
+ 	vunmap(dp_ado_reserved_mem);
+ 	dp_ado_reserved_mem = NULL;
+ 	snd_soc_unregister_component(&pdev->dev);
+-	return 0;
+ }
+ 
+ static const struct of_device_id samsung_display_adma_match[] = {
+diff --git a/exynos_drm_debug.c b/exynos_drm_debug.c
+index ac50b6e..f383283 100644
+--- a/exynos_drm_debug.c
++++ b/exynos_drm_debug.c
+@@ -10,6 +10,7 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/vmalloc.h>
+ #include <linux/kernel.h>
+ #include <linux/console.h>
+ #include <linux/debugfs.h>
+@@ -1647,7 +1648,7 @@ bool is_console_enabled(void)
+ static void buf_dump_all(const struct decon_device *decon)
+ {
+ 	struct drm_printer p = is_console_enabled() ?
+-		drm_debug_printer("[drm]") : drm_info_printer(decon->dev);
++		drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(decon->dev);
+ 	int i;
+ 
+ 	for (i = 0; i < decon->dpp_cnt; ++i)
+@@ -2167,7 +2168,7 @@ void decon_dump_event_condition(const struct decon_device *decon,
+ 		enum dpu_event_condition condition)
+ {
+ 	struct drm_printer p = is_console_enabled() ?
+-		drm_debug_printer("[drm]") : drm_info_printer(decon->dev);
++		drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(decon->dev);
+ 	u32 print_log_size;
+ 
+ 	if (decon_dump_ignore(condition))
+diff --git a/exynos_drm_decon.c b/exynos_drm_decon.c
+index 9819ffd..4f8dca8 100644
+--- a/exynos_drm_decon.c
++++ b/exynos_drm_decon.c
+@@ -48,6 +48,8 @@
+ #include "exynos_drm_crtc.h"
+ #include "exynos_drm_decon.h"
+ #include "exynos_drm_dpp.h"
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++
+ #include "exynos_drm_drv.h"
+ #include "exynos_drm_dsim.h"
+ #include "exynos_drm_fb.h"
+@@ -120,7 +122,7 @@ void decon_dump_locked(const struct decon_device *decon, struct drm_printer *p)
+ 
+ 	if (!p) {
+ 		printer = is_console_enabled() ?
+-			drm_debug_printer("[drm]") : drm_info_printer(decon->dev);
++			drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(decon->dev);
+ 		pointer = &printer;
+ 	} else {
+ 		pointer = p;
+@@ -625,7 +627,7 @@ static int _decon_handover_check(struct exynos_drm_crtc *exynos_crtc,
+ 	bool found_handover_dpp = false;
+ 
+ 	if (exynos_crtc_state->planes_updated) {
+-		drm_info(decon, "%s: planes updated on commit, skipping handover\n", __func__);
++		dev_info(decon->dev, "%s: planes updated on commit, skipping handover\n", __func__);
+ 		return 0;
+ 	}
+ 
+@@ -660,12 +662,12 @@ static int _decon_handover_check(struct exynos_drm_crtc *exynos_crtc,
+ 	decon_debug(decon, "%s: final win_mask=0x%lx\n", __func__, win_mask);
+ 
+ 	if (!win_mask) {
+-		drm_warn(decon, "%s: handover memory defined, but no windows attached\n", __func__);
++		dev_warn(decon->dev, "%s: handover memory defined, but no windows attached\n", __func__);
+ 		return -ENOENT;
+ 	}
+ 
+ 	if (!found_handover_dpp) {
+-		drm_warn(decon, "%s: handover memory defined, but cannot find handover dpp\n",
++		dev_warn(decon->dev, "%s: handover memory defined, but cannot find handover dpp\n",
+ 				__func__);
+ 		return -EBUSY;
+ 	}
+@@ -1890,7 +1892,9 @@ static const struct exynos_drm_crtc_ops decon_crtc_ops = {
+ 	.wait_for_flip_done = decon_wait_for_flip_done,
+ };
+ 
+-static int dpu_sysmmu_fault_handler(struct iommu_fault *fault, void *data)
++/* 6.8 removed iommu_register_device_fault_handler(); see pixel-iommu-fault.h */
++static int dpu_sysmmu_fault_handler(struct device *fault_dev, unsigned long iova,
++				    u32 pasid, int fault_flags, void *data)
+ {
+ 	struct decon_device *decon = data;
+ 
+@@ -1978,7 +1982,7 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
+ 
+ 	priv->iommu_client = dev;
+ 
+-	iommu_register_device_fault_handler(dev, dpu_sysmmu_fault_handler, decon);
++	pixel_iommu_register_fault_handler(dev, dpu_sysmmu_fault_handler, decon);
+ 
+ #if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+ 	decon->itmon_nb.notifier_call = dpu_itmon_notifier;
+@@ -2027,7 +2031,7 @@ static void decon_unbind(struct device *dev, struct device *master,
+ #if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+ 	itmon_notifier_chain_unregister(&decon->itmon_nb);
+ #endif
+-	iommu_unregister_device_fault_handler(dev);
++	pixel_iommu_unregister_fault_handler(dev);
+ 
+ 	decon_debug(decon, "%s -\n", __func__);
+ }
+@@ -2140,7 +2144,6 @@ static irqreturn_t decon_fs_irq_handler(int irq, void *dev_data)
+ static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
+ {
+ 	struct device_node *dpp_np = NULL;
+-	struct property *prop;
+ 	const __be32 *cur;
+ 	u32 val;
+ 	int ret = 0, i, count;
+@@ -2404,7 +2407,7 @@ static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
+ 	if (dpp_np)
+ 		of_node_put(dpp_np);
+ 
+-	of_property_for_each_u32(np, "connector", prop, cur, val)
++	of_property_for_each_u32(np, "connector", val)
+ 		decon->con_type |= val;
+ 
+ 	return 0;
+@@ -2743,7 +2746,7 @@ err:
+ 	return ret;
+ }
+ 
+-static int decon_remove(struct platform_device *pdev)
++static void decon_remove(struct platform_device *pdev)
+ {
+ 	struct decon_device *decon = platform_get_drvdata(pdev);
+ 
+@@ -2756,8 +2759,6 @@ static int decon_remove(struct platform_device *pdev)
+ 
+ 	__decon_unmap_regs(decon);
+ 	iounmap(decon->regs.regs);
+-
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM
+diff --git a/exynos_drm_dp.c b/exynos_drm_dp.c
+index 7af1f2c..4933196 100644
+--- a/exynos_drm_dp.c
++++ b/exynos_drm_dp.c
+@@ -3515,7 +3515,7 @@ err:
+ 	return ret;
+ }
+ 
+-static int dp_remove(struct platform_device *pdev)
++static void dp_remove(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct dp_device *dp = platform_get_drvdata(pdev);
+@@ -3536,7 +3536,6 @@ static int dp_remove(struct platform_device *pdev)
+ 	destroy_workqueue(dp->dp_wq);
+ 
+ 	dp_info(dp, "DP Driver has been removed\n");
+-	return 0;
+ }
+ 
+ static const struct of_device_id dp_of_match[] = {
+diff --git a/exynos_drm_dpp.c b/exynos_drm_dpp.c
+index 51d339b..97b8859 100644
+--- a/exynos_drm_dpp.c
++++ b/exynos_drm_dpp.c
+@@ -1481,7 +1481,7 @@ fail:
+ 	return ret;
+ }
+ 
+-static int dpp_remove(struct platform_device *pdev)
++static void dpp_remove(struct platform_device *pdev)
+ {
+ 	struct dpp_device *dpp = platform_get_drvdata(pdev);
+ 
+@@ -1497,8 +1497,6 @@ static int dpp_remove(struct platform_device *pdev)
+ 	if (test_bit(DPP_ATTR_HDR_COMM, &dpp->attr))
+ 		iounmap(dpp->regs.hdr_comm_base_regs);
+ 	iounmap(dpp->regs.dma_base_regs);
+-
+-	return 0;
+ }
+ 
+ struct platform_driver dpp_driver = {
 diff --git a/exynos_drm_drv.c b/exynos_drm_drv.c
-index 0c21183..0b6c5a5 100644
+index 0c21183..d6d9de7 100644
 --- a/exynos_drm_drv.c
 +++ b/exynos_drm_drv.c
-@@ -1400,5 +1400,5 @@ MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
+@@ -1029,7 +1029,6 @@ static struct drm_driver exynos_drm_driver = {
+ 	.fops			   = &exynos_drm_driver_fops,
+ 	.name			   = DRIVER_NAME,
+ 	.desc			   = DRIVER_DESC,
+-	.date			   = DRIVER_DATE,
+ 	.major			   = DRIVER_MAJOR,
+ 	.minor			   = DRIVER_MINOR,
+ };
+@@ -1268,10 +1267,9 @@ static int exynos_drm_platform_probe(struct platform_device *pdev)
+ 					       match);
+ }
+ 
+-static int exynos_drm_platform_remove(struct platform_device *pdev)
++static void exynos_drm_platform_remove(struct platform_device *pdev)
+ {
+ 	component_master_del(&pdev->dev, &exynos_drm_ops);
+-	return 0;
+ }
+ 
+ static void exynos_drm_platform_shutdown(struct platform_device *pdev)
+@@ -1400,5 +1398,5 @@ MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
  MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
  MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
  MODULE_DESCRIPTION("Samsung SoC DRM Driver");
@@ -15,7 +263,7 @@ index 0c21183..0b6c5a5 100644
 +MODULE_IMPORT_NS("DMA_BUF");
  MODULE_LICENSE("GPL");
 diff --git a/exynos_drm_dsim.c b/exynos_drm_dsim.c
-index 35244d6..d809b84 100644
+index 35244d6..f9b92f5 100644
 --- a/exynos_drm_dsim.c
 +++ b/exynos_drm_dsim.c
 @@ -13,7 +13,7 @@
@@ -27,6 +275,15 @@ index 35244d6..d809b84 100644
  
  #include <drm/drm_of.h>
  #include <drm/drm_crtc_helper.h>
+@@ -181,7 +181,7 @@ void dsim_dump(struct dsim_device *dsim, struct drm_printer *p)
+ 
+ 	if (!p) {
+ 		printer = is_console_enabled() ?
+-			drm_debug_printer("[drm]") : drm_info_printer(dsim->dev);
++			drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(dsim->dev);
+ 			pointer = &printer;
+ 	} else {
+ 		pointer = p;
 @@ -1687,7 +1687,7 @@ static int dsim_add_mipi_dsi_device(struct dsim_device *dsim,
  				scnprintf(info.type, sizeof(info.type),
  					"%d:%s", idx, name);
@@ -45,3 +302,144 @@ index 35244d6..d809b84 100644
  	hs_clk_str = strsep(&p, " ");
  	apply_now_str = strsep(&p, " ");
  
+@@ -3274,7 +3274,7 @@ err:
+ 	return ret;
+ }
+ 
+-static int dsim_remove(struct platform_device *pdev)
++static void dsim_remove(struct platform_device *pdev)
+ {
+ 	struct dsim_device *dsim = platform_get_drvdata(pdev);
+ 
+@@ -3300,7 +3300,6 @@ static int dsim_remove(struct platform_device *pdev)
+ 		dsim->log = NULL;
+ 	}
+ #endif
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM
+diff --git a/exynos_drm_fb.c b/exynos_drm_fb.c
+index be52265..1492745 100644
+--- a/exynos_drm_fb.c
++++ b/exynos_drm_fb.c
+@@ -53,6 +53,7 @@ static const struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
+ 
+ static struct drm_framebuffer *
+ exynos_drm_framebuffer_init(struct drm_device *dev,
++			    const struct drm_format_info *info,
+ 			    const struct drm_mode_fb_cmd2 *mode_cmd,
+ 			    struct drm_gem_object **obj,
+ 			    int count)
+@@ -68,7 +69,7 @@ exynos_drm_framebuffer_init(struct drm_device *dev,
+ 	for (i = 0; i < count; i++)
+ 		fb->obj[i] = obj[i];
+ 
+-	drm_helper_mode_fill_fb_struct(dev, fb, mode_cmd);
++	drm_helper_mode_fill_fb_struct(dev, fb, info, mode_cmd);
+ 
+ 	ret = drm_framebuffer_init(dev, fb, &exynos_drm_fb_funcs);
+ 	if (ret < 0) {
+@@ -126,9 +127,9 @@ static size_t get_plane_size(const struct drm_mode_fb_cmd2 *mode_cmd, u32 idx,
+ 
+ static struct drm_framebuffer *
+ exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
++		      const struct drm_format_info *info,	/* 6.18: resolved by the core */
+ 		      const struct drm_mode_fb_cmd2 *mode_cmd)
+ {
+-	const struct drm_format_info *info = drm_get_format_info(dev, mode_cmd);
+ 	struct drm_gem_object *obj[MAX_FB_BUFFER] = { 0 };
+ 	struct drm_framebuffer *fb;
+ 	size_t size;
+@@ -180,7 +181,7 @@ exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+ 	DRM_DEBUG("offset(%d), handle(%d), size(%lu)\n", mode_cmd->offsets[0],
+ 			mode_cmd->handles[0], size);
+ 
+-	fb = exynos_drm_framebuffer_init(dev, mode_cmd, obj, i);
++	fb = exynos_drm_framebuffer_init(dev, info, mode_cmd, obj, i);
+ 	if (IS_ERR(fb)) {
+ 		ret = PTR_ERR(fb);
+ 		goto err;
+@@ -197,12 +198,12 @@ err:
+ }
+ 
+ static const struct drm_format_info *
+-exynos_get_format_info(const struct drm_mode_fb_cmd2 *cmd)
++exynos_get_format_info(u32 pixel_format, u64 modifier)	/* 6.18: was (mode_cmd) */
+ {
+ 	const struct drm_format_info *info = NULL;
+ 
+-	if (cmd->modifier[0] == DRM_FORMAT_MOD_SAMSUNG_COLORMAP) {
+-		info = drm_format_info(cmd->pixel_format);
++	if (modifier == DRM_FORMAT_MOD_SAMSUNG_COLORMAP) {
++		info = drm_format_info(pixel_format);
+ 		if (info->format == DRM_FORMAT_BGRA8888)
+ 			return info;
+ 
+diff --git a/exynos_drm_gem.c b/exynos_drm_gem.c
+index 8b45f59..061415c 100644
+--- a/exynos_drm_gem.c
++++ b/exynos_drm_gem.c
+@@ -290,8 +290,10 @@ static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
+ 	struct drm_gem_object *obj;
+ 	int ret = 0;
+ 
+-	mutex_lock(&dev->struct_mutex);
+-
++	/*
++	 * 6.x removed drm_device.struct_mutex; handle lookup and mmap-offset
++	 * creation are internally synchronised (as in upstream drivers).
++	 */
+ 	obj = drm_gem_object_lookup(filep, handle);
+ 	if (!obj) {
+ 		pr_err("Failed to lookup gem object from handle %u.\n",
+@@ -311,8 +313,6 @@ static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
+ out:
+ 	drm_gem_object_put(obj);
+ unlock:
+-	mutex_unlock(&dev->struct_mutex);
+-
+ 	return ret;
+ }
+ 
+diff --git a/exynos_drm_tui.c b/exynos_drm_tui.c
+index a16f760..aa9cd6f 100644
+--- a/exynos_drm_tui.c
++++ b/exynos_drm_tui.c
+@@ -134,13 +134,11 @@ static int exynos_tui_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int exynos_tui_remove(struct platform_device *pdev)
++static void exynos_tui_remove(struct platform_device *pdev)
+ {
+ 	struct miscdevice *misc_dev = dev_get_drvdata(&pdev->dev);
+ 
+ 	misc_deregister(misc_dev);
+-
+-	return 0;
+ }
+ 
+ struct platform_driver tui_driver = {
+diff --git a/exynos_drm_writeback.c b/exynos_drm_writeback.c
+index b2d2a9e..f202f07 100644
+--- a/exynos_drm_writeback.c
++++ b/exynos_drm_writeback.c
+@@ -776,7 +776,7 @@ fail:
+ 	return ret;
+ }
+ 
+-static int writeback_remove(struct platform_device *pdev)
++static void writeback_remove(struct platform_device *pdev)
+ {
+ 	struct writeback_device *wb = platform_get_drvdata(pdev);
+ 
+@@ -785,8 +785,6 @@ static int writeback_remove(struct platform_device *pdev)
+ 	if (test_bit(DPP_ATTR_DPP, &wb->attr))
+ 		iounmap(wb->regs.dpp_base_regs);
+ 	iounmap(wb->regs.dma_base_regs);
+-
+-	return 0;
+ }
+ 
+ struct platform_driver writeback_driver = {

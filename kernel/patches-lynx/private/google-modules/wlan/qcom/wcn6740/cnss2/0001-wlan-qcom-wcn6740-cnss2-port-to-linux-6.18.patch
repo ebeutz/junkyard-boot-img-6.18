@@ -1,8 +1,33 @@
 From: junkyard
 Subject: [PATCH] wlan/qcom/wcn6740/cnss2: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/wlan/qcom/wcn6740/cnss2 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - strlcpy() removed, use strscpy() (6.8)
+  - del_timer*() renamed timer_delete*() (6.15)
+  - from_timer() renamed timer_container_of() (6.16)
+  - driver_override moved into struct device (6.18)
+  - relax -Wmissing-prototypes (on by default since 6.8, fatal with CONFIG_WERROR) for this vendor code
+
+Files: Kbuild, cnss2/bus.c, cnss2/genl.c, cnss2/main.c, cnss2/pci.c, cnss2/pci_platform_google.c, cnss2/power.c, cnss2/qmi.c, cnss_utils/cnss_plat_ipc_qmi.c, mhi/core/init.c, qrtr/af_qrtr.c, qrtr/qrtr.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
+diff --git a/Kbuild b/Kbuild
+index 33b5824..8ff4f94 100644
+--- a/Kbuild
++++ b/Kbuild
+@@ -1,3 +1,7 @@
++# junkyard (lynx, 6.18): vendor code predating -Wmissing-prototypes being on by
++# default (6.8) and clang's -Wunused-but-set-parameter; keep them as warnings.
++subdir-ccflags-y += -Wno-error=missing-prototypes -Wno-error=unused-but-set-parameter
++
+ ifeq ($(CONFIG_CNSS_OUT_OF_TREE),y)
+ KBUILD_CPPFLAGS += -DCONFIG_CNSS_OUT_OF_TREE
+ endif
 diff --git a/cnss2/bus.c b/cnss2/bus.c
 index 58fd891..023df1d 100644
 --- a/cnss2/bus.c
@@ -17,10 +42,18 @@ index 58fd891..023df1d 100644
  	if (!plat_priv)
  		return;
 diff --git a/cnss2/genl.c b/cnss2/genl.c
-index 2819a1b..13ce236 100644
+index 2819a1b..d353296 100644
 --- a/cnss2/genl.c
 +++ b/cnss2/genl.c
-@@ -96,9 +96,9 @@ static int cnss_genl_send_data(u8 type, char *file_name, u32 total_size,
+@@ -10,6 +10,7 @@
+ #include <net/genetlink.h>
+ 
+ #include "main.h"
++#include "genl.h"
+ #include "debug.h"
+ 
+ #define CNSS_GENL_FAMILY_NAME "cnss-genl"
+@@ -96,9 +97,9 @@ static int cnss_genl_send_data(u8 type, char *file_name, u32 total_size,
  		    type, file_name, total_size, seg_id, end, data_len);
  
  	if (!file_name)
@@ -242,10 +275,52 @@ index 5c72ee5..28c14ac 100644
  		break;
  	default:
  		break;
+diff --git a/cnss2/pci_platform_google.c b/cnss2/pci_platform_google.c
+index 5da58b8..bcc96d5 100644
+--- a/cnss2/pci_platform_google.c
++++ b/cnss2/pci_platform_google.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Copyright (c) 2021, The Linux Foundation. All rights reserved. */
+ 
++#include <soc/google/gs_platform_compat.h>
+ #include <linux/of.h>
+ #include <linux/of_gpio.h>
+ #include <linux/of_reserved_mem.h>
+@@ -301,7 +302,6 @@ static struct sscd_platform_data sscd_pdata;
+ 
+ static struct platform_device sscd_dev = {
+ 	.name            = DEVICE_NAME,
+-	.driver_override = SSCD_NAME,
+ 	.id              = -1,
+ 	.dev             = {
+ 		.platform_data = &sscd_pdata,
+@@ -314,11 +314,10 @@ void cnss_register_sscd(void)
+ 	memset(&sscd_pdata, 0, sizeof(struct sscd_platform_data));
+ 	memset(&sscd_dev, 0, sizeof(struct platform_device));
+ 	sscd_dev.name = DEVICE_NAME;
+-	sscd_dev.driver_override = SSCD_NAME;
+ 	sscd_dev.id = -1;
+ 	sscd_dev.dev.platform_data = &sscd_pdata;
+ 	sscd_dev.dev.release = sscd_release;
+-	platform_device_register(&sscd_dev);
++	gs_platform_device_register_override(&sscd_dev, SSCD_NAME);
+ }
+ 
+ void cnss_unregister_sscd(void)
 diff --git a/cnss2/power.c b/cnss2/power.c
-index f899a12..eda5a21 100644
+index f899a12..d1dd229 100644
 --- a/cnss2/power.c
 +++ b/cnss2/power.c
+@@ -986,7 +986,7 @@ int cnss_get_input_gpio_value(struct cnss_plat_data *plat_priv, int gpio_num)
+ #ifdef CONFIG_WCN_GOOGLE
+ #define WLAN_BUCK			"wlan_buck"
+ static int wlan_buck_gpio=0;
+-int wlan_buck_enable(struct cnss_plat_data *plat_priv)
++static int wlan_buck_enable(struct cnss_plat_data *plat_priv)
+ {
+ 	int ret = 0;
+ 	struct device *dev;
 @@ -1421,7 +1421,7 @@ int cnss_aop_ol_cpr_cfg_setup(struct cnss_plat_data *plat_priv,
  			u32 wake_volt = 0, sleep_volt = 0;
  
@@ -324,6 +399,19 @@ index 2225c2b..3da0ab6 100644
  				   const char *log_level, char *fmt, ...)
  {
  	struct va_format vaf;
+diff --git a/mhi/core/init.c b/mhi/core/init.c
+index ee03bba..9bdb61b 100644
+--- a/mhi/core/init.c
++++ b/mhi/core/init.c
+@@ -1401,7 +1401,7 @@ static int mhi_uevent(const struct device *dev, struct kobj_uevent_env *env)
+ 					mhi_dev->name);
+ }
+ 
+-static int mhi_match(struct device *dev, struct device_driver *drv)
++static int mhi_match(struct device *dev, const struct device_driver *drv)
+ {
+ 	struct mhi_device *mhi_dev = to_mhi_device(dev);
+ 	struct mhi_driver *mhi_drv = to_mhi_driver(drv);
 diff --git a/qrtr/af_qrtr.c b/qrtr/af_qrtr.c
 index 21cb211..a5d4fcf 100644
 --- a/qrtr/af_qrtr.c

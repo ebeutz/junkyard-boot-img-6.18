@@ -1,7 +1,16 @@
 From: junkyard
 Subject: [PATCH] touch/goodix: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/touch/goodix to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - strlcpy() removed, use strscpy() (6.8)
+  - <asm/unaligned.h> moved to <linux/unaligned.h> (6.12)
+
+Files: goodix_brl_fwupdate.c, goodix_ts_core.h, goodix_ts_proc.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/goodix_brl_fwupdate.c b/goodix_brl_fwupdate.c
 index b467607..4b1857f 100644

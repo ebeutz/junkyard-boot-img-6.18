@@ -1,7 +1,17 @@
 From: junkyard
 Subject: [PATCH] gs201: drop pKVM-only S2MPU support from the lynx build
 
-TODO: describe
+The gs201 pKVM S2MPU driver (pkvm-s2mpu.ko) and the GSA pKVM glue built on it
+are written against the Android 6.1 pKVM hypervisor-module ABI
+(<kvm/iommu.h>, pkvm_iommu_* registration). ACK 6.18 replaced that ABI and
+ships no <kvm/iommu.h>, so the module cannot be built as-is.
+
+These images boot kvm-arm.mode=nvhe (see lynx_cmdline_defconfig), not
+protected mode, so the S2MPU is never handed to a pKVM hypervisor and the
+driver would not be used anyway. Turn both options off in gs201_defconfig
+and drop pkvm-s2mpu.ko from the module list and the vendor ramdisk.
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree.
 ---
 diff --git a/BUILD.bazel b/BUILD.bazel
 index e4880b3..c7d19a1 100644

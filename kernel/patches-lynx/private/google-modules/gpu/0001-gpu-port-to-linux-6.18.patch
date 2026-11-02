@@ -1,7 +1,18 @@
 From: junkyard
 Subject: [PATCH] gpu: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/gpu to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - del_timer*() renamed timer_delete*() (6.15)
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - drop in-tree-only include paths that -Wmissing-include-dirs now rejects
+
+17 files.
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c b/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c
 index 22fdeb1..a6ecf2e 100644
@@ -160,6 +171,19 @@ index b4ffdaf..055bb88 100644
  
  	atomic_set(timeline->timeline_flags, 0);
  }
+diff --git a/mali_kbase/Kbuild b/mali_kbase/Kbuild
+index 0b63ac6..0e2b27e 100644
+--- a/mali_kbase/Kbuild
++++ b/mali_kbase/Kbuild
+@@ -153,8 +153,6 @@ endif
+ ccflags-y += \
+     -I$(src) \
+     -I$(src)/platform/$(MALI_PLATFORM_DIR) \
+-    -I$(src)/../../../base \
+-    -I$(src)/../../../../include \
+     -I$(src)/tests/include
+ 
+ # Add include path for related GPU modules
 diff --git a/mali_kbase/csf/mali_kbase_csf_kcpu.c b/mali_kbase/csf/mali_kbase_csf_kcpu.c
 index e815ff2..c41d9cc 100644
 --- a/mali_kbase/csf/mali_kbase_csf_kcpu.c
@@ -253,9 +277,27 @@ index ac22c57..6e2c95b 100644
  	spin_lock_irqsave(&self->read_lock, flags);
  
 diff --git a/mali_kbase/mali_kbase_core_linux.c b/mali_kbase/mali_kbase_core_linux.c
-index 2d5285b..fdd6bc9 100644
+index 2d5285b..caced28 100644
 --- a/mali_kbase/mali_kbase_core_linux.c
 +++ b/mali_kbase/mali_kbase_core_linux.c
+@@ -4596,7 +4596,7 @@ void kbase_sysfs_term(struct kbase_device *kbdev)
+ }
+ 
+ #if (KERNEL_VERSION(6, 11, 0) > LINUX_VERSION_CODE)
+-static int kbase_platform_device_remove(struct platform_device *pdev)
++static void kbase_platform_device_remove(struct platform_device *pdev)
+ #else
+ static void kbase_platform_device_remove(struct platform_device *pdev)
+ #endif
+@@ -4610,7 +4610,7 @@ static void kbase_platform_device_remove(struct platform_device *pdev)
+ 	}
+ 
+ #if (KERNEL_VERSION(6, 11, 0) > LINUX_VERSION_CODE)
+-	return 0;
++	return;
+ #endif
+ }
+ 
 @@ -4972,7 +4972,7 @@ module_init(kbase_driver_init);
  module_exit(kbase_driver_exit);
  #endif
@@ -346,7 +388,7 @@ index 4fa20d3..dbc7610 100644
  
  static const struct of_device_id priority_control_manager_dt_ids[] = {
 diff --git a/mali_pixel/protected_memory_allocator.c b/mali_pixel/protected_memory_allocator.c
-index f4798c1..8d0a99f 100644
+index f4798c1..1417dc7 100644
 --- a/mali_pixel/protected_memory_allocator.c
 +++ b/mali_pixel/protected_memory_allocator.c
 @@ -15,7 +15,7 @@
@@ -358,3 +400,39 @@ index f4798c1..8d0a99f 100644
  
  #define MALI_PMA_DMA_HEAP_NAME "vframe-secure"
  #define MALI_PMA_SLAB_SIZE (1 << 16)
+@@ -113,7 +113,7 @@ static void mali_pma_slab_remove(
+ 
+ static int protected_memory_allocator_probe(struct platform_device *pdev);
+ 
+-static int protected_memory_allocator_remove(struct platform_device *pdev);
++static void protected_memory_allocator_remove(struct platform_device *pdev);
+ 
+ /**
+  * mali_pma_alloc_page - Allocate protected memory pages
+@@ -546,7 +546,7 @@ out:
+  *
+  * @pdev: The protected memory allocator platform device to remove.
+  */
+-static int protected_memory_allocator_remove(struct platform_device *pdev)
++static void protected_memory_allocator_remove(struct platform_device *pdev)
+ {
+ 	struct protected_memory_allocator_device *pma_dev;
+ 	struct mali_pma_dev *mali_pma_dev;
+@@ -554,7 +554,7 @@ static int protected_memory_allocator_remove(struct platform_device *pdev)
+ 	/* Get the Mali protected memory allocator device record. */
+ 	pma_dev = platform_get_drvdata(pdev);
+ 	if (!pma_dev) {
+-		return 0;
++		return;
+ 	}
+ 	mali_pma_dev = container_of(pma_dev, struct mali_pma_dev, pma_dev);
+ 
+@@ -571,8 +571,6 @@ static int protected_memory_allocator_remove(struct platform_device *pdev)
+ 
+ 	/* Free the Mali protected memory allocator device record. */
+ 	kfree(mali_pma_dev);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id protected_memory_allocator_dt_ids[] = {

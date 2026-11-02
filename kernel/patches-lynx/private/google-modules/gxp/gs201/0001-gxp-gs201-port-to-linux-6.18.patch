@@ -1,7 +1,15 @@
 From: junkyard
 Subject: [PATCH] gxp/gs201: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/gxp/gs201 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+
+Files: gcip-kernel-driver/drivers/gcip/gcip-iommu.c, gxp-dmabuf.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
 index 7b57441..41b4a17 100644

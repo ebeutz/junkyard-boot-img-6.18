@@ -1,7 +1,42 @@
 From: junkyard
 Subject: [PATCH] gs: port the gs101/gs201-era SoC drivers to Linux 6.18
 
-TODO: describe
+Port private/google-modules/soc/gs to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - gpio_chip.set returns int (6.17)
+  - strlcpy() removed, use strscpy() (6.8)
+  - del_timer*() renamed timer_delete*() (6.15)
+  - from_timer() renamed timer_container_of() (6.16)
+  - hrtimer_init() replaced by hrtimer_setup() (6.15)
+  - of_property_for_each_u32() takes 3 arguments (6.11)
+  - tracepoint __assign_str() takes only the field (6.10)
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - <asm/unaligned.h> moved to <linux/unaligned.h> (6.12)
+  - spi_master renamed spi_controller
+  - PWM chips allocated with pwmchip_alloc() (6.9)
+  - IOMMU ops: domain_alloc_paging/map_pages/unmap_pages, no fwspec->ops
+  - iommu_register_device_fault_handler() removed (6.8): use the pixel_iommu fault registry that samsung_iommu.ko exports
+  - iommu_domain_alloc(bus) replaced by iommu_paging_domain_alloc(dev) (6.11)
+  - thermal core: trips live in thermal_trip_desc, tz->ops embedded, trip getters removed (gs_thermal_compat.h)
+  - serial core: circ_buf replaced by the xmit_fifo kfifo (6.10)
+  - V4L2: vidioc_queryctrl/g_ctrl/s_ctrl removed (6.18), served via ext-ctrls adapters
+  - vb2: q->num_buffers replaced by vb2_get_num_buffers() (6.8)
+  - v4l2_fh_add/del take the struct file (6.18)
+  - driver_override moved into struct device (6.18)
+  - sysfs bin_attribute callbacks take a const attribute (6.13+)
+  - devm_device_add_groups() removed (6.11)
+  - nr_irqs replaced by irq_get_nr_irqs() (6.13)
+  - task->thread_group removed
+  - dynamic BRK hooks removed (6.17)
+  - relax -Wmissing-prototypes (on by default since 6.8, fatal with CONFIG_WERROR) for this vendor code
+  - SPI: per-device chipselect accessors, is_dma_mapped removed
+
+110 files.
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/Kbuild b/Kbuild
 index e8faae6..c2b8d16 100644

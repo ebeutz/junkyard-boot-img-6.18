@@ -1,7 +1,23 @@
 From: junkyard
 Subject: [PATCH] radio/samsung/s5300: port to Linux 6.18 (lynx)
 
-TODO: describe
+Port private/google-modules/radio/samsung/s5300 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - strlcpy() removed, use strscpy() (6.8)
+  - del_timer*() renamed timer_delete*() (6.15)
+  - from_timer() renamed timer_container_of() (6.16)
+  - hrtimer_init() replaced by hrtimer_setup() (6.15)
+  - init_dummy_netdev() removed, use alloc_netdev_dummy() (6.10)
+  - per-NAPI gro_flush_timeout (6.13)
+  - cpufreq_get_policy() unexported
+  - page_frag_cache reworked (encoded_page, page_frag_cache_drain) (6.13)
+
+13 files.
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
 ---
 diff --git a/cp_thermal_zone.c b/cp_thermal_zone.c
 index bc0ed3a..22a6f40 100644
@@ -27,6 +43,87 @@ index bc0ed3a..22a6f40 100644
  }
  
  static const struct of_device_id cp_thermal_zone_match[] = {
+diff --git a/cpif_tp_monitor.c b/cpif_tp_monitor.c
+index 50572cb..cfb5f92 100644
+--- a/cpif_tp_monitor.c
++++ b/cpif_tp_monitor.c
+@@ -4,6 +4,7 @@
+  *
+  */
+ 
++#include <net/rps.h>	/* 6.10: struct rps_map, RPS_MAP_SIZE, rps_needed */
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
+ #include <net/netdev_rx_queue.h>
+@@ -512,6 +513,21 @@ out:
+ #endif
+ 
+ /* GRO flush timeout */
++/*
++ * 6.13 made gro_flush_timeout per-NAPI (napi_complete_done() reads the NAPI's
++ * copy); net/core's netdev_set_gro_flush_timeout() is private, so mirror it.
++ */
++static void cpif_set_gro_flush_timeout(struct net_device *netdev, unsigned long timeout)
++{
++	struct napi_struct *napi;
++
++	if (!netdev)
++		return;
++	WRITE_ONCE(netdev->gro_flush_timeout, timeout);
++	list_for_each_entry(napi, &netdev->napi_list, dev_list)
++		WRITE_ONCE(napi->gro_flush_timeout, timeout);	/* net/core: napi_set_gro_flush_timeout() */
++}
++
+ static void tpmon_set_gro(struct tpmon_data *data)
+ {
+ 	struct mem_link_device *mld = container_of(data->tpmon->ld,
+@@ -533,19 +549,19 @@ static void tpmon_set_gro(struct tpmon_data *data)
+ 		for (i = 0; i < ppa->num_queue; i++) {
+ 			struct pktproc_queue *q = ppa->q[i];
+ 
+-			q->netdev.gro_flush_timeout = timeout;
++			cpif_set_gro_flush_timeout(q->netdev, timeout);
+ 		}
+ 	} else {
+-		mld->dummy_net.gro_flush_timeout = timeout;
++		cpif_set_gro_flush_timeout(mld->dummy_net, timeout);
+ 	}
+ #else
+-	mld->dummy_net.gro_flush_timeout = timeout;
++	cpif_set_gro_flush_timeout(mld->dummy_net, timeout);
+ #endif
+ 
+ #if IS_ENABLED(CONFIG_EXYNOS_DIT)
+ 	if (dit_get_netdev()) {
+-		dit_get_netdev()->gro_flush_timeout = timeout;
+-		mld->dummy_net.gro_flush_timeout = 0;
++		cpif_set_gro_flush_timeout(dit_get_netdev(), timeout);
++		cpif_set_gro_flush_timeout(mld->dummy_net, 0);
+ 	}
+ #endif
+ 
+@@ -1646,7 +1662,7 @@ int tpmon_create(struct platform_device *pdev, struct link_device *ld)
+ 	struct mem_link_device *mld = ld_to_mem_link_device(ld);
+ 	int ret = 0;
+ #if IS_ENABLED(CONFIG_CPU_FREQ)
+-	struct cpufreq_policy pol;
++	struct cpufreq_policy *pol;
+ #endif
+ 
+ 	if (!np) {
+@@ -1674,7 +1690,11 @@ int tpmon_create(struct platform_device *pdev, struct link_device *ld)
+ 	INIT_LIST_HEAD(&tpmon->net_node_list);
+ 
+ #if IS_ENABLED(CONFIG_CPU_FREQ)
+-	if (cpufreq_get_policy(&pol, 0) != 0) {
++	/* cpufreq_get_policy() is gone; same test: does CPU0 have a policy yet? */
++	pol = cpufreq_cpu_get(0);
++	if (pol)
++		cpufreq_cpu_put(pol);
++	else {
+ 		mif_info("register cpufreq notifier\n");
+ 		tpmon->cpufreq_nb.notifier_call = tpmon_cpufreq_nb;
+ 		cpufreq_register_notifier(&tpmon->cpufreq_nb, CPUFREQ_POLICY_NOTIFIER);
 diff --git a/dit/dit_hal.c b/dit/dit_hal.c
 index 3887a33..221ce58 100644
 --- a/dit/dit_hal.c
@@ -82,7 +179,7 @@ index b64a3c0..d711296 100644
  			dev_get_by_name(&init_net, info->iface);
  		if (dhc->dst_iface[i].netdev)
 diff --git a/link_device.c b/link_device.c
-index 037cb56..80d9052 100644
+index 037cb56..ad8072d 100644
 --- a/link_device.c
 +++ b/link_device.c
 @@ -153,7 +153,7 @@ static void shmem_handle_cp_crash(struct mem_link_device *mld,
@@ -112,6 +209,15 @@ index 037cb56..80d9052 100644
  
  	if (atomic_read(&mld->forced_cp_crash))
  		mif_err("%s<-%s: CP_CRASH_ACK\n", ld->name, mc->name);
+@@ -2546,7 +2546,7 @@ static void sync_net_dev(struct link_device *ld)
+ 	struct mem_link_device *mld = to_mem_link_device(ld);
+ 
+ 	napi_synchronize(&mld->mld_napi);
+-	mif_info("%s\n", netdev_name(&mld->dummy_net));
++	mif_info("%s\n", netdev_name(mld->dummy_net));
+ }
+ 
+ static int link_start_normal_boot(struct link_device *ld, struct io_device *iod)
 @@ -2625,7 +2625,7 @@ static void shmem_close_tx(struct link_device *ld)
  	spin_unlock_irqrestore(&mld->state_lock, flags);
  
@@ -121,6 +227,199 @@ index 037cb56..80d9052 100644
  
  	stop_net_ifaces(ld, 0);
  	purge_txq(mld);
+@@ -3282,7 +3282,7 @@ static ssize_t rx_napi_list_show(struct device *dev,
+ 	ssize_t count = 0;
+ 
+ 	modem = (struct modem_data *)dev->platform_data;
+-	netdev = &modem->mld->dummy_net;
++	netdev = modem->mld->dummy_net;
+ 
+ 	count += scnprintf(&buf[count], PAGE_SIZE - count, "[%s's napi_list]\n",
+ 		netdev_name(netdev));
+@@ -3342,7 +3342,7 @@ static ssize_t rx_poll_count_show(struct device *dev,
+ 	mld = modem->mld;
+ 
+ 	return sysfs_emit(buf, "%s: %d\n",
+-			netdev_name(&mld->dummy_net), mld->rx_poll_count);
++			netdev_name(mld->dummy_net), mld->rx_poll_count);
+ }
+ 
+ static ssize_t rx_poll_count_store(struct device *dev,
+@@ -3868,13 +3868,11 @@ static int init_shmem_maps(u32 link_type, struct modem_data *modem,
+ 	}
+ 
+ 	if (ld->sbd_ipc) {
+-		hrtimer_init(&mld->sbd_tx_timer,
+-				CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-		mld->sbd_tx_timer.function = sbd_tx_timer_func;
++		hrtimer_setup(&mld->sbd_tx_timer, sbd_tx_timer_func,
++			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+-		hrtimer_init(&mld->sbd_print_timer,
+-				CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-		mld->sbd_print_timer.function = sbd_print;
++		hrtimer_setup(&mld->sbd_print_timer, sbd_print,
++			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 		err = create_sbd_link_device(ld,
+ 				&mld->sbd_link_dev, mld->base, mld->size);
+@@ -4162,8 +4160,12 @@ struct link_device *create_link_device(struct platform_device *pdev, u32 link_ty
+ 	if (err)
+ 		goto error;
+ 
+-	init_dummy_netdev(&mld->dummy_net);
+-	netif_napi_add(&mld->dummy_net, &mld->mld_napi, mld_rx_int_poll);
++	mld->dummy_net = alloc_netdev_dummy(0);
++	if (!mld->dummy_net) {
++		err = -ENOMEM;
++		goto error;
++	}
++	netif_napi_add(mld->dummy_net, &mld->mld_napi, mld_rx_int_poll);
+ 	napi_enable(&mld->mld_napi);
+ 
+ 	INIT_LIST_HEAD(&ld->list);
+@@ -4197,8 +4199,7 @@ struct link_device *create_link_device(struct platform_device *pdev, u32 link_ty
+ 	msb_queue_head_init(&mld->msb_rxq);
+ 	msb_queue_head_init(&mld->msb_log);
+ 
+-	hrtimer_init(&mld->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	mld->tx_timer.function = tx_timer_func;
++	hrtimer_setup(&mld->tx_timer, tx_timer_func, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 	INIT_WORK(&mld->page_reclaim_work, bootdump_oom_handler_work);
+ 
+@@ -4324,8 +4325,8 @@ struct link_device *create_link_device(struct platform_device *pdev, u32 link_ty
+ 		mif_err("pktproc_create_ul() error %d\n", err);
+ 		goto error;
+ 	}
+-	hrtimer_init(&mld->pktproc_tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	mld->pktproc_tx_timer.function = pktproc_tx_timer_func;
++	hrtimer_setup(&mld->pktproc_tx_timer, pktproc_tx_timer_func, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_REL);
+ #endif
+ 
+ #if IS_ENABLED(CONFIG_CPIF_TP_MONITOR)
+diff --git a/link_device_memory.h b/link_device_memory.h
+index cf68e35..faa556c 100644
+--- a/link_device_memory.h
++++ b/link_device_memory.h
+@@ -312,7 +312,8 @@ struct mem_link_device {
+ 	struct mutex vmap_lock;
+ 	enum link_state state;
+ 
+-	struct net_device dummy_net;
++	/* 6.11: dummy netdevs must come from alloc_netdev_dummy(), not be embedded */
++	struct net_device *dummy_net;
+ 	struct napi_struct mld_napi;
+ 	unsigned int rx_int_enable;
+ 	unsigned int rx_int_count;
+diff --git a/link_device_pcie_iommu.c b/link_device_pcie_iommu.c
+index a78e60d..4413223 100644
+--- a/link_device_pcie_iommu.c
++++ b/link_device_pcie_iommu.c
+@@ -104,13 +104,20 @@ void cpif_pcie_iommu_reset(struct pktproc_queue *q)
+ 
+ 	/* Initialize */
+ 	pcie_iommu_tlb_invalidate_all(PCIE_CH2HSI(mc->pcie_ch_num));
+-	if (ioc->pf_cache.va) {
+-		__page_frag_cache_drain(virt_to_page(ioc->pf_cache.va),
+-					ioc->pf_cache.pagecnt_bias);
+-	}
++	page_frag_cache_drain(&ioc->pf_cache);	/* no-op if nothing cached */
+ 	memset(&q->ioc, 0, offsetof(struct cpif_pcie_iommu_ctrl, pf_buf));
+ }
+ 
++/*
++ * 6.13 folded page_frag_cache.va into .encoded_page (address | flags | order);
++ * the page's virtual address is the PAGE_MASK part, as mm/'s private
++ * encoded_page_decode_virt() computes it. NULL when nothing is cached.
++ */
++static inline void *cpif_pf_cache_va(const struct page_frag_cache *nc)
++{
++	return (void *)(nc->encoded_page & PAGE_MASK);
++}
++
+ void *cpif_pcie_iommu_map_va(struct pktproc_queue *q, unsigned long src_pa,
+ 			     u32 idx, u32 *map_cnt)
+ {
+@@ -131,7 +138,7 @@ void *cpif_pcie_iommu_map_va(struct pktproc_queue *q, unsigned long src_pa,
+ 
+ 	/* Map the last page */
+ 	*map_cnt = 0;
+-	if (ioc->map_page_va != ioc->pf_cache.va) {
++	if (ioc->map_page_va != cpif_pf_cache_va(&ioc->pf_cache)) {
+ 		unsigned long map_size, tailroom;
+ 		int ret;
+ 
+@@ -166,13 +173,13 @@ void *cpif_pcie_iommu_map_va(struct pktproc_queue *q, unsigned long src_pa,
+ 
+ set_map:
+ 		ioc->map_src_pa = src_pa;
+-		ioc->map_page_va = ioc->pf_cache.va;
++		ioc->map_page_va = cpif_pf_cache_va(&ioc->pf_cache);
+ 		ioc->map_idx = idx;
+ 		ioc->pf_offset = 0;
+ 	}
+ 
+ 	/* Convert an address in accending order */
+-	addr_asc = ioc->pf_cache.va + ioc->pf_offset;
++	addr_asc = cpif_pf_cache_va(&ioc->pf_cache) + ioc->pf_offset;
+ 
+ 	ioc->pf_buf[idx] = addr_asc;
+ 	ioc->pf_offset += pf_size;
+@@ -183,9 +190,7 @@ set_map:
+ 	 * Drain the page frag cache at the last buffer.
+ 	 */
+ 	if (idx == (q->num_desc - 1)) {
+-		__page_frag_cache_drain(virt_to_page(ioc->pf_cache.va),
+-					ioc->pf_cache.pagecnt_bias);
+-		ioc->pf_cache.va = NULL;
++		page_frag_cache_drain(&ioc->pf_cache);
+ 	}
+ 
+ 	return addr_asc;
+diff --git a/link_rx_pktproc.c b/link_rx_pktproc.c
+index dd5e63e..d937b11 100644
+--- a/link_rx_pktproc.c
++++ b/link_rx_pktproc.c
+@@ -2084,8 +2084,12 @@ int pktproc_create(struct platform_device *pdev, struct mem_link_device *mld,
+ 
+ 		/* NAPI */
+ 		if (ppa->use_exclusive_irq) {
+-			init_dummy_netdev(&q->netdev);
+-			netif_napi_add(&q->netdev, &q->napi, pktproc_poll);
++			q->netdev = alloc_netdev_dummy(0);
++			if (!q->netdev) {
++				ret = -ENOMEM;
++				goto create_error;
++			}
++			netif_napi_add(q->netdev, &q->napi, pktproc_poll);
+ 			napi_enable(&q->napi);
+ 			q->napi_ptr = &q->napi;
+ 		} else {
+@@ -2157,6 +2161,8 @@ create_error:
+ 		if (ppa->q[i]->manager)
+ 			cpif_exit_netrx_mng(ppa->q[i]->manager);
+ 
++		if (ppa->q[i]->netdev)
++			free_netdev(ppa->q[i]->netdev);
+ 		kfree(ppa->q[i]->dma_addr);
+ 		kfree(ppa->q[i]);
+ 	}
+diff --git a/link_rx_pktproc.h b/link_rx_pktproc.h
+index 0add65b..038f63b 100644
+--- a/link_rx_pktproc.h
++++ b/link_rx_pktproc.h
+@@ -211,7 +211,8 @@ struct pktproc_queue {
+ #endif
+ 
+ 	/* NAPI */
+-	struct net_device netdev;
++	/* 6.11: dummy netdevs must come from alloc_netdev_dummy(), not be embedded */
++	struct net_device *netdev;
+ 	struct napi_struct napi;
+ 	struct napi_struct *napi_ptr;
+ 
 diff --git a/modem_ctrl_s5000ap.c b/modem_ctrl_s5000ap.c
 index b7270d4..cc75c56 100644
 --- a/modem_ctrl_s5000ap.c
