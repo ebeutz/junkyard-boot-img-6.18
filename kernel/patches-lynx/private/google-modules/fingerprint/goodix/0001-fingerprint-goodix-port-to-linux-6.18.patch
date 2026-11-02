@@ -12,6 +12,27 @@ Files: gw9608/gf_spi.c, gw9608/platform.c
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
 ---
+diff --git a/fps_touch_handler/fps_touch_handler.c b/fps_touch_handler/fps_touch_handler.c
+index ff63d21..d4ed957 100644
+--- a/fps_touch_handler/fps_touch_handler.c
++++ b/fps_touch_handler/fps_touch_handler.c
+@@ -959,7 +959,7 @@ end:
+ 	return rc;
+ }
+ 
+-static int fth_remove(struct platform_device *pdev)
++static void fth_remove(struct platform_device *pdev)
+ {
+ 	struct fth_drvdata *drvdata = platform_get_drvdata(pdev);
+ #if IS_ENABLED(CONFIG_GOOG_TOUCH_INTERFACE)
+@@ -973,7 +973,6 @@ static int fth_remove(struct platform_device *pdev)
+ 	unregister_chrdev_region(drvdata->fth_fd_cdev.dev, 1);
+ 	device_init_wakeup(&pdev->dev, 0);
+ 	input_unregister_handler(&fth_touch_handler);
+-	return 0;
+ }
+ 
+ static const struct of_device_id fth_match[] = {
 diff --git a/gw9608/gf_spi.c b/gw9608/gf_spi.c
 index eb49a7f..ab62ded 100644
 --- a/gw9608/gf_spi.c

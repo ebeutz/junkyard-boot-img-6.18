@@ -25,6 +25,28 @@ index b467607..4b1857f 100644
  		sizeof(core_data->update_ctrl.fw_name));
  
  	ret = goodix_fw_sysfs_init(core_data, &core_data->update_ctrl);
+diff --git a/goodix_ts_core.c b/goodix_ts_core.c
+index 33637fb..5867619 100644
+--- a/goodix_ts_core.c
++++ b/goodix_ts_core.c
+@@ -3137,7 +3137,7 @@ err_out:
+ 	return ret;
+ }
+ 
+-static int goodix_ts_remove(struct platform_device *pdev)
++static void goodix_ts_remove(struct platform_device *pdev)
+ {
+ 	struct goodix_ts_core *core_data = platform_get_drvdata(pdev);
+ 	struct goodix_ts_hw_ops *hw_ops = core_data->hw_ops;
+@@ -3183,8 +3183,6 @@ static int goodix_ts_remove(struct platform_device *pdev)
+ 	goodix_set_pinctrl_state(core_data, PINCTRL_MODE_SUSPEND);
+ 	mutex_destroy(&core_data->gesture_data_lock);
+ 	mutex_destroy(&core_data->cmd_lock);
+-
+-	return 0;
+ }
+ 
+ #if IS_ENABLED(CONFIG_PM)
 diff --git a/goodix_ts_core.h b/goodix_ts_core.h
 index 5a25249..5042b37 100644
 --- a/goodix_ts_core.h

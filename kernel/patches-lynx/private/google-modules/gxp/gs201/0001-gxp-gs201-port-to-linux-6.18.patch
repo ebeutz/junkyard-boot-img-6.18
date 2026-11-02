@@ -2,25 +2,236 @@ From: junkyard
 Subject: [PATCH] gxp/gs201: port to Linux 6.18 (lynx)
 
 Port private/google-modules/gxp/gs201 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
-Mechanical API migrations, no intended behaviour change:
+API migrations. Mostly mechanical; entries that change behaviour say so:
 
   - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - platform_driver.remove_new folded into .remove (6.13)
+  - iommu_paging_domain_alloc(dev) (6.11); iommu_attach_device_pasid() attach handle (6.11)
+  - eventfd_signal() takes only the ctx and returns void (6.8)
+  - IOMMU fault reporting moved to the pixel_iommu registry samsung_iommu.ko
+    exports; page-request faults are no longer reported to this driver
+  - sscd: driver_override applied at registration (6.18, gs_platform_compat.h)
 
-Files: gcip-kernel-driver/drivers/gcip/gcip-iommu.c, gxp-dmabuf.c
+Files: amalthea-platform.c, gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c, gcip-kernel-driver/drivers/gcip/gcip-iommu.c, gcip-kernel-driver/drivers/gcip/gcip-telemetry.c, gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c, gxp-common-platform.c, gxp-core-telemetry.c, gxp-dma-iommu.c, gxp-dmabuf.c, gxp-eventfd.c
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
 ---
+diff --git a/amalthea-platform.c b/amalthea-platform.c
+index e37774d..09630c3 100644
+--- a/amalthea-platform.c
++++ b/amalthea-platform.c
+@@ -45,7 +45,7 @@ MODULE_DEVICE_TABLE(of, gxp_of_match);
+ 
+ static struct platform_driver gxp_platform_driver = {
+ 	.probe = gxp_platform_probe,
+-	.remove_new = gxp_common_platform_remove,
++	.remove = gxp_common_platform_remove, /* 6.13: .remove_new folded into .remove */
+ 	.driver = {
+ 			.name = GXP_DRIVER_NAME,
+ 			.of_match_table = of_match_ptr(gxp_of_match),
+diff --git a/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c b/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c
+index 882aa80..24047e5 100644
+--- a/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c
++++ b/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c
+@@ -39,8 +39,9 @@ int gcip_domain_pool_init(struct device *dev, struct gcip_domain_pool *pool, uns
+ 		return -ENOMEM;
+ 	}
+ 	for (i = 0; i < size; i++) {
+-		domain = iommu_domain_alloc(dev->bus);
+-		if (!domain) {
++		/* 6.11: iommu_domain_alloc(bus) -> iommu_paging_domain_alloc(dev), ERR_PTR */
++		domain = iommu_paging_domain_alloc(dev);
++		if (IS_ERR(domain)) {
+ 			dev_err(pool->dev, "Failed to allocate iommu domain %d of %u\n", i + 1,
+ 				size);
+ 			gcip_domain_pool_destroy(pool);
+@@ -62,8 +63,8 @@ struct iommu_domain *gcip_domain_pool_alloc(struct gcip_domain_pool *pool)
+ 		if (!ddomain)
+ 			return NULL;
+ 
+-		ddomain->domain = iommu_domain_alloc(pool->dev->bus);
+-		if (!ddomain->domain) {
++		ddomain->domain = iommu_paging_domain_alloc(pool->dev);
++		if (IS_ERR(ddomain->domain)) {
+ 			vfree(ddomain);
+ 			return NULL;
+ 		}
 diff --git a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
-index 7b57441..41b4a17 100644
+index 7b57441..1d2a142 100644
 --- a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
 +++ b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
+@@ -754,7 +754,7 @@ static int _gcip_iommu_domain_pool_attach_domain(struct gcip_iommu_domain_pool *
+ 	if (pasid < 0)
+ 		return pasid;
+ 
+-	ret = iommu_attach_device_pasid(domain->domain, pool->dev, pasid);
++	ret = iommu_attach_device_pasid(domain->domain, pool->dev, pasid, NULL); /* 6.11: attach handle */
+ 	if (ret) {
+ 		ida_free(&pool->pasid_pool, pasid);
+ 		return ret;
 @@ -1331,4 +1331,4 @@ void gcip_iommu_unmap(struct gcip_iommu_domain *domain, dma_addr_t iova, size_t
  			 size, unmapped);
  }
  
 -MODULE_IMPORT_NS(DMA_BUF);
 +MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/gcip-kernel-driver/drivers/gcip/gcip-telemetry.c b/gcip-kernel-driver/drivers/gcip/gcip-telemetry.c
+index 9259dd8..34b297d 100644
+--- a/gcip-kernel-driver/drivers/gcip/gcip-telemetry.c
++++ b/gcip-kernel-driver/drivers/gcip/gcip-telemetry.c
+@@ -217,7 +217,7 @@ static void gcip_telemetry_worker(struct work_struct *work)
+ 		if (tel->header->head != tel->header->tail) {
+ 			read_lock_irqsave(&tel->ctx_lock, ctx_lock_flags);
+ 			if (tel->ctx)
+-				eventfd_signal(tel->ctx, 1);
++				eventfd_signal(tel->ctx);
+ 			else
+ 				tel->fallback_fn(tel);
+ 			read_unlock_irqrestore(&tel->ctx_lock, ctx_lock_flags);
+diff --git a/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c b/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c
+index c216028..7c0f8a0 100644
+--- a/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c
++++ b/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c
+@@ -144,7 +144,7 @@ static void all_signaler_submitted(struct iif_fence *fence,
+ 	 */
+ 	if (!waiter->pending_fences && list_empty(&waiter->cb_list) &&
+ 	    !fence->all_signaler_submitted_error)
+-		eventfd_signal(waiter->ctx, 1);
++		eventfd_signal(waiter->ctx);
+ 
+ 	spin_unlock_irqrestore(&waiter->lock, flags);
+ 
+diff --git a/gxp-common-platform.c b/gxp-common-platform.c
+index 6948a33..398cb49 100644
+--- a/gxp-common-platform.c
++++ b/gxp-common-platform.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #if IS_ENABLED(CONFIG_SUBSYSTEM_COREDUMP)
++#include <soc/google/gs_platform_compat.h>
+ #include <linux/platform_data/sscoredump.h>
+ #endif
+ 
+@@ -97,7 +98,7 @@ static void gxp_sscd_release(struct device *dev)
+ 
+ static struct platform_device gxp_sscd_dev = {
+ 	.name = GXP_DRIVER_NAME,
+-	.driver_override = SSCD_NAME,
++	/* 6.18: driver_override lives in struct device; applied at registration */
+ 	.id = -1,
+ 	.dev = {
+ 		.platform_data = &gxp_sscd_pdata,
+@@ -109,7 +110,7 @@ static void gxp_common_platform_reg_sscd(void)
+ {
+ 	/* Registers SSCD platform device */
+ 	if (gxp_debug_dump_is_enabled()) {
+-		if (platform_device_register(&gxp_sscd_dev))
++		if (gs_platform_device_register_override(&gxp_sscd_dev, SSCD_NAME))
+ 			pr_err("Unable to register SSCD platform device\n");
+ 	}
+ }
+diff --git a/gxp-core-telemetry.c b/gxp-core-telemetry.c
+index 870008e..9a2dbe3 100644
+--- a/gxp-core-telemetry.c
++++ b/gxp-core-telemetry.c
+@@ -35,7 +35,7 @@ void gxp_core_telemetry_status_notify(struct gxp_dev *gxp, uint core)
+ 	mutex_lock(&mgr->lock);
+ 
+ 	if (mgr->efd)
+-		eventfd_signal(mgr->efd, 1);
++		eventfd_signal(mgr->efd);
+ 
+ 	mutex_unlock(&mgr->lock);
+ }
+@@ -178,7 +178,8 @@ static int debugfs_log_eventfd_signal_set(void *data, u64 val)
+ 		goto out;
+ 	}
+ 
+-	ret = eventfd_signal(gxp->core_telemetry_mgr->efd, 1);
++	/* 6.8: eventfd_signal() takes only the ctx and returns void */
++	eventfd_signal(gxp->core_telemetry_mgr->efd);
+ 
+ out:
+ 	mutex_unlock(&gxp->core_telemetry_mgr->lock);
+diff --git a/gxp-dma-iommu.c b/gxp-dma-iommu.c
+index 4dfd1eb..08e5d00 100644
+--- a/gxp-dma-iommu.c
++++ b/gxp-dma-iommu.c
+@@ -13,6 +13,8 @@
+ #include <linux/scatterlist.h>
+ #include <linux/slab.h>
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++
+ #include <gcip/gcip-iommu.h>
+ 
+ #include "gxp-config.h"
+@@ -32,31 +34,21 @@ struct gxp_dma_iommu_manager {
+ 
+ /* Fault handler */
+ 
+-static int iommu_fault_handler(struct iommu_fault *fault, void *token)
++/*
++ * 6.8 removed iommu_register_device_fault_handler(); gs201's SysMMU driver
++ * (samsung_iommu.ko) reports unrecoverable faults through the pixel_iommu
++ * registry instead (see pixel-iommu-fault.h). Page requests are not reported
++ * that way, so only the unrecoverable branch survives.
++ */
++static int iommu_fault_handler(struct device *fault_dev, unsigned long iova, u32 pasid,
++			       int fault_flags, void *token)
+ {
+ 	struct device *dev = token;
+ 
+-	switch (fault->type) {
+-	case IOMMU_FAULT_DMA_UNRECOV:
+-		dev_err(dev, "Unrecoverable IOMMU fault!\n");
+-		dev_err(dev, "reason = %08X\n", fault->event.reason);
+-		dev_err(dev, "flags = %08X\n", fault->event.flags);
+-		dev_err(dev, "pasid = %08X\n", fault->event.pasid);
+-		dev_err(dev, "perm = %08X\n", fault->event.perm);
+-		dev_err(dev, "addr = %llX\n", fault->event.addr);
+-		dev_err(dev, "fetch_addr = %llX\n", fault->event.fetch_addr);
+-		break;
+-	case IOMMU_FAULT_PAGE_REQ:
+-		dev_err(dev, "IOMMU page request fault!\n");
+-		dev_err(dev, "flags = %08X\n", fault->prm.flags);
+-		dev_err(dev, "pasid = %08X\n", fault->prm.pasid);
+-		dev_err(dev, "grpid = %08X\n", fault->prm.grpid);
+-		dev_err(dev, "perm = %08X\n", fault->prm.perm);
+-		dev_err(dev, "addr = %llX\n", fault->prm.addr);
+-		break;
+-	default:
+-		dev_err(dev, "Unexpected IOMMU fault type (%d)\n", fault->type);
+-	}
++	dev_err(dev, "Unrecoverable IOMMU fault!\n");
++	dev_err(dev, "flags = %08X\n", fault_flags);
++	dev_err(dev, "pasid = %08X\n", pasid);
++	dev_err(dev, "addr = %lX\n", iova);
+ 
+ 	/* Tells the IOMMU driver to carry on. */
+ 	return -EAGAIN;
+@@ -124,7 +116,7 @@ int gxp_dma_init(struct gxp_dev *gxp)
+ 		return PTR_ERR(mgr->default_domain);
+ 	}
+ 
+-	if (iommu_register_device_fault_handler(gxp->dev, iommu_fault_handler, gxp->dev)) {
++	if (pixel_iommu_register_fault_handler(gxp->dev, iommu_fault_handler, gxp->dev)) {
+ 		dev_err(gxp->dev, "Failed to register iommu fault handler\n");
+ 		return -EIO;
+ 	}
+@@ -136,9 +128,7 @@ int gxp_dma_init(struct gxp_dev *gxp)
+ 
+ void gxp_dma_exit(struct gxp_dev *gxp)
+ {
+-	if (iommu_unregister_device_fault_handler(gxp->dev))
+-		dev_err(gxp->dev,
+-			"Failed to unregister IOMMU fault handler\n");
++	pixel_iommu_unregister_fault_handler(gxp->dev);
+ }
+ 
+ #define EXT_TPU_MBX_SIZE 0x2000
 diff --git a/gxp-dmabuf.c b/gxp-dmabuf.c
 index b88c696..6759871 100644
 --- a/gxp-dmabuf.c
@@ -31,3 +242,16 @@ index b88c696..6759871 100644
  
 -MODULE_IMPORT_NS(DMA_BUF);
 +MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/gxp-eventfd.c b/gxp-eventfd.c
+index a61a7a5..cd670bd 100644
+--- a/gxp-eventfd.c
++++ b/gxp-eventfd.c
+@@ -64,7 +64,7 @@ bool gxp_eventfd_signal(struct gxp_eventfd *eventfd)
+ 
+ 	ret = gxp_eventfd_get(eventfd);
+ 	if (ret)
+-		eventfd_signal(eventfd->ctx, 1);
++		eventfd_signal(eventfd->ctx);
+ 
+ 	gxp_eventfd_put(eventfd);
+ 
