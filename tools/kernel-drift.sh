@@ -116,7 +116,8 @@ say() { printf '  %s\n' "$*" >&2; }
 #     which here would mean a false "already applied"/"clean".
 #   * `git diff --name-only` always prints repo-top-relative paths, so the
 #     patch's own file list is prefixed to match.
-proj_of()     { dirname "${1#kernel/patches/}"; }
+# kernel/patches/<proj>/… or kernel/patches-<device>/<proj>/… -> <proj>
+proj_of()     { dirname "${1#kernel/*/}"; }
 top_of()      { git -C "$SRC/$(proj_of "$1")" rev-parse --show-toplevel 2>/dev/null; }
 prefix_of()   { git -C "$SRC/$(proj_of "$1")" rev-parse --show-prefix 2>/dev/null; }
 patch_files() {
@@ -154,9 +155,9 @@ done
 # --- outer repo: are the patch files themselves uncommitted? -----------------
 # Encodable: the patches are applied into $VERSION_PROJECT, so simply not hiding
 # them yields the -dirty that says "the patch set here is not committed".
-if [ -n "$(git status --porcelain -- kernel/patches 2>/dev/null)" ]; then
+if [ -n "$(git status --porcelain -- kernel/patches 'kernel/patches-*' 2>/dev/null)" ]; then
 	say "DRIFT: kernel/patches has uncommitted changes:"
-	git status --porcelain -- kernel/patches 2>/dev/null | sed 's/^/        /' >&2
+	git status --porcelain -- kernel/patches 'kernel/patches-*' 2>/dev/null | sed 's/^/        /' >&2
 	encodable=1
 fi
 

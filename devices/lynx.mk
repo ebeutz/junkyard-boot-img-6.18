@@ -20,8 +20,12 @@
 #     exists as a config — passing it is a hard bazel error. --defconfig_fragment
 #     still reaches every kernel_build, GKI included, so the built-in (=y) options
 #     in custom_defconfig still land in Image.
-#   * --disable_randstruct: GrapheneOS's build_lynx.sh passes it for this device;
-#     mirrored here so we build what they build.
+#   * NOT --disable_randstruct, although GrapheneOS's build_lynx.sh passes it: the
+#     flag only exists in GrapheneOS's own kleaf fork (github.com/GrapheneOS/
+#     kernel_build), where randstruct is on by default. The aosp_manifest.xml in
+#     this tree pins AOSP kleaf, which has no such flag (bazel rejects it) and
+#     never enables RANDSTRUCT (Kconfig default RANDSTRUCT_NONE, no defconfig sets
+#     it) — i.e. it already builds what --disable_randstruct asks for.
 #   * GrapheneOS's GKI sets CONFIG_MODULE_SIG_FORCE=y, and the vendor modules in the
 #     staging archives are NOT signed with GKI's key (their build_dist.sh re-signs
 #     its flat dist/*.ko after the fact). KERNEL_SIGN_MODULES=1 makes .build_kernel
@@ -31,7 +35,7 @@ KERNEL_REPO_URL     := https://gitlab.com/grapheneos/kernel_pixel_6.18
 KERNEL_BRANCH       := 17-muzel
 BAZEL_CONFIG        := lynx
 BAZEL_TARGET        := //private/devices/google/lynx:lynx/dist
-KERNEL_BAZEL_FLAGS  := --disable_randstruct
+KERNEL_BAZEL_FLAGS  :=
 KERNEL_SIGN_MODULES := 1
 # `just config_kernel`: the device_build() macro names its config rule <device>/kernel_config.
 KERNEL_CONFIG_TARGET := //private/devices/google/lynx:lynx/kernel_config

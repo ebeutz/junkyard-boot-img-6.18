@@ -127,8 +127,17 @@ KERNEL_BUILD_DIR := $(KERNEL_SOURCE_DIR)/out/$(BAZEL_CONFIG)/dist
 KERNEL_STAGING_DIR := $(if $(filter 1,$(KERNEL_SIGN_MODULES)),$(BUILD_DIR)/kernel-staging-signed,$(KERNEL_BUILD_DIR))
 # Extra per-device bazel flags (devices/<device>.mk). felix's 6.1 tree needs
 # --config=use_source_tree_aosp to build GKI from source; GrapheneOS's 6.18 tree
-# always does, has no such config, and wants --disable_randstruct instead.
+# always does and has no such config.
 KERNEL_BAZEL_FLAGS ?=
+# Host-side bazel flags, same for every device. Override on the make command line.
+#
+# Delete each action's sandbox as soon as the action finishes. Bazel's default
+# (=4) only empties its sandbox trash WHILE THE SERVER IS IDLE, and a kernel
+# build is one long non-idle command: the first lynx build piled 420 discarded
+# sandboxes / 12 GB into out/bazel/.../sandbox/_moved_trash_dir before GKI had
+# even linked, and ran a 40 GB build host out of disk mid-compile. The cost of
+# deleting synchronously is a little wall time; the alternative is ENOSPC.
+KERNEL_BAZEL_HOST_FLAGS ?= --experimental_sandbox_async_tree_delete_idle_threads=0
 # Every fragment must say where its kernel comes from — `aosp` (repo manifest
 # branch) or `grapheneos` (monorepo + sync.sh). See clone_kernel_source.
 ifeq ($(filter aosp grapheneos,$(KERNEL_SOURCE_KIND)),)
@@ -459,7 +468,12 @@ $(S_DEBOOT): $(S_CREATE) | $(BUILD_DIR)
 # re-derives them, and they must NOT be applied. Without this exclusion the
 # stage derives a project path of "kernel/source/rejected", which does not
 # exist, and aborts the whole build.
-PATCH_FILES := $(shell find kernel/patches -path kernel/patches/rejected -prune -o -name '*.patch' -print 2>/dev/null | sort)
+#
+# kernel/patches/ applies to EVERY device's tree. kernel/patches-<device>/ (same
+# <repo-project-path>/NNNN-*.patch layout) applies to that device only — for a
+# fix that only makes sense against one kernel, e.g. lynx's 6.18 GKI, which
+# would fail to apply to (and so abort) felix's 6.1 tree.
+PATCH_FILES := $(shell find kernel/patches $(wildcard kernel/patches-$(DEVICE)) -path kernel/patches/rejected -prune -o -name '*.patch' -print 2>/dev/null | sort)
 
 $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 	# Decide whether the patched files may be hidden from git's dirty check.
@@ -495,7 +509,7 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 	case "$$verdict" in \
 	clean) \
 		for p in $(PATCH_FILES); do \
-			rel=$${p#kernel/patches/}; proj=$$(dirname "$$rel"); \
+			rel=$${p#kernel/*/}; proj=$$(dirname "$$rel"); \
 			tgt="$(KERNEL_SOURCE_DIR)/$$proj"; \
 			[ -d "$$tgt" ] || continue; \
 			grep -oE '^\+\+\+ b/[^[:space:]]+' "$$p" | sed 's|^+++ b/||' | while read -r f; do \
@@ -525,7 +539,7 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 	fi; \
 	for p in $(PATCH_FILES); do \
 		abs=$$(readlink -f "$$p"); \
-		rel=$${p#kernel/patches/}; \
+		rel=$${p#kernel/*/}; \
 		proj=$$(dirname "$$rel"); \
 		tgt="$(KERNEL_SOURCE_DIR)/$$proj"; \
 		if [ ! -d "$$tgt" ]; then \
@@ -556,6 +570,7 @@ $(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_de
 		--config=local \
 		--defconfig_fragment=//custom_defconfig_mod:custom_defconfig_$(DEVICE) \
 		$(KERNEL_BAZEL_FLAGS) \
+		$(KERNEL_BAZEL_HOST_FLAGS) \
 		$(BAZEL_TARGET)
 	@echo "Updating kernel version string"
 	# Derive KERNEL_VERSION from the module staging archive, NOT from `strings Image`.
