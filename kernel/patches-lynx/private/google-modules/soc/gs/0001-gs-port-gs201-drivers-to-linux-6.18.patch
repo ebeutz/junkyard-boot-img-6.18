@@ -1,0 +1,5263 @@
+From: junkyard
+Subject: [PATCH] gs: port the gs101/gs201-era SoC drivers to Linux 6.18
+
+TODO: describe
+---
+diff --git a/Kbuild b/Kbuild
+index e8faae6..c2b8d16 100644
+--- a/Kbuild
++++ b/Kbuild
+@@ -4,6 +4,11 @@ subdir-ccflags-y += \
+ 		-I$(src)/include \
+ 		-I$(src)/include/uapi \
+ 
++# junkyard (lynx, 6.18): much of the gs101/gs201-era code here predates
++# -Wmissing-prototypes being on by default (6.8) and CONFIG_WERROR. Keep the
++# warning, don't fail the build on it.
++subdir-ccflags-y += -Wno-error=missing-prototypes
++
+ obj-y += drivers/phy/
+ 
+ obj-y += drivers/pinctrl/
+diff --git a/drivers/bts/exynos-bts.c b/drivers/bts/exynos-bts.c
+index 6ad921e..6bb6ad5 100644
+--- a/drivers/bts/exynos-bts.c
++++ b/drivers/bts/exynos-bts.c
+@@ -2117,12 +2117,10 @@ static int bts_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int bts_remove(struct platform_device *pdev)
++static void bts_remove(struct platform_device *pdev)
+ {
+ 	devm_kfree(&pdev->dev, btsdev);
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ /* Device tree compatible information */
+diff --git a/drivers/clk/gs/clk-gs201.c b/drivers/clk/gs/clk-gs201.c
+index 2e17bc9..5a87915 100644
+--- a/drivers/clk/gs/clk-gs201.c
++++ b/drivers/clk/gs/clk-gs201.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2019-2021 Google LLC
+  */
+ 
++#include <linux/platform_device.h>
+ #include <linux/clk.h>
+ #include <linux/clkdev.h>
+ #include <linux/clk-provider.h>
+diff --git a/drivers/cpufreq/exynos-acme.c b/drivers/cpufreq/exynos-acme.c
+index 88890a6..ff3ce37 100644
+--- a/drivers/cpufreq/exynos-acme.c
++++ b/drivers/cpufreq/exynos-acme.c
+@@ -206,7 +206,7 @@ static void apply_thermal_pressure(struct exynos_cpufreq_domain *domain,
+ 	spin_lock(&domain->thermal_update_lock);
+ 	domain->capped_freq[thermal_actor] = capped_freq;
+ 	arch_capped_freq = min(domain->capped_freq[TJ], domain->capped_freq[TSKIN]);
+-	arch_update_thermal_pressure(maskp, arch_capped_freq);
++	arch_update_hw_pressure(maskp, arch_capped_freq);	/* 6.10 rename */
+ 	spin_unlock(&domain->thermal_update_lock);
+ 
+ 	if (unlikely(trace_clock_set_rate_enabled()))
+@@ -365,7 +365,8 @@ static int exynos_cpufreq_verify(struct cpufreq_policy_data *new_policy)
+ 				 domain->min_freq_qos,
+ 				 domain->max_freq_qos);
+ 
+-	ret = cpufreq_frequency_table_verify(new_policy, domain->freq_table);
++	/* 6.18 takes the table from the policy; it is domain->freq_table (see init) */
++	ret = cpufreq_frequency_table_verify(new_policy);
+ 	if (!ret)
+ 		apply_thermal_pressure(domain, new_policy->max, TSKIN);
+ 
+@@ -548,7 +549,7 @@ static struct cpufreq_driver exynos_driver = {
+ 	.offline	= exynos_cpufreq_offline,
+ 	.suspend	= exynos_cpufreq_suspend,
+ 	.resume		= exynos_cpufreq_resume,
+-	.attr		= cpufreq_generic_attr,
++	/* .attr = cpufreq_generic_attr is gone; the core adds those for freq_table drivers */
+ };
+ 
+ /*********************************************************************
+@@ -922,7 +923,8 @@ static int dm_scaler(int dm_type, void *devdata, unsigned int target_freq,
+ 	}
+ 
+ 
+-	target_index = cpufreq_frequency_table_target(policy, target_freq, relation);
++	target_index = cpufreq_frequency_table_target(policy, target_freq, policy->min,
++						      policy->max, relation);
+ 	target_freq = policy->freq_table[target_index].frequency;
+ 	ret = __exynos_cpufreq_target(policy, target_freq);
+ 
+diff --git a/drivers/devfreq-whi/google/governor_memlat_trace.h b/drivers/devfreq-whi/google/governor_memlat_trace.h
+index 99517b1..56c0691 100644
+--- a/drivers/devfreq-whi/google/governor_memlat_trace.h
++++ b/drivers/devfreq-whi/google/governor_memlat_trace.h
+@@ -31,7 +31,7 @@ TRACE_EVENT(memlat_dev_meas,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->dev_id = dev_id;
+ 		__entry->inst = inst;
+ 		__entry->mem = mem;
+@@ -67,7 +67,7 @@ TRACE_EVENT(memlat_dev_update,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->dev_id = dev_id;
+ 		__entry->inst = inst;
+ 		__entry->mem = mem;
+diff --git a/drivers/devfreq-whi/google/governor_simpleinteractive.c b/drivers/devfreq-whi/google/governor_simpleinteractive.c
+index ef92e0b..95699ea 100644
+--- a/drivers/devfreq-whi/google/governor_simpleinteractive.c
++++ b/drivers/devfreq-whi/google/governor_simpleinteractive.c
+@@ -295,7 +295,7 @@ static int devfreq_simple_interactive_func(struct devfreq *df,
+ 
+ 		goto out;
+ 	} else if (timer_pending(&data->freq_timer)) {
+-		del_timer_sync(&data->freq_timer);
++		timer_delete_sync(&data->freq_timer);
+ 	}
+ 
+ 	data->changed_time = jiffies;
+@@ -311,24 +311,24 @@ out:
+ 	if (df->profile->get_dev_status && !exynos_df->suspend_flag) {
+ 		unsigned long expires = jiffies;
+ 
+-		del_timer(&data->freq_timer);
++		timer_delete(&data->freq_timer);
+ 		data->freq_timer.expires = expires +
+ 			msecs_to_jiffies(data->alt_data.min_sample_time * 2);
+ 		add_timer_on(&data->freq_timer, BOUND_CPU_NUM);
+ 
+ 		if (*freq > exynos_df->min_freq) {
+ 			/* timer is bound to cpu0 */
+-			del_timer(&data->freq_slack_timer);
++			timer_delete(&data->freq_slack_timer);
+ 			data->freq_slack_timer.expires = expires +
+ 				  msecs_to_jiffies(data->alt_data.hold_sample_time);
+ 			add_timer_on(&data->freq_slack_timer, BOUND_CPU_NUM);
+ 		} else if (timer_pending(&data->freq_slack_timer)) {
+-			del_timer(&data->freq_slack_timer);
++			timer_delete(&data->freq_slack_timer);
+ 		}
+ 
+ 	} else if (exynos_df->suspend_flag) {
+-		del_timer_sync(&data->freq_timer);
+-		del_timer(&data->freq_slack_timer);
++		timer_delete_sync(&data->freq_timer);
++		timer_delete(&data->freq_slack_timer);
+ 	}
+ #endif
+ 
+@@ -363,7 +363,7 @@ static void alt_dvfs_nop_timer(struct timer_list *timer)
+ /*timer callback function send a signal */
+ static void simple_interactive_timer(struct timer_list *timer)
+ {
+-	struct devfreq_simple_interactive_data *gov_data = from_timer(gov_data, timer, freq_timer);
++	struct devfreq_simple_interactive_data *gov_data = timer_container_of(gov_data, timer, freq_timer);
+ 
+ 	wake_up_process(gov_data->change_freq_task);
+ }
+@@ -436,9 +436,9 @@ static int devfreq_simple_interactive_register_notifier(struct devfreq *df)
+ 	return 0;
+ 
+ err3:
+-	destroy_timer_on_stack(&data->freq_timer);
++	timer_destroy_on_stack(&data->freq_timer);
+ #if IS_ENABLED(CONFIG_EXYNOS_ALT_DVFS)
+-	destroy_timer_on_stack(&data->freq_slack_timer);
++	timer_destroy_on_stack(&data->freq_slack_timer);
+ #endif
+ 	exynos_pm_qos_remove_notifier(data->pm_qos_class, &data->nb.nb);
+ 	if (data->pm_qos_class_max)
+@@ -470,7 +470,7 @@ static int devfreq_simple_interactive_unregister_notifier(struct devfreq *df)
+ 
+ 	ret = exynos_pm_qos_remove_notifier(data->pm_qos_class, &data->nb.nb);
+ 
+-	destroy_timer_on_stack(&data->freq_timer);
++	timer_destroy_on_stack(&data->freq_timer);
+ 	kthread_stop(data->change_freq_task);
+ 
+ err:
+diff --git a/drivers/devfreq-whi/google/gs-devfreq.c b/drivers/devfreq-whi/google/gs-devfreq.c
+index f5e561b..484ebe6 100644
+--- a/drivers/devfreq-whi/google/gs-devfreq.c
++++ b/drivers/devfreq-whi/google/gs-devfreq.c
+@@ -1444,8 +1444,13 @@ static int exynos_devfreq_parse_dt(struct device_node *np,
+ 		data->update_fvp = false;
+ 	}
+ 
++	/*
++	 * Was of_property_match_string(np, "clock-names", buf) with buf still
++	 * uninitialized (clang now rejects it). Every gs201 node has dfs_id, so
++	 * it was never reached; keep the evident intent: no dfs_id and no clocks.
++	 */
+ 	if (of_property_read_u32(np, "dfs_id", &data->dfs_id) &&
+-	    of_property_match_string(np, "clock-names", buf))
++	    !of_property_present(np, "clock-names"))
+ 		return -ENODEV;
+ 
+ 	if (!of_property_read_string(np, "use_get_dev", &use_get_dev)) {
+@@ -2481,7 +2486,7 @@ err_data:
+ 	return ret;
+ }
+ 
+-static int exynos_devfreq_remove(struct platform_device *pdev)
++static void exynos_devfreq_remove(struct platform_device *pdev)
+ {
+ 	struct exynos_devfreq_data *data = platform_get_drvdata(pdev);
+ #if IS_ENABLED(CONFIG_EXYNOS_DVFS_MANAGER)
+@@ -2523,8 +2528,6 @@ static int exynos_devfreq_remove(struct platform_device *pdev)
+ 	kfree(data->devfreq_profile.freq_table);
+ 	mutex_destroy(&data->lock);
+ 	kfree(data);
+-
+-	return 0;
+ }
+ 
+ static struct platform_device_id exynos_devfreq_driver_ids[] = {
+diff --git a/drivers/devfreq/google/governor_dsulat_trace.h b/drivers/devfreq/google/governor_dsulat_trace.h
+index bb43dfd..3fc51c8 100644
+--- a/drivers/devfreq/google/governor_dsulat_trace.h
++++ b/drivers/devfreq/google/governor_dsulat_trace.h
+@@ -35,7 +35,7 @@ TRACE_EVENT(dsulat_dev_meas,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->dev_id = dev_id;
+ 		__entry->inst = inst;
+ 		__entry->l2_cachemiss = l2_cachemiss;
+@@ -84,7 +84,7 @@ TRACE_EVENT(dsulat_dev_update,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->dev_id = dev_id;
+ 		__entry->latency_mode = latency_mode;
+ 		__entry->inst = inst;
+diff --git a/drivers/devfreq/google/governor_memlat_trace.h b/drivers/devfreq/google/governor_memlat_trace.h
+index 8a040e6..3fa76a8 100644
+--- a/drivers/devfreq/google/governor_memlat_trace.h
++++ b/drivers/devfreq/google/governor_memlat_trace.h
+@@ -33,7 +33,7 @@ TRACE_EVENT(memlat_dev_meas,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->dev_id = dev_id;
+ 		__entry->inst = inst;
+ 		__entry->mem = mem;
+@@ -76,7 +76,7 @@ TRACE_EVENT(memlat_dev_update,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->dev_id = dev_id;
+ 		__entry->inst = inst;
+ 		__entry->mem = mem;
+diff --git a/drivers/devfreq/google/governor_simpleinteractive.c b/drivers/devfreq/google/governor_simpleinteractive.c
+index 6dce1f0..3f05d2b 100644
+--- a/drivers/devfreq/google/governor_simpleinteractive.c
++++ b/drivers/devfreq/google/governor_simpleinteractive.c
+@@ -305,7 +305,7 @@ static int devfreq_simple_interactive_func(struct devfreq *df,
+ 
+ 		goto out;
+ 	} else if (timer_pending(&data->freq_timer)) {
+-		del_timer_sync(&data->freq_timer);
++		timer_delete_sync(&data->freq_timer);
+ 	}
+ 
+ 	data->changed_time = jiffies;
+@@ -328,7 +328,7 @@ out:
+ 		 * AND there is no timer and we need to reporgram one.)
+ 		 */
+ 		if (data->df_update_enable || !timer_pending(&data->freq_timer)) {
+-			del_timer(&data->freq_timer);
++			timer_delete(&data->freq_timer);
+ 			data->freq_timer.expires = expires +
+ 				msecs_to_jiffies(data->alt_data.min_sample_time * 2);
+ 			add_timer_on(&data->freq_timer, BOUND_CPU_NUM);
+@@ -336,17 +336,17 @@ out:
+ 
+ 		if (*freq > exynos_df->min_freq) {
+ 			/* timer is bound to cpu0 */
+-			del_timer(&data->freq_slack_timer);
++			timer_delete(&data->freq_slack_timer);
+ 			data->freq_slack_timer.expires = expires +
+ 				  msecs_to_jiffies(data->alt_data.hold_sample_time);
+ 			add_timer_on(&data->freq_slack_timer, BOUND_CPU_NUM);
+ 		} else if (timer_pending(&data->freq_slack_timer)) {
+-			del_timer(&data->freq_slack_timer);
++			timer_delete(&data->freq_slack_timer);
+ 		}
+ 
+ 	} else if (exynos_df->suspend_flag) {
+-		del_timer_sync(&data->freq_timer);
+-		del_timer(&data->freq_slack_timer);
++		timer_delete_sync(&data->freq_timer);
++		timer_delete(&data->freq_slack_timer);
+ 	}
+ #endif
+ 
+@@ -384,7 +384,7 @@ static void alt_dvfs_nop_timer(struct timer_list *timer)
+ /*timer callback function send a signal */
+ static void simple_interactive_timer(struct timer_list *timer)
+ {
+-	struct devfreq_simple_interactive_data *gov_data = from_timer(gov_data, timer, freq_timer);
++	struct devfreq_simple_interactive_data *gov_data = timer_container_of(gov_data, timer, freq_timer);
+ 
+ 	wake_up_process(gov_data->change_freq_task);
+ }
+@@ -457,9 +457,9 @@ static int devfreq_simple_interactive_register_notifier(struct devfreq *df)
+ 	return 0;
+ 
+ err3:
+-	destroy_timer_on_stack(&data->freq_timer);
++	timer_destroy_on_stack(&data->freq_timer);
+ #if IS_ENABLED(CONFIG_EXYNOS_ALT_DVFS)
+-	destroy_timer_on_stack(&data->freq_slack_timer);
++	timer_destroy_on_stack(&data->freq_slack_timer);
+ #endif
+ 	exynos_pm_qos_remove_notifier(data->pm_qos_class, &data->nb.nb);
+ 	if (data->pm_qos_class_max)
+@@ -491,7 +491,7 @@ static int devfreq_simple_interactive_unregister_notifier(struct devfreq *df)
+ 
+ 	ret = exynos_pm_qos_remove_notifier(data->pm_qos_class, &data->nb.nb);
+ 
+-	destroy_timer_on_stack(&data->freq_timer);
++	timer_destroy_on_stack(&data->freq_timer);
+ 	kthread_stop(data->change_freq_task);
+ 
+ err:
+diff --git a/drivers/dma/pl330.c b/drivers/dma/pl330.c
+index 0350c5a..6ee4bdd 100644
+--- a/drivers/dma/pl330.c
++++ b/drivers/dma/pl330.c
+@@ -26,7 +26,7 @@
+ #include <linux/bug.h>
+ #include <linux/cpumask.h>
+ #include <linux/of_address.h>
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ 
+ #include "dmaengine.h"
+ 
+@@ -3541,9 +3541,8 @@ pl330_probe(struct amba_device *adev, const struct amba_id *id)
+ 	 * This is the limit for transfers with a buswidth of 1, larger
+ 	 * buswidths will have larger limits.
+ 	 */
+-	ret = dma_set_max_seg_size(&adev->dev, 1900800);
+-	if (ret)
+-		dev_err(&adev->dev, "unable to set the seg size\n");
++	/* 6.18: dma_set_max_seg_size() returns void (it can only fail on a NULL dma_parms) */
++	dma_set_max_seg_size(&adev->dev, 1900800);
+ 
+ 
+ 	dev_info(&adev->dev,
+diff --git a/drivers/gpu/exynos/g2d/g2d_debug.c b/drivers/gpu/exynos/g2d/g2d_debug.c
+index 53b3e8c..3a00486 100644
+--- a/drivers/gpu/exynos/g2d/g2d_debug.c
++++ b/drivers/gpu/exynos/g2d/g2d_debug.c
+@@ -567,7 +567,7 @@ void g2d_stamp_task(struct g2d_task *task, u32 stampid, u64 val)
+ 	if (g2d_stamp_types[stampid].type == G2D_STAMPTYPE_FENCE) {
+ 		struct dma_fence *fence = (struct dma_fence *)val;
+ 
+-		strlcpy(stamp->fence.name, fence->ops->get_driver_name(fence),
++		strscpy(stamp->fence.name, fence->ops->get_driver_name(fence),
+ 			sizeof(stamp->fence.name));
+ 		stamp->fence.seqno = fence->seqno;
+ 	} else {
+diff --git a/drivers/gpu/exynos/g2d/g2d_drv.c b/drivers/gpu/exynos/g2d/g2d_drv.c
+index bb2b5cb..2611560 100644
+--- a/drivers/gpu/exynos/g2d/g2d_drv.c
++++ b/drivers/gpu/exynos/g2d/g2d_drv.c
+@@ -5,6 +5,7 @@
+  * Contact: Hyesoo Yu <hyesoo.yu@samsung.com>
+  */
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/iommu.h>
+@@ -64,7 +65,7 @@ static int g2d_update_priority(struct g2d_context *ctx, enum g2d_priority priori
+ 
+ void g2d_hw_timeout_handler(struct timer_list *arg)
+ {
+-	struct g2d_task *task = from_timer(task, arg, hw_timer);
++	struct g2d_task *task = timer_container_of(task, arg, hw_timer);
+ 	struct g2d_device *g2d_dev = task->g2d_dev;
+ 	unsigned long flags;
+ 	u32 state;
+@@ -175,7 +176,9 @@ static irqreturn_t g2d_irq_handler(int irq, void *priv)
+ 	return IRQ_HANDLED;
+ }
+ 
+-static int g2d_fault_handler(struct iommu_fault *fault, void *data)
++/* 6.8 removed iommu_register_device_fault_handler(); see pixel-iommu-fault.h */
++static int g2d_fault_handler(struct device *fault_dev, unsigned long iova, u32 pasid,
++			     int fault_flags, void *data)
+ {
+ 	struct g2d_device *g2d_dev = data;
+ 	struct g2d_task *task;
+@@ -843,7 +846,7 @@ static int g2d_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	/* it is okay if fault handler is not registered since it is just for debugging */
+-	ret = iommu_register_device_fault_handler(&pdev->dev, g2d_fault_handler, g2d_dev);
++	ret = pixel_iommu_register_fault_handler(&pdev->dev, g2d_fault_handler, g2d_dev);
+ 	if (ret)
+ 		perrdev(g2d_dev, "Failed to register IOMMU fault handler (%d)", ret);
+ 
+@@ -949,7 +952,7 @@ err_misc:
+ err:
+ 	pm_runtime_disable(&pdev->dev);
+ err_dt:
+-	iommu_unregister_device_fault_handler(&pdev->dev);
++	pixel_iommu_unregister_fault_handler(&pdev->dev);
+ 
+ 	perrdev(g2d_dev, "Failed to probe FIMG2D");
+ 
+@@ -968,7 +971,7 @@ static void g2d_shutdown(struct platform_device *pdev)
+ 	g2d_stamp_task(NULL, G2D_STAMP_STATE_SHUTDOWN, 1);
+ }
+ 
+-static int g2d_remove(struct platform_device *pdev)
++static void g2d_remove(struct platform_device *pdev)
+ {
+ 	struct g2d_device *g2d_dev = platform_get_drvdata(pdev);
+ 
+@@ -982,8 +985,6 @@ static int g2d_remove(struct platform_device *pdev)
+ 	misc_deregister(&g2d_dev->misc[1]);
+ 
+ 	pm_runtime_disable(&pdev->dev);
+-
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM
+@@ -1030,4 +1031,4 @@ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Cho KyongHo <pullip.cho@samsung.com>");
+ MODULE_AUTHOR("Hyesoo Yu <hyesoo.yu@samsung.com>");
+ MODULE_DESCRIPTION("Exynos FIMG2D device driver");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/drivers/gpu/exynos/g2d/g2d_fence.c b/drivers/gpu/exynos/g2d/g2d_fence.c
+index 41f1512..2307883 100644
+--- a/drivers/gpu/exynos/g2d/g2d_fence.c
++++ b/drivers/gpu/exynos/g2d/g2d_fence.c
+@@ -17,7 +17,7 @@
+ 
+ void g2d_fence_timeout_handler(struct timer_list *arg)
+ {
+-	struct g2d_task *task = from_timer(task, arg, fence_timer);
++	struct g2d_task *task = timer_container_of(task, arg, fence_timer);
+ 	struct g2d_device *g2d_dev = task->g2d_dev;
+ 	struct dma_fence *fence;
+ 	unsigned long flags;
+@@ -28,7 +28,7 @@ void g2d_fence_timeout_handler(struct timer_list *arg)
+ 	for (i = 0; i < task->num_source; i++) {
+ 		fence = task->source[i].fence;
+ 		if (fence) {
+-			strlcpy(name, fence->ops->get_driver_name(fence), sizeof(name));
++			strscpy(name, fence->ops->get_driver_name(fence), sizeof(name));
+ 			perrfndev(g2d_dev, " SOURCE[%d]:  %s #%llu (%s)", i, name, fence->seqno,
+ 				  dma_fence_is_signaled(fence) ? "signaled" : "active");
+ 		}
+@@ -36,7 +36,7 @@ void g2d_fence_timeout_handler(struct timer_list *arg)
+ 
+ 	fence = task->target.fence;
+ 	if (fence) {
+-		strlcpy(name, fence->ops->get_driver_name(fence), sizeof(name));
++		strscpy(name, fence->ops->get_driver_name(fence), sizeof(name));
+ 		perrfn(" TARGET:     %s #%llu (%s)", name, fence->seqno,
+ 		       dma_fence_is_signaled(fence) ? "signaled" : "active");
+ 	}
+@@ -126,7 +126,7 @@ static void g2d_fence_release(struct dma_fence *fence)
+ 	kfree(fence);
+ }
+ 
+-static void g2d_fence_value_str(struct dma_fence *fence, char *str, int size)
++static void __maybe_unused g2d_fence_value_str(struct dma_fence *fence, char *str, int size)
+ {
+ 	snprintf(str, size, "%llu", fence->seqno);
+ }
+@@ -137,7 +137,7 @@ static struct dma_fence_ops g2d_fence_ops = {
+ 	.enable_signaling =	g2d_fence_enable_signaling,
+ 	.wait =			dma_fence_default_wait,
+ 	.release =		g2d_fence_release,
+-	.fence_value_str =	g2d_fence_value_str,
++	/* .fence_value_str was removed from dma_fence_ops */
+ };
+ 
+ struct sync_file *g2d_create_release_fence(struct g2d_device *g2d_dev,
+@@ -240,7 +240,7 @@ static bool g2d_fence_has_error(struct g2d_layer *layer, int layer_idx)
+ 	if (err) {
+ 		char name[32];
+ 
+-		strlcpy(name, fence->ops->get_driver_name(fence), sizeof(name));
++		strscpy(name, fence->ops->get_driver_name(fence), sizeof(name));
+ 
+ 		dev_err(layer->task->g2d_dev->dev,
+ 			"%s: Error fence of %s%d found: %s#%llu\n", __func__,
+diff --git a/drivers/gpu/exynos/g2d/g2d_task.c b/drivers/gpu/exynos/g2d/g2d_task.c
+index e3a6df3..c5f38e1 100644
+--- a/drivers/gpu/exynos/g2d/g2d_task.c
++++ b/drivers/gpu/exynos/g2d/g2d_task.c
+@@ -105,7 +105,7 @@ static void g2d_finish_task(struct g2d_device *g2d_dev,
+ 
+ 	task->ktime_end = ktime_get();
+ 
+-	del_timer(&task->hw_timer);
++	timer_delete(&task->hw_timer);
+ 
+ 	g2d_stamp_task(task, G2D_STAMP_STATE_DONE,
+ 		       (int)ktime_us_delta(task->ktime_end, task->ktime_begin));
+@@ -192,7 +192,7 @@ static void g2d_schedule_task(struct g2d_task *task)
+ 	unsigned long flags;
+ 	int ret;
+ 
+-	del_timer(&task->fence_timer);
++	timer_delete(&task->fence_timer);
+ 
+ 	if (g2d_task_has_error_fence(task))
+ 		goto err_fence;
+diff --git a/drivers/gpu/exynos/g2d/g2d_trace.h b/drivers/gpu/exynos/g2d/g2d_trace.h
+index 16bc0a2..051c305 100644
+--- a/drivers/gpu/exynos/g2d/g2d_trace.h
++++ b/drivers/gpu/exynos/g2d/g2d_trace.h
+@@ -41,7 +41,7 @@ TRACE_EVENT(tracing_mark_write,
+ 	TP_fast_assign(
+ 		__entry->type = type;
+ 		__entry->pid = pid;
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->value = value;
+ 	),
+ 	TP_printk("%c|%d|%s|%d",
+diff --git a/drivers/i2c/busses/i2c-acpm.c b/drivers/i2c/busses/i2c-acpm.c
+index 6729226..d5ea60a 100644
+--- a/drivers/i2c/busses/i2c-acpm.c
++++ b/drivers/i2c/busses/i2c-acpm.c
+@@ -62,12 +62,12 @@ static int acpm_mfd_bus_probe(struct platform_device *pdev)
+ 	if (!acpm_mfd_bus)
+ 		return -ENOMEM;
+ 
+-	strlcpy(acpm_mfd_bus->adap.name, "i2c-acpm",
++	strscpy(acpm_mfd_bus->adap.name, "i2c-acpm",
+ 		sizeof(acpm_mfd_bus->adap.name));
+ 	acpm_mfd_bus->adap.owner   = THIS_MODULE;
+ 	acpm_mfd_bus->adap.algo    = &acpm_mfd_bus_algorithm;
+ 	acpm_mfd_bus->adap.retries = 2;
+-	acpm_mfd_bus->adap.class   = I2C_CLASS_HWMON | I2C_CLASS_SPD;
++	acpm_mfd_bus->adap.class   = I2C_CLASS_HWMON;
+ 
+ 	acpm_mfd_bus->dev = &pdev->dev;
+ 
+diff --git a/drivers/i2c/busses/i2c-exynos5.c b/drivers/i2c/busses/i2c-exynos5.c
+index 8cccc63..543844d 100644
+--- a/drivers/i2c/busses/i2c-exynos5.c
++++ b/drivers/i2c/busses/i2c-exynos5.c
+@@ -1273,11 +1273,11 @@ static int exynos5_i2c_probe(struct platform_device *pdev)
+ 
+ 	i2c->idle_ip_index = exynos_get_idle_ip_index(dev_name(&pdev->dev));
+ 
+-	strlcpy(i2c->adap.name, "exynos5-i2c", sizeof(i2c->adap.name));
++	strscpy(i2c->adap.name, "exynos5-i2c", sizeof(i2c->adap.name));
+ 	i2c->adap.owner   = THIS_MODULE;
+ 	i2c->adap.algo    = &exynos5_i2c_algorithm;
+ 	i2c->adap.retries = 2;
+-	i2c->adap.class   = I2C_CLASS_HWMON | I2C_CLASS_SPD;
++	i2c->adap.class   = I2C_CLASS_HWMON;
+ 
+ 	i2c->dev = &pdev->dev;
+ 	i2c->clk = devm_clk_get(&pdev->dev, "gate_hsi2c_clk");
+@@ -1389,15 +1389,13 @@ static int exynos5_i2c_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int exynos5_i2c_remove(struct platform_device *pdev)
++static void exynos5_i2c_remove(struct platform_device *pdev)
+ {
+ 	struct exynos5_i2c *i2c = platform_get_drvdata(pdev);
+ 
+ 	i2c_del_adapter(&i2c->adap);
+ 
+ 	clk_unprepare(i2c->clk);
+-
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM
+diff --git a/drivers/iio/power/odpm-whi.c b/drivers/iio/power/odpm-whi.c
+index c593f71..356d9aa 100644
+--- a/drivers/iio/power/odpm-whi.c
++++ b/drivers/iio/power/odpm-whi.c
+@@ -369,7 +369,7 @@ int odpm_configure_start_measurement(struct odpm_info *info)
+ 	return ret;
+ }
+ 
+-static enum alarmtimer_restart odpm_alarm_handler(struct alarm *alarm, ktime_t time)
++static void odpm_alarm_handler(struct alarm *alarm, ktime_t time)
+ {
+ 	struct odpm_info *info =
+ 		container_of(alarm, struct odpm_info, alarmtimer_refresh);
+@@ -380,8 +380,6 @@ static enum alarmtimer_restart odpm_alarm_handler(struct alarm *alarm, ktime_t t
+ 	queue_work(info->work_queue, &info->work_refresh);
+ 	alarm_start_relative(&info->alarmtimer_refresh,
+ 			     ms_to_ktime(info->chip.max_refresh_time_ms));
+-
+-	return ALARMTIMER_NORESTART;
+ }
+ 
+ static void odpm_periodic_refresh_work(struct work_struct *work)
+@@ -1771,7 +1769,7 @@ static const struct iio_info odpm_iio_info = {
+ 	.write_raw = odpm_write_raw,
+ };
+ 
+-static int odpm_remove(struct platform_device *pdev)
++static void odpm_remove(struct platform_device *pdev)
+ {
+ 	struct iio_dev *indio_dev = dev_get_drvdata(&pdev->dev);
+ 	struct odpm_info *info = iio_priv(indio_dev);
+@@ -1780,7 +1778,7 @@ static int odpm_remove(struct platform_device *pdev)
+ 	ret = alarm_cancel(&info->alarmtimer_refresh);
+ 	if (ret < 0) {
+ 		pr_err("odpm: cannot delete the refresh timer\n");
+-		return ret;
++		return;
+ 	}
+ 	if (info->work_queue) {
+ 		cancel_work_sync(&info->work_refresh);
+@@ -1795,8 +1793,6 @@ static int odpm_remove(struct platform_device *pdev)
+ 
+ 	if (info->ws)
+ 		wakeup_source_unregister(info->ws);
+-
+-	return ret;
+ }
+ 
+ static void odpm_probe_init_device_specific(struct odpm_info *info, int id)
+diff --git a/drivers/input/keyboard/s2mpg12-key.c b/drivers/input/keyboard/s2mpg12-key.c
+index 369089d..d7b1d74 100644
+--- a/drivers/input/keyboard/s2mpg12-key.c
++++ b/drivers/input/keyboard/s2mpg12-key.c
+@@ -458,7 +458,7 @@ fail1:
+ 	return ret;
+ }
+ 
+-static int power_keys_remove(struct platform_device *pdev)
++static void power_keys_remove(struct platform_device *pdev)
+ {
+ 	struct power_keys_drvdata *ddata = platform_get_drvdata(pdev);
+ 	struct input_dev *input = ddata->input;
+@@ -476,8 +476,6 @@ static int power_keys_remove(struct platform_device *pdev)
+ 	}
+ 
+ 	input_unregister_device(input);
+-
+-	return 0;
+ }
+ 
+ #if IS_ENABLED(CONFIG_PM_SLEEP)
+diff --git a/drivers/input/misc/vl53l1/stmvl53l1_module.c b/drivers/input/misc/vl53l1/stmvl53l1_module.c
+index df57589..0577fa2 100644
+--- a/drivers/input/misc/vl53l1/stmvl53l1_module.c
++++ b/drivers/input/misc/vl53l1/stmvl53l1_module.c
+@@ -2198,7 +2198,7 @@ static struct attribute *stmvl53l1_attributes[] = {
+ };
+ 
+ static ssize_t calibration_data_read(struct file *filp,
+-	struct kobject *kobj, struct bin_attribute *attr,
++	struct kobject *kobj, const struct bin_attribute *attr,
+ 	char *buf, loff_t off, size_t count)
+ {
+ 	struct device *dev = container_of(kobj, struct device, kobj);
+@@ -2244,7 +2244,7 @@ error:
+ }
+ 
+ static ssize_t calibration_data_write(struct file *filp,
+-	struct kobject *kobj, struct bin_attribute *attr,
++	struct kobject *kobj, const struct bin_attribute *attr,
+ 	char *buf, loff_t off, size_t count)
+ {
+ 	struct device *dev = container_of(kobj, struct device, kobj);
+@@ -2291,7 +2291,7 @@ error:
+ static BIN_ATTR_RW(calibration_data, sizeof(struct VL53L1_CalibrationData_t));
+ 
+ static ssize_t zone_calibration_data_read(struct file *filp,
+-	struct kobject *kobj, struct bin_attribute *attr,
++	struct kobject *kobj, const struct bin_attribute *attr,
+ 	char *buf, loff_t off, size_t count)
+ {
+ 	struct device *dev = container_of(kobj, struct device, kobj);
+@@ -2337,7 +2337,7 @@ error:
+ }
+ 
+ static ssize_t zone_calibration_data_write(struct file *filp,
+-	struct kobject *kobj, struct bin_attribute *attr,
++	struct kobject *kobj, const struct bin_attribute *attr,
+ 	char *buf, loff_t off, size_t count)
+ {
+ 	struct device *dev = container_of(kobj, struct device, kobj);
+@@ -2388,7 +2388,7 @@ error:
+ 
+ static BIN_ATTR_RW(zone_calibration_data, sizeof(stmvl531_zone_calibration_data_t));
+ 
+-static struct bin_attribute *stmvl53l1_bin_attributes[] = {
++static const struct bin_attribute *const stmvl53l1_bin_attributes[] = {
+ 	&bin_attr_calibration_data,
+ 	&bin_attr_zone_calibration_data,
+ 	NULL
+diff --git a/drivers/iommu/Kbuild b/drivers/iommu/Kbuild
+index fb7d04a..3adb145 100644
+--- a/drivers/iommu/Kbuild
++++ b/drivers/iommu/Kbuild
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_SAMSUNG_IOMMU) += samsung_iommu.o
+-samsung_iommu-objs += samsung-iommu.o samsung-iommu-fault.o
++samsung_iommu-objs += samsung-iommu.o samsung-iommu-fault.o samsung-iommu-pixel-fault.o
+ obj-$(CONFIG_SAMSUNG_IOMMU_GROUP) += samsung-iommu-group.o
+ obj-$(CONFIG_SAMSUNG_SECURE_IOVA) += samsung-secure-iova.o
+ obj-$(CONFIG_IOVAD_VENDOR_HOOKS) += iovad-vendor-hooks.o
+diff --git a/drivers/iommu/samsung-iommu-fault.c b/drivers/iommu/samsung-iommu-fault.c
+index 15d0922..99fcf55 100644
+--- a/drivers/iommu/samsung-iommu-fault.c
++++ b/drivers/iommu/samsung-iommu-fault.c
+@@ -5,6 +5,7 @@
+ 
+ #define pr_fmt(fmt) "sysmmu: " fmt
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
+ #include <linux/smc.h>
+ #include <linux/arm-smccc.h>
+ #include <linux/pm_runtime.h>
+@@ -97,16 +98,18 @@ static char *sysmmu_fault_name[SYSMMU_FAULTS_NUM] = {
+ 	"RESERVED",
+ };
+ 
+-static unsigned int sysmmu_fault_type[SYSMMU_FAULTS_NUM] = {
+-	IOMMU_FAULT_REASON_WALK_EABT,
+-	IOMMU_FAULT_REASON_PTE_FETCH,
+-	IOMMU_FAULT_REASON_ACCESS,
+-	IOMMU_FAULT_REASON_UNKNOWN,
+-};
+-
++/*
++ * 6.8 removed unrecoverable IOMMU fault events (struct iommu_fault_event,
++ * IOMMU_FAULT_DMA_UNRECOV, enum iommu_fault_reason) and
++ * iommu_report_device_fault() for them. Faults now go to clients through
++ * pixel_iommu_report_fault() (samsung-iommu-pixel-fault.c), the same API the
++ * Laguna arm-smmu-v3 driver uses. The fault reason has no carrier there and
++ * no client consumed it.
++ */
+ struct samsung_sysmmu_fault_info {
+ 	struct sysmmu_drvdata *drvdata;
+-	struct iommu_fault_event event;
++	sysmmu_iova_t addr;
++	unsigned int vid;
+ };
+ 
+ static inline u32 __sysmmu_get_intr_status(struct sysmmu_drvdata *data,
+@@ -514,7 +517,8 @@ static int samsung_sysmmu_fault_notifier(struct device *dev, void *data)
+ 
+ 	for (i = 0; i < client->sysmmu_count; i++) {
+ 		if (drvdata == client->sysmmus[i]) {
+-			ret = iommu_report_device_fault(dev, &fi->event);
++			ret = pixel_iommu_report_fault(iommu_get_domain_for_dev(dev), dev,
++						       fi->addr, fi->vid, 0);
+ 			if (ret == -EAGAIN)
+ 				result = ret;
+ 			break;
+@@ -532,10 +536,8 @@ irqreturn_t samsung_sysmmu_irq_thread(int irq, void *dev_id)
+ 	struct sysmmu_drvdata *drvdata = dev_id;
+ 	bool is_secure = (irq == drvdata->secure_irq);
+ 	struct iommu_group *group = drvdata->group;
+-	enum iommu_fault_reason reason;
+ 	struct samsung_sysmmu_fault_info fi = {
+ 		.drvdata = drvdata,
+-		.event.fault.type = IOMMU_FAULT_DMA_UNRECOV,
+ 	};
+ 	char fault_msg[128] = "Unspecified SysMMU fault";
+ 
+@@ -543,15 +545,8 @@ irqreturn_t samsung_sysmmu_irq_thread(int irq, void *dev_id)
+ 	pm_runtime_get_sync(drvdata->dev);
+ 
+ 	sysmmu_get_interrupt_info(drvdata, &itype, &vid, &addr, is_secure);
+-	reason = sysmmu_fault_type[itype];
+-
+-	fi.event.fault.event.addr = addr;
+-	fi.event.fault.event.pasid = vid;
+-	if (vid)
+-		fi.event.fault.event.flags |= IOMMU_FAULT_UNRECOV_PASID_VALID;
+-	fi.event.fault.event.reason = reason;
+-	if (reason == IOMMU_FAULT_REASON_PTE_FETCH)
+-		fi.event.fault.type = IOMMU_FAULT_PAGE_REQ;
++	fi.addr = addr;
++	fi.vid = vid;
+ 
+ 	ret = iommu_group_for_each_dev(group, &fi,
+ 				       samsung_sysmmu_fault_notifier);
+diff --git a/drivers/iommu/samsung-iommu-pixel-fault.c b/drivers/iommu/samsung-iommu-pixel-fault.c
+new file mode 100644
+index 0000000..c0789c8
+--- /dev/null
++++ b/drivers/iommu/samsung-iommu-pixel-fault.c
+@@ -0,0 +1,105 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * junkyard (lynx): per-device unrecoverable IOMMU fault callbacks for the Samsung
++ * SysMMU, built into samsung_iommu.ko.
++ *
++ * 6.8 removed iommu_register_device_fault_handler() and unrecoverable fault
++ * events, which is how SysMMU clients (display, GXP, EdgeTPU, MFC, SMFC, G2D,
++ * BigO, LWIS) used to learn about faults. On Laguna, Google replaced it with
++ * pixel_iommu_{register,unregister}_fault_handler() / pixel_iommu_report_fault()
++ * in iommu/arm-smmu-v3/drivers/iommu/pixel-iommu-fault.c; this is that file,
++ * unchanged apart from this header, so gs201 clients use the same API.
++ */
++#include <linux/device.h>
++#include <linux/iommu.h>
++#include <linux/list.h>
++#include <linux/module.h>
++#include <linux/rwsem.h>
++#include <linux/slab.h>
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++
++struct pixel_iommu_fault_handler {
++	struct list_head node;
++	struct device *dev;
++	pixel_iommu_fault_handler_t handler;
++	void *token;
++};
++
++static LIST_HEAD(fault_handlers);
++static DECLARE_RWSEM(fault_handlers_lock);
++
++int pixel_iommu_register_fault_handler(struct device *dev,
++				       pixel_iommu_fault_handler_t handler, void *token)
++{
++	struct pixel_iommu_fault_handler *entry, *other;
++	int ret = 0;
++
++	if (!dev || !handler)
++		return -EINVAL;
++
++	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
++	if (!entry)
++		return -ENOMEM;
++
++	down_write(&fault_handlers_lock);
++	list_for_each_entry(other, &fault_handlers, node) {
++		if (other->dev == dev) {
++			ret = -EBUSY;
++			goto out_unlock;
++		}
++	}
++	entry->dev = get_device(dev);
++	entry->handler = handler;
++	entry->token = token;
++	list_add_tail(&entry->node, &fault_handlers);
++out_unlock:
++	up_write(&fault_handlers_lock);
++	if (ret)
++		kfree(entry);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(pixel_iommu_register_fault_handler);
++
++void pixel_iommu_unregister_fault_handler(struct device *dev)
++{
++	struct pixel_iommu_fault_handler *entry;
++
++	down_write(&fault_handlers_lock);
++	list_for_each_entry(entry, &fault_handlers, node) {
++		if (entry->dev == dev) {
++			list_del(&entry->node);
++			up_write(&fault_handlers_lock);
++			put_device(entry->dev);
++			kfree(entry);
++			return;
++		}
++	}
++	up_write(&fault_handlers_lock);
++}
++EXPORT_SYMBOL_GPL(pixel_iommu_unregister_fault_handler);
++
++int pixel_iommu_report_fault(struct iommu_domain *domain, struct device *dev,
++			     unsigned long iova, u32 pasid, int flags)
++{
++	struct pixel_iommu_fault_handler *entry;
++	int ret = -ENOSYS;
++
++	/* Keep the core tracepoint and any handler when the domain is still known. */
++	if (domain) {
++		ret = report_iommu_fault(domain, dev, iova, flags);
++		if (ret != -ENOSYS)
++			return ret;
++	}
++
++	down_read(&fault_handlers_lock);
++	list_for_each_entry(entry, &fault_handlers, node) {
++		if (entry->dev == dev) {
++			ret = entry->handler(dev, iova, pasid, flags, entry->token);
++			break;
++		}
++	}
++	up_read(&fault_handlers_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(pixel_iommu_report_fault);
++
+diff --git a/drivers/iommu/samsung-iommu.c b/drivers/iommu/samsung-iommu.c
+index db18e19..ad5deb9 100644
+--- a/drivers/iommu/samsung-iommu.c
++++ b/drivers/iommu/samsung-iommu.c
+@@ -248,20 +248,22 @@ static bool samsung_sysmmu_capable(struct device *dev, enum iommu_cap cap)
+ 	return cap == IOMMU_CAP_CACHE_COHERENCY;
+ }
+ 
+-static struct iommu_domain *samsung_sysmmu_domain_alloc(unsigned int type)
++/*
++ * 6.18: the type-based ops->domain_alloc() is gone; the core asks for paging
++ * domains (DMA and UNMANAGED) through domain_alloc_paging() and reports failure
++ * as an ERR_PTR. The old IDENTITY case was this same page-table domain and has
++ * no 6.18 equivalent here, so it is dropped.
++ */
++static struct iommu_domain *samsung_sysmmu_domain_alloc_paging(struct device *dev)
+ {
+ 	struct samsung_sysmmu_domain *domain;
+ 
+-	if (type != IOMMU_DOMAIN_UNMANAGED &&
+-	    type != IOMMU_DOMAIN_DMA &&
+-	    type != IOMMU_DOMAIN_IDENTITY) {
+-		pr_err("invalid domain type %u\n", type);
+-		return NULL;
+-	}
+-
+ 	domain = kzalloc(sizeof(*domain), GFP_KERNEL);
+ 	if (!domain)
+-		return NULL;
++		return ERR_PTR(-ENOMEM);
++
++	/* 6.18: moved from iommu_ops to the domain. */
++	domain->domain.pgsize_bitmap = SECT_SIZE | LPAGE_SIZE | SPAGE_SIZE;
+ 
+ 	domain->page_table =
+ 		(sysmmu_pte_t *)kmem_cache_alloc(flpt_cache,
+@@ -284,7 +286,7 @@ err_counter:
+ 	kmem_cache_free(flpt_cache, domain->page_table);
+ err_pgtable:
+ 	kfree(domain);
+-	return NULL;
++	return ERR_PTR(-ENOMEM);
+ }
+ 
+ static void samsung_sysmmu_domain_free(struct iommu_domain *dom)
+@@ -410,9 +412,8 @@ static struct samsung_sysmmu_domain *attach_helper(struct iommu_domain *dom, str
+ 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+ 	struct samsung_sysmmu_domain *domain;
+ 
+-	if (!fwspec || fwspec->ops != &samsung_sysmmu_ops) {
+-		dev_err(dev, "failed to attach, IOMMU instance data %s.\n",
+-			!fwspec ? "is not initialized" : "has different ops");
++	if (!fwspec) {
++		dev_err(dev, "failed to attach, IOMMU instance data is not initialized.\n");
+ 		return ERR_PTR(-ENXIO);
+ 	}
+ 
+@@ -652,7 +653,26 @@ static int samsung_sysmmu_map(struct iommu_domain *dom, unsigned long l_iova,
+ 	return ret;
+ }
+ 
+-static size_t samsung_sysmmu_unmap(struct iommu_domain *dom,
++/* 6.18 dropped iommu_domain_ops.map; the core hands map_pages() runs of pages. */
++static int samsung_sysmmu_map_pages(struct iommu_domain *dom, unsigned long iova,
++				    phys_addr_t paddr, size_t pgsize, size_t pgcount,
++				    int prot, gfp_t gfp, size_t *mapped)
++{
++	int ret = 0;
++
++	while (pgcount--) {
++		ret = samsung_sysmmu_map(dom, iova, paddr, pgsize, prot, gfp);
++		if (ret)
++			break;
++		iova += pgsize;
++		paddr += pgsize;
++		*mapped += pgsize;
++	}
++
++	return ret;
++}
++
++static size_t __maybe_unused samsung_sysmmu_unmap(struct iommu_domain *dom,
+ 				   unsigned long l_iova, size_t size,
+ 				   struct iommu_iotlb_gather *gather)
+ {
+@@ -818,8 +838,8 @@ static void samsung_sysmmu_flush_iotlb_all(struct iommu_domain *dom)
+ 	spin_unlock_irqrestore(&groupdata->sysmmu_list_lock[domain->vid], flags);
+ }
+ 
+-static void samsung_sysmmu_iotlb_sync_map(struct iommu_domain *dom,
+-					  unsigned long iova, size_t size)
++static int samsung_sysmmu_iotlb_sync_map(struct iommu_domain *dom,
++					 unsigned long iova, size_t size)
+ {
+ 	struct samsung_sysmmu_domain *domain = to_sysmmu_domain(dom);
+ 	sysmmu_pte_t *sent, *pent;
+@@ -844,6 +864,8 @@ next_section:
+ 		iova = section_end;
+ 		sent++;
+ 	}
++
++	return 0;
+ }
+ 
+ static void samsung_sysmmu_iotlb_sync(struct iommu_domain *dom,
+@@ -904,11 +926,6 @@ static struct iommu_device *samsung_sysmmu_probe_device(struct device *dev)
+ 		return ERR_PTR(-ENODEV);
+ 	}
+ 
+-	if (fwspec->ops != &samsung_sysmmu_ops) {
+-		dev_err(dev, "has different IOMMU ops\n");
+-		return ERR_PTR(-ENODEV);
+-	}
+-
+ 	client = (struct sysmmu_clientdata *) dev_iommu_priv_get(dev);
+ 	client->dev_link = kcalloc(client->sysmmu_count,
+ 				   sizeof(*client->dev_link), GFP_KERNEL);
+@@ -940,15 +957,13 @@ static void samsung_sysmmu_release_device(struct device *dev)
+ 	struct sysmmu_clientdata *client;
+ 	unsigned int i;
+ 
+-	if (!fwspec || fwspec->ops != &samsung_sysmmu_ops)
++	if (!fwspec)
+ 		return;
+ 
+ 	client = (struct sysmmu_clientdata *) dev_iommu_priv_get(dev);
+ 	for (i = 0; i < client->sysmmu_count; i++)
+ 		device_link_del(client->dev_link[i]);
+ 	kfree(client->dev_link);
+-
+-	iommu_fwspec_free(dev);
+ }
+ 
+ static void samsung_sysmmu_group_data_release(void *iommu_data)
+@@ -1012,8 +1027,13 @@ static struct iommu_group *samsung_sysmmu_device_group(struct device *dev)
+ 
+ 	if (need_unmanaged_domain) {
+ 		int ret;
+-		struct iommu_domain *domain =
+-				iommu_domain_alloc(&platform_bus_type);
++		struct iommu_domain *domain = iommu_paging_domain_alloc(dev);
++
++		if (IS_ERR(domain)) {
++			dev_err(dev, "failed to allocate unmanaged domain, ret:%ld\n",
++				PTR_ERR(domain));
++			return ERR_CAST(domain);
++		}
+ 
+ 		ret = iommu_attach_group(domain, group);
+ 		if (ret) {
+@@ -1033,7 +1053,7 @@ static void samsung_sysmmu_clientdata_release(struct device *dev, void *res)
+ }
+ 
+ static int samsung_sysmmu_of_xlate(struct device *dev,
+-				   struct of_phandle_args *args)
++				   const struct of_phandle_args *args)
+ {
+ 	struct platform_device *sysmmu = of_find_device_by_node(args->np);
+ 	struct sysmmu_drvdata *data = platform_get_drvdata(sysmmu);
+@@ -1075,8 +1095,11 @@ static int samsung_sysmmu_of_xlate(struct device *dev,
+ 	return ret;
+ }
+ 
++static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid,
++					    struct iommu_domain *dom);
++
+ static int samsung_sysmmu_set_dev_pasid(struct iommu_domain *dom, struct device *dev,
+-					ioasid_t pasid)
++					ioasid_t pasid, struct iommu_domain *old)
+ {
+ 	struct sysmmu_clientdata *client;
+ 	struct samsung_sysmmu_domain *domain;
+@@ -1096,6 +1119,13 @@ static int samsung_sysmmu_set_dev_pasid(struct iommu_domain *dom, struct device
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * 6.18: replacing a PASID's domain hands us the one being replaced.
++	 * Drop it first so its VID is free to be allocated again below.
++	 */
++	if (old)
++		samsung_sysmmu_remove_dev_pasid(dev, pasid, old);
++
+ 	domain = attach_helper(dom, dev);
+ 	if (IS_ERR(domain))
+ 		return (int)PTR_ERR(domain);
+@@ -1178,10 +1208,10 @@ group_put:
+ 	return ret;
+ }
+ 
+-static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
++static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid,
++					    struct iommu_domain *dom)
+ {
+ 	struct sysmmu_clientdata *client;
+-	struct iommu_domain *dom;
+ 	struct samsung_sysmmu_domain *domain;
+ 	struct iommu_group *group;
+ 	struct sysmmu_groupdata *groupdata;
+@@ -1195,8 +1225,7 @@ static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
+ 	WARN(vid >= MAX_VIDS, "VID %u for device %s above or equal maximum of %u\n",
+ 	     vid, dev_name(dev), MAX_VIDS);
+ 
+-	dom = iommu_get_domain_for_dev_pasid(dev, pasid, 0);
+-	if (WARN_ON(IS_ERR(dom)) || !dom)
++	if (WARN_ON(!dom))
+ 		return;
+ 	domain = to_sysmmu_domain(dom);
+ 	client = (struct sysmmu_clientdata *)dev_iommu_priv_get(dev);
+@@ -1235,23 +1264,39 @@ static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
+ 	iommu_group_put(group);
+ }
+ 
+-static bool samsung_sysmmu_dev_has_feat(struct device *dev, enum iommu_dev_features f)
+-{
+-	return false;
+-}
+-
+-static int samsung_sysmmu_dev_enable_feat(struct device *dev, enum iommu_dev_features f)
++/*
++ * 6.18: PASID teardown is ops->blocked_domain->set_dev_pasid(), which is handed
++ * the domain being removed (this was ops->remove_dev_pasid(dev, pasid)).
++ */
++static int samsung_sysmmu_blocked_set_dev_pasid(struct iommu_domain *blocked,
++						struct device *dev, ioasid_t pasid,
++						struct iommu_domain *old)
+ {
+-	if (!samsung_sysmmu_dev_has_feat(dev, f))
+-		return -EINVAL;
++	samsung_sysmmu_remove_dev_pasid(dev, pasid, old);
+ 	return 0;
+ }
+ 
+-static int samsung_sysmmu_dev_disable_feat(struct device *dev, enum iommu_dev_features f)
++/*
++ * The core also installs ops->blocked_domain as a group's blocking domain, but
++ * only attaches it when something claims DMA ownership (VFIO/iommufd), which
++ * nothing on these SoCs does. SysMMU has no translation-blocking mode short of a
++ * page table, so refuse loudly rather than claim DMA is blocked.
++ */
++static int samsung_sysmmu_blocked_attach_dev(struct iommu_domain *blocked,
++					     struct device *dev)
+ {
+-	return -EINVAL;
++	dev_warn(dev, "SysMMU cannot attach a DMA-blocking domain\n");
++	return -EOPNOTSUPP;
+ }
+ 
++static struct iommu_domain samsung_sysmmu_blocked_domain = {
++	.type = IOMMU_DOMAIN_BLOCKED,
++	.ops = &(const struct iommu_domain_ops) {
++		.attach_dev	= samsung_sysmmu_blocked_attach_dev,
++		.set_dev_pasid	= samsung_sysmmu_blocked_set_dev_pasid,
++	},
++};
++
+ static void samsung_sysmmu_get_resv_regions(struct device *dev, struct list_head *head)
+ {
+ 	enum iommu_resv_type resvtype[] = {
+@@ -1309,22 +1354,18 @@ static void samsung_sysmmu_get_resv_regions(struct device *dev, struct list_head
+ 
+ static struct iommu_ops samsung_sysmmu_ops = {
+ 	.capable		= samsung_sysmmu_capable,
+-	.domain_alloc		= samsung_sysmmu_domain_alloc,
++	.domain_alloc_paging	= samsung_sysmmu_domain_alloc_paging,
+ 	.probe_device		= samsung_sysmmu_probe_device,
+ 	.release_device		= samsung_sysmmu_release_device,
+ 	.device_group		= samsung_sysmmu_device_group,
+ 	.of_xlate		= samsung_sysmmu_of_xlate,
+ 	.get_resv_regions	= samsung_sysmmu_get_resv_regions,
+-	.dev_enable_feat	= samsung_sysmmu_dev_enable_feat,
+-	.dev_disable_feat	= samsung_sysmmu_dev_disable_feat,
+-	.remove_dev_pasid	= samsung_sysmmu_remove_dev_pasid,
+-	.pgsize_bitmap		= SECT_SIZE | LPAGE_SIZE | SPAGE_SIZE,
++	.blocked_domain		= &samsung_sysmmu_blocked_domain,
+ 	.owner						= THIS_MODULE,
+ 	.default_domain_ops	= &(const struct iommu_domain_ops) {
+ 		.attach_dev		= samsung_sysmmu_attach_dev,
+ 		.set_dev_pasid		= samsung_sysmmu_set_dev_pasid,
+-		.map			= samsung_sysmmu_map,
+-		.unmap			= samsung_sysmmu_unmap,
++		.map_pages		= samsung_sysmmu_map_pages,
+ 		.unmap_pages		= samsung_sysmmu_unmap_pages,
+ 		.flush_iotlb_all	= samsung_sysmmu_flush_iotlb_all,
+ 		.iotlb_sync_map		= samsung_sysmmu_iotlb_sync_map,
+diff --git a/drivers/media/platform/exynos/mfc/mfc.c b/drivers/media/platform/exynos/mfc/mfc.c
+index 64bb1e4..19d5c18 100644
+--- a/drivers/media/platform/exynos/mfc/mfc.c
++++ b/drivers/media/platform/exynos/mfc/mfc.c
+@@ -420,7 +420,7 @@ static int mfc_open(struct file *file)
+ 
+ 	v4l2_fh_init(&ctx->fh, vdev);
+ 	file->private_data = &ctx->fh;
+-	v4l2_fh_add(&ctx->fh);
++	v4l2_fh_add(&ctx->fh, file);
+ 
+ 	ctx->dev = dev;
+ 
+@@ -539,7 +539,7 @@ err_ctx_init:
+ 	dev->ctx[ctx->num] = 0;
+ 
+ err_ctx_num:
+-	v4l2_fh_del(&ctx->fh);
++	v4l2_fh_del(&ctx->fh, file);
+ 	v4l2_fh_exit(&ctx->fh);
+ 
+ err_vdev:
+@@ -579,7 +579,7 @@ static int mfc_release(struct file *file)
+ 	MFC_TRACE_CTX_LT("[INFO] release is called (ctx:%d, total:%d)\n", ctx->num, dev->num_inst);
+ 
+ 	/* Free resources */
+-	v4l2_fh_del(&ctx->fh);
++	v4l2_fh_del(&ctx->fh, file);
+ 	v4l2_fh_exit(&ctx->fh);
+ 
+ 	maincore = mfc_get_main_core_wait(dev, ctx);
+@@ -1200,7 +1200,7 @@ err_res_mem:
+ }
+ 
+ /* Remove the driver */
+-static int mfc_remove(struct platform_device *pdev)
++static void mfc_remove(struct platform_device *pdev)
+ {
+ 	struct mfc_dev *dev = platform_get_drvdata(pdev);
+ 
+@@ -1228,7 +1228,6 @@ static int mfc_remove(struct platform_device *pdev)
+ 	mfc_dev_debug(2, "Will now deinit HW\n");
+ 
+ 	dev_dbg(&pdev->dev, "%s--\n", __func__);
+-	return 0;
+ }
+ 
+ static void mfc_shutdown(struct platform_device *pdev)
+@@ -1385,4 +1384,4 @@ MODULE_SOFTDEP("pre: samsung_dma_heap");
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Kamil Debski <k.debski@samsung.com>");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/drivers/media/platform/exynos/mfc/mfc_core.c b/drivers/media/platform/exynos/mfc/mfc_core.c
+index 78c4434..814d3bc 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_core.c
++++ b/drivers/media/platform/exynos/mfc/mfc_core.c
+@@ -10,6 +10,8 @@
+  * (at your option) any later version.
+  */
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++#include <soc/google/gs_platform_compat.h>
+ #include <linux/module.h>
+ #include <linux/device.h>
+ #include <linux/platform_device.h>
+@@ -70,7 +72,6 @@ static void mfc_core_sscd_release(struct device *dev)
+ 
+ static struct platform_device mfc_core_sscd_dev = {
+ 	.name            = MFC_CORE_NAME,
+-	.driver_override = SSCD_NAME,
+ 	.id              = -1,
+ 	.dev             = {
+ 		.platform_data = &mfc_core_sscd_platdata,
+@@ -126,7 +127,9 @@ static int __mfc_core_parse_mfc_qos_platdata(struct device_node *np,
+ 	return 0;
+ }
+ 
+-int mfc_core_sysmmu_fault_handler(struct iommu_fault *fault, void *param)
++/* 6.8 removed iommu_register_device_fault_handler(); see pixel-iommu-fault.h */
++int mfc_core_sysmmu_fault_handler(struct device *fault_dev, unsigned long iova, u32 pasid,
++				  int fault_flags, void *param)
+ {
+ 	struct mfc_core *core = (struct mfc_core *)param;
+ 	unsigned int trans_info, fault_status;
+@@ -194,11 +197,11 @@ int mfc_core_sysmmu_fault_handler(struct iommu_fault *fault, void *param)
+ 			core->logging_data->fault_trans_info = MFC_MMU1_READL(trans_info);
+ 		}
+ 	}
+-	core->logging_data->fault_addr = (unsigned int)(fault->event.addr);
++	core->logging_data->fault_addr = (unsigned int)iova;
+ 
+ 	snprintf(core->crash_info, MFC_CRASH_INFO_LEN,
+ 		"MFC-%d SysMMU PAGE FAULT at %#010llx (AxID: %#x), fault_status: %#x\n",
+-		core->id, fault->event.addr,
++		core->id, (u64)iova,
+ 		core->logging_data->fault_trans_info, core->logging_data->fault_status);
+ 	mfc_core_err("%s", core->crash_info);
+ 	MFC_TRACE_CORE("%s", core->crash_info);
+@@ -703,7 +706,7 @@ static int mfc_core_probe(struct platform_device *pdev)
+ 				core->core_pdata->encoder_qos_table[i].name,
+ 				core->core_pdata->encoder_qos_table[i].bts_scen_idx);
+ 
+-	ret = iommu_register_device_fault_handler(core->device,
++	ret = pixel_iommu_register_fault_handler(core->device,
+ 			mfc_core_sysmmu_fault_handler, core);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "failed to register sysmmu fault handler %d\n", ret);
+@@ -754,7 +757,7 @@ static int mfc_core_probe(struct platform_device *pdev)
+ #endif
+ 
+ #ifdef CONFIG_MFC_USE_COREDUMP
+-	if (platform_device_register(&mfc_core_sscd_dev)) {
++	if (gs_platform_device_register_override(&mfc_core_sscd_dev, SSCD_NAME)) {
+ 		dev_err(&pdev->dev, "failed to register sscd_dev\n");
+ 	} else {
+ 		core->sscd_dev = &mfc_core_sscd_dev;
+@@ -774,16 +777,16 @@ err_alloc_debug:
+ #if IS_ENABLED(CONFIG_EXYNOS_CONTENT_PATH_PROTECTION)
+ 	mfc_mem_special_buf_free(dev, &core->drm_fw_buf);
+ #endif
+-	iommu_unregister_device_fault_handler(&pdev->dev);
++	pixel_iommu_unregister_fault_handler(&pdev->dev);
+ err_sysmmu_fault_handler:
+ 	destroy_workqueue(core->butler_wq);
+ err_butler_wq:
+ 	if (timer_pending(&core->mfc_idle_timer))
+-		del_timer(&core->mfc_idle_timer);
++		timer_delete(&core->mfc_idle_timer);
+ 	destroy_workqueue(core->mfc_idle_wq);
+ err_wq_idle:
+ 	if (timer_pending(&core->meerkat_timer))
+-		del_timer(&core->meerkat_timer);
++		timer_delete(&core->meerkat_timer);
+ 	destroy_workqueue(core->meerkat_wq);
+ err_wq_meerkat:
+ 	mfc_core_deinit_memlog(core);
+@@ -813,7 +816,7 @@ err_pm:
+ }
+ 
+ /* Remove the driver */
+-static int mfc_core_remove(struct platform_device *pdev)
++static void mfc_core_remove(struct platform_device *pdev)
+ {
+ 	struct mfc_core *core = platform_get_drvdata(pdev);
+ 
+@@ -824,13 +827,13 @@ static int mfc_core_remove(struct platform_device *pdev)
+ #ifdef CONFIG_MFC_USE_COREDUMP
+ 	platform_device_unregister(&mfc_core_sscd_dev);
+ #endif
+-	iommu_unregister_device_fault_handler(&pdev->dev);
++	pixel_iommu_unregister_fault_handler(&pdev->dev);
+ 	if (timer_pending(&core->meerkat_timer))
+-		del_timer(&core->meerkat_timer);
++		timer_delete(&core->meerkat_timer);
+ 	flush_workqueue(core->meerkat_wq);
+ 	destroy_workqueue(core->meerkat_wq);
+ 	if (timer_pending(&core->mfc_idle_timer))
+-		del_timer(&core->mfc_idle_timer);
++		timer_delete(&core->mfc_idle_timer);
+ 	flush_workqueue(core->mfc_idle_wq);
+ 	destroy_workqueue(core->mfc_idle_wq);
+ 	flush_workqueue(core->butler_wq);
+@@ -857,7 +860,6 @@ static int mfc_core_remove(struct platform_device *pdev)
+ #endif
+ 
+ 	dev_dbg(&pdev->dev, "%s--\n", __func__);
+-	return 0;
+ }
+ 
+ static void mfc_core_shutdown(struct platform_device *pdev)
+diff --git a/drivers/media/platform/exynos/mfc/mfc_core_ops.c b/drivers/media/platform/exynos/mfc/mfc_core_ops.c
+index 91218bf..3c2b70d 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_core_ops.c
++++ b/drivers/media/platform/exynos/mfc/mfc_core_ops.c
+@@ -280,8 +280,8 @@ static int __mfc_core_deinit(struct mfc_core *core, struct mfc_ctx *ctx)
+ 		if (perf_boost_mode)
+ 			mfc_core_perf_boost_disable(core);
+ 
+-		del_timer(&core->meerkat_timer);
+-		del_timer_sync(&core->mfc_idle_timer);
++		timer_delete(&core->meerkat_timer);
++		timer_delete_sync(&core->mfc_idle_timer);
+ 
+ 		flush_workqueue(core->butler_wq);
+ 
+diff --git a/drivers/media/platform/exynos/mfc/mfc_ctrl_compat.h b/drivers/media/platform/exynos/mfc/mfc_ctrl_compat.h
+new file mode 100644
+index 0000000..22de833
+--- /dev/null
++++ b/drivers/media/platform/exynos/mfc/mfc_ctrl_compat.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * junkyard (lynx): 6.18 removed v4l2_ioctl_ops.vidioc_{queryctrl,g_ctrl,s_ctrl}.
++ * The core now answers VIDIOC_QUERYCTRL through vidioc_query_ext_ctrl and turns
++ * VIDIOC_G_CTRL/S_CTRL into single-control g/s_ext_ctrls calls whose ->which is
++ * the control's class (v4l_g_ctrl()/v4l_s_ctrl() in v4l2-ioctl.c).
++ *
++ * MFC predates its own ext-ctrls handlers covering everything: those accept only
++ * V4L2_CTRL_CLASS_CODEC, and the decoder has no s_ext_ctrls at all. These
++ * adapters keep the 6.1 behaviour: codec-class requests go to the driver's ext
++ * handler as before, anything else is fed control-by-control to the legacy
++ * per-control handler that G_CTRL/S_CTRL used to reach.
++ */
++#ifndef _MFC_CTRL_COMPAT_H
++#define _MFC_CTRL_COMPAT_H
++
++#include <linux/string.h>
++#include <linux/videodev2.h>
++
++typedef int (*mfc_compat_one_ctrl_t)(struct file *file, void *priv, struct v4l2_control *ctrl);
++typedef int (*mfc_compat_ext_ctrls_t)(struct file *file, void *priv, struct v4l2_ext_controls *f);
++typedef int (*mfc_compat_queryctrl_t)(struct file *file, void *priv, struct v4l2_queryctrl *qc);
++
++static inline int mfc_compat_query_ext_ctrl(struct file *file, void *priv,
++					    struct v4l2_query_ext_ctrl *qec,
++					    mfc_compat_queryctrl_t queryctrl)
++{
++	struct v4l2_queryctrl qc = { .id = qec->id };
++	int ret;
++
++	ret = queryctrl(file, priv, &qc);
++	if (ret)
++		return ret;
++
++	memset(qec, 0, sizeof(*qec));
++	qec->id = qc.id;
++	qec->type = qc.type;
++	strscpy(qec->name, qc.name, sizeof(qec->name));
++	qec->minimum = qc.minimum;
++	qec->maximum = qc.maximum;
++	qec->step = qc.step;
++	qec->default_value = qc.default_value;
++	qec->flags = qc.flags;
++	qec->elem_size = sizeof(s32);
++	qec->elems = 1;
++	return 0;
++}
++
++static inline int mfc_compat_ext_ctrls(struct file *file, void *priv,
++				       struct v4l2_ext_controls *f,
++				       mfc_compat_ext_ctrls_t codec_ext,
++				       mfc_compat_one_ctrl_t one)
++{
++	unsigned int i;
++	int ret;
++
++	if (codec_ext && f->which == V4L2_CTRL_CLASS_CODEC)
++		return codec_ext(file, priv, f);
++
++	for (i = 0; i < f->count; i++) {
++		struct v4l2_control ctrl = {
++			.id = f->controls[i].id,
++			.value = f->controls[i].value,
++		};
++
++		ret = one(file, priv, &ctrl);
++		if (ret) {
++			f->error_idx = i;
++			return ret;
++		}
++		f->controls[i].value = ctrl.value;
++	}
++
++	return 0;
++}
++
++#endif /* _MFC_CTRL_COMPAT_H */
+diff --git a/drivers/media/platform/exynos/mfc/mfc_dec_v4l2.c b/drivers/media/platform/exynos/mfc/mfc_dec_v4l2.c
+index 110d4b3..a2fc31c 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_dec_v4l2.c
++++ b/drivers/media/platform/exynos/mfc/mfc_dec_v4l2.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/vmalloc.h>
+ 
++#include "mfc_ctrl_compat.h"
+ #include "mfc_dec_v4l2.h"
+ #include "mfc_dec_internal.h"
+ #include "mfc_rm.h"
+@@ -127,7 +128,7 @@ static int __mfc_dec_enum_fmt(struct mfc_dev *dev, struct v4l2_fmtdesc *f,
+ 
+ 		if (j == f->index) {
+ 			fmt = &dec_formats[i];
+-			strlcpy(f->description, fmt->name,
++			strscpy(f->description, fmt->name,
+ 				sizeof(f->description));
+ 			f->pixelformat = fmt->fourcc;
+ 
+@@ -1617,6 +1618,25 @@ static int mfc_dec_g_ext_ctrls(struct file *file, void *priv,
+ 	return ret;
+ }
+ 
++/* 6.18 dropped the per-control ioctl ops; see mfc_ctrl_compat.h */
++static int mfc_dec_query_ext_ctrl(struct file *file, void *priv,
++				 struct v4l2_query_ext_ctrl *qec)
++{
++	return mfc_compat_query_ext_ctrl(file, priv, qec, mfc_dec_queryctrl);
++}
++
++static int mfc_dec_g_ext_ctrls_compat(struct file *file, void *priv,
++				     struct v4l2_ext_controls *f)
++{
++	return mfc_compat_ext_ctrls(file, priv, f, mfc_dec_g_ext_ctrls, mfc_dec_g_ctrl);
++}
++
++static int mfc_dec_s_ext_ctrls_compat(struct file *file, void *priv,
++				     struct v4l2_ext_controls *f)
++{
++	return mfc_compat_ext_ctrls(file, priv, f, NULL, mfc_dec_s_ctrl);
++}
++
+ /* v4l2_ioctl_ops */
+ static const struct v4l2_ioctl_ops mfc_dec_ioctl_ops = {
+ 	.vidioc_querycap		= mfc_dec_querycap,
+@@ -1634,11 +1654,10 @@ static const struct v4l2_ioctl_ops mfc_dec_ioctl_ops = {
+ 	.vidioc_dqbuf			= mfc_dec_dqbuf,
+ 	.vidioc_streamon		= mfc_dec_streamon,
+ 	.vidioc_streamoff		= mfc_dec_streamoff,
+-	.vidioc_queryctrl		= mfc_dec_queryctrl,
+-	.vidioc_g_ctrl			= mfc_dec_g_ctrl,
+-	.vidioc_s_ctrl			= mfc_dec_s_ctrl,
++	.vidioc_query_ext_ctrl		= mfc_dec_query_ext_ctrl,
+ 	.vidioc_g_selection		= mfc_dec_g_selection,
+-	.vidioc_g_ext_ctrls		= mfc_dec_g_ext_ctrls,
++	.vidioc_g_ext_ctrls		= mfc_dec_g_ext_ctrls_compat,
++	.vidioc_s_ext_ctrls		= mfc_dec_s_ext_ctrls_compat,
+ };
+ 
+ const struct v4l2_ioctl_ops *mfc_get_dec_v4l2_ioctl_ops(void)
+diff --git a/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c b/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c
+index eaa4499..c065bba 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c
++++ b/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c
+@@ -10,6 +10,7 @@
+  * (at your option) any later version.
+  */
+ 
++#include "mfc_ctrl_compat.h"
+ #include "mfc_enc_v4l2.h"
+ #include "mfc_enc_internal.h"
+ #include "mfc_rm.h"
+@@ -198,7 +199,7 @@ static int __mfc_enc_enum_fmt(struct mfc_dev *dev, struct v4l2_fmtdesc *f,
+ 
+ 		if (j == f->index) {
+ 			fmt = &enc_formats[i];
+-			strlcpy(f->description, fmt->name,
++			strscpy(f->description, fmt->name,
+ 				sizeof(f->description));
+ 			f->pixelformat = fmt->fourcc;
+ 
+@@ -2370,6 +2371,25 @@ static int mfc_enc_try_ext_ctrls(struct file *file, void *priv,
+ 	return ret;
+ }
+ 
++/* 6.18 dropped the per-control ioctl ops; see mfc_ctrl_compat.h */
++static int mfc_enc_query_ext_ctrl(struct file *file, void *priv,
++				 struct v4l2_query_ext_ctrl *qec)
++{
++	return mfc_compat_query_ext_ctrl(file, priv, qec, mfc_enc_queryctrl);
++}
++
++static int mfc_enc_g_ext_ctrls_compat(struct file *file, void *priv,
++				     struct v4l2_ext_controls *f)
++{
++	return mfc_compat_ext_ctrls(file, priv, f, mfc_enc_g_ext_ctrls, mfc_enc_g_ctrl);
++}
++
++static int mfc_enc_s_ext_ctrls_compat(struct file *file, void *priv,
++				     struct v4l2_ext_controls *f)
++{
++	return mfc_compat_ext_ctrls(file, priv, f, mfc_enc_s_ext_ctrls, mfc_enc_s_ctrl);
++}
++
+ static const struct v4l2_ioctl_ops mfc_enc_ioctl_ops = {
+ 	.vidioc_querycap		= mfc_enc_querycap,
+ 	.vidioc_enum_fmt_vid_cap	= mfc_enc_enum_fmt_vid_cap_mplane,
+@@ -2388,11 +2408,9 @@ static const struct v4l2_ioctl_ops mfc_enc_ioctl_ops = {
+ 	.vidioc_dqbuf			= mfc_enc_dqbuf,
+ 	.vidioc_streamon		= mfc_enc_streamon,
+ 	.vidioc_streamoff		= mfc_enc_streamoff,
+-	.vidioc_queryctrl		= mfc_enc_queryctrl,
+-	.vidioc_g_ctrl			= mfc_enc_g_ctrl,
+-	.vidioc_s_ctrl			= mfc_enc_s_ctrl,
+-	.vidioc_g_ext_ctrls		= mfc_enc_g_ext_ctrls,
+-	.vidioc_s_ext_ctrls		= mfc_enc_s_ext_ctrls,
++	.vidioc_query_ext_ctrl		= mfc_enc_query_ext_ctrl,
++	.vidioc_g_ext_ctrls		= mfc_enc_g_ext_ctrls_compat,
++	.vidioc_s_ext_ctrls		= mfc_enc_s_ext_ctrls_compat,
+ 	.vidioc_try_ext_ctrls		= mfc_enc_try_ext_ctrls,
+ };
+ 
+diff --git a/drivers/media/platform/exynos/mfc/mfc_meerkat.c b/drivers/media/platform/exynos/mfc/mfc_meerkat.c
+index 9eacefe..03a1235 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_meerkat.c
++++ b/drivers/media/platform/exynos/mfc/mfc_meerkat.c
+@@ -40,7 +40,7 @@ static void __mfc_dump_info_and_stop_hw_debug(struct mfc_dev *dev)
+ 	if (!dev->pdata->debug_mode && !debug_mode_en)
+ 		return;
+ 
+-	strlcpy(core->crash_info, dev->dev_crash_info, sizeof(core->crash_info));
++	strscpy(core->crash_info, dev->dev_crash_info, sizeof(core->crash_info));
+ 	call_dop(core, dump_and_stop_debug_mode, core);
+ }
+ 
+diff --git a/drivers/media/platform/exynos/mfc/mfc_utils.c b/drivers/media/platform/exynos/mfc/mfc_utils.c
+index 7414f8d..b486068 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_utils.c
++++ b/drivers/media/platform/exynos/mfc/mfc_utils.c
+@@ -683,7 +683,7 @@ void mfc_calc_base_addr(struct mfc_ctx *ctx, struct vb2_buffer *vb,
+ 
+ void mfc_core_meerkat_tick(struct timer_list *t)
+ {
+-	struct mfc_core *core = from_timer(core, t, meerkat_timer);
++	struct mfc_core *core = timer_container_of(core, t, meerkat_timer);
+ 
+ 	mfc_core_debug(5, "meerkat is ticking!\n");
+ 
+@@ -749,7 +749,7 @@ void mfc_core_meerkat_reset_tick(struct mfc_core *core)
+ 
+ void mfc_core_idle_checker(struct timer_list *t)
+ {
+-	struct mfc_core *core = from_timer(core, t, mfc_idle_timer);
++	struct mfc_core *core = timer_container_of(core, t, mfc_idle_timer);
+ 	struct mfc_dev *dev = core->dev;
+ 
+ 	mfc_core_debug(5, "[MFCIDLE] MFC HW idle checker is ticking!\n");
+diff --git a/drivers/media/platform/exynos/smfc/smfc-dev.c b/drivers/media/platform/exynos/smfc/smfc-dev.c
+index 2fbf42a..8befbb2 100644
+--- a/drivers/media/platform/exynos/smfc/smfc-dev.c
++++ b/drivers/media/platform/exynos/smfc/smfc-dev.c
+@@ -6,6 +6,7 @@
+  * The main source file of Samsung Exynos SMFC Driver
+  */
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/platform_device.h>
+@@ -97,7 +98,7 @@ static irqreturn_t exynos_smfc_irq_handler(int irq, void *priv)
+ 
+ 	suspending = !!(smfc->flags & SMFC_DEV_SUSPENDING);
+ 	if (!!(smfc->flags & SMFC_DEV_OTF_EMUMODE))
+-		del_timer(&smfc->timer);
++		timer_delete(&smfc->timer);
+ 	smfc->flags &= ~(SMFC_DEV_RUNNING | SMFC_DEV_OTF_EMUMODE);
+ 
+ 	spin_unlock(&smfc->flag_lock);
+@@ -161,7 +162,7 @@ static irqreturn_t exynos_smfc_irq_handler(int irq, void *priv)
+ 
+ static void smfc_timedout_handler(struct timer_list *arg)
+ {
+-	struct smfc_dev *smfc = from_timer(smfc, arg, timer);
++	struct smfc_dev *smfc = timer_container_of(smfc, arg, timer);
+ 	struct smfc_ctx *ctx;
+ 	unsigned long flags;
+ 	bool suspending;
+@@ -514,7 +515,7 @@ static int exynos_smfc_open(struct file *filp)
+ 		goto err_m2m_ctx_init;
+ 	}
+ 
+-	v4l2_fh_add(&ctx->fh);
++	v4l2_fh_add(&ctx->fh, filp);
+ 
+ 	filp->private_data = &ctx->fh;
+ 
+@@ -556,7 +557,7 @@ err_clk:
+ err_m2m_ctx_init:
+ 	v4l2_ctrl_handler_free(&ctx->v4l2_ctrlhdlr);
+ err_control:
+-	v4l2_fh_del(&ctx->fh);
++	v4l2_fh_del(&ctx->fh, filp);
+ 	v4l2_fh_exit(&ctx->fh);
+ 	kfree(ctx);
+ 	return ret;
+@@ -568,7 +569,7 @@ static int exynos_smfc_release(struct file *filp)
+ 
+ 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
+ 	v4l2_ctrl_handler_free(&ctx->v4l2_ctrlhdlr);
+-	v4l2_fh_del(&ctx->fh);
++	v4l2_fh_del(&ctx->fh, filp);
+ 	v4l2_fh_exit(&ctx->fh);
+ 
+ 	if (!IS_ERR(ctx->smfc->clk_gate)) {
+@@ -930,7 +931,9 @@ static void g2d_pm_qos_reset_request(struct smfc_dev *smfc)
+ }
+ #endif
+ 
+-int smfc_iommu_fault_handler(struct iommu_fault *fault, void *token)
++/* 6.8 removed iommu_register_device_fault_handler(); see pixel-iommu-fault.h */
++int smfc_iommu_fault_handler(struct device *dev, unsigned long iova, u32 pasid,
++			     int flags, void *token)
+ {
+ 	struct smfc_dev *smfc = token;
+ 
+@@ -1088,7 +1091,7 @@ static int exynos_smfc_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		goto err_v4l2;
+ 
+-	iommu_register_device_fault_handler(&pdev->dev, smfc_iommu_fault_handler, smfc);
++	pixel_iommu_register_fault_handler(&pdev->dev, smfc_iommu_fault_handler, smfc);
+ 
+ 	timer_setup(&smfc->timer, smfc_timedout_handler, 0);
+ 
+@@ -1119,7 +1122,7 @@ static void smfc_deinit_clock(struct smfc_dev *smfc)
+ 		clk_put(smfc->clk_gate);
+ }
+ 
+-static int exynos_smfc_remove(struct platform_device *pdev)
++static void exynos_smfc_remove(struct platform_device *pdev)
+ {
+ 	struct smfc_dev *smfc = platform_get_drvdata(pdev);
+ 
+@@ -1127,9 +1130,7 @@ static int exynos_smfc_remove(struct platform_device *pdev)
+ 
+ 	smfc_deinit_clock(smfc);
+ 
+-	iommu_unregister_device_fault_handler(&pdev->dev);
+-
+-	return 0;
++	pixel_iommu_unregister_fault_handler(&pdev->dev);
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+@@ -1203,5 +1204,5 @@ MODULE_SOFTDEP("pre: exynos_devfreq");
+ 
+ MODULE_AUTHOR("Cho KyongHo <pullip.cho@samsung.com>");
+ MODULE_DESCRIPTION("Exynos Still MFC(JPEG) V4L2 Driver");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/exynos/smfc/smfc-v4l2-ioctls.c b/drivers/media/platform/exynos/smfc/smfc-v4l2-ioctls.c
+index 99811a6..e45ed28 100644
+--- a/drivers/media/platform/exynos/smfc/smfc-v4l2-ioctls.c
++++ b/drivers/media/platform/exynos/smfc/smfc-v4l2-ioctls.c
+@@ -483,7 +483,7 @@ err:
+ 
+ static int smfc_v4l2_querycap(struct file *filp, void *fh, struct v4l2_capability *cap)
+ {
+-	struct smfc_dev *smfc = v4l2_fh_to_smfc_ctx(fh)->smfc;
++	struct smfc_dev *smfc = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp))->smfc;
+ 
+ 	strncpy(cap->driver, MODULE_NAME, sizeof(cap->driver));
+ 	strncpy(cap->bus_info, dev_name(smfc->dev), sizeof(cap->bus_info));
+@@ -520,7 +520,7 @@ static int smfc_v4l2_enum_fmt(struct file *filp, void *fh, struct v4l2_fmtdesc *
+ static int smfc_v4l2_g_fmt_mplane(struct file *filp, void *fh,
+ 				  struct v4l2_format *f)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp));
+ 
+ 	f->fmt.pix_mp.width = ctx->width;
+ 	f->fmt.pix_mp.height = ctx->height;
+@@ -552,7 +552,7 @@ static int smfc_v4l2_g_fmt_mplane(struct file *filp, void *fh,
+ 
+ static int smfc_v4l2_g_fmt(struct file *filp, void *fh, struct v4l2_format *f)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp));
+ 
+ 	f->fmt.pix.width = ctx->width;
+ 	f->fmt.pix.height = ctx->height;
+@@ -730,7 +730,7 @@ static bool smfc_v4l2_init_fmt_mplane(const struct smfc_ctx *ctx,
+ 
+ static int smfc_v4l2_try_fmt_mplane(struct file *filp, void *fh, struct v4l2_format *f)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp));
+ 	const struct smfc_image_format *smfc_fmt = smfc_find_format(ctx->smfc,
+ 								    f->fmt.pix_mp.pixelformat);
+ 
+@@ -747,7 +747,7 @@ static int smfc_v4l2_prepare_s_fmt(struct smfc_ctx *ctx,
+ 	struct vb2_queue *othervq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, othertype);
+ 	u32 flags;
+ 
+-	if (thisvq->num_buffers > 0) {
++	if (vb2_get_num_buffers(thisvq) > 0) {
+ 		dev_err(ctx->smfc->dev, "S_FMT after REQBUFS is not allowed\n");
+ 		return -EBUSY;
+ 	}
+@@ -755,7 +755,7 @@ static int smfc_v4l2_prepare_s_fmt(struct smfc_ctx *ctx,
+ 	flags = smfc_config_ctxflag(ctx, SMFC_CTX_COMPRESS,
+ 				    is_jpeg(smfc_fmt) != V4L2_TYPE_IS_OUTPUT(type));
+ 
+-	if (othervq->num_buffers > 0) { /* REQBUFSed on other vq */
++	if (vb2_get_num_buffers(othervq) > 0) { /* REQBUFSed on other vq */
+ 		if ((flags & SMFC_CTX_COMPRESS) != (ctx->flags & SMFC_CTX_COMPRESS)) {
+ 			dev_err(ctx->smfc->dev, "Changing mode is prohibited after reqbufs\n");
+ 			ctx->flags = flags;
+@@ -777,7 +777,7 @@ static __u32 v4l2_to_multiplane_type(__u32 type)
+ 
+ static int smfc_v4l2_s_fmt_mplane(struct file *filp, void *fh, struct v4l2_format *f)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp));
+ 	const struct smfc_image_format *smfc_fmt = smfc_find_format(ctx->smfc,
+ 								    f->fmt.pix_mp.pixelformat);
+ 	int ret = smfc_v4l2_prepare_s_fmt(ctx, smfc_fmt, f->type);
+@@ -856,7 +856,7 @@ static bool smfc_v4l2_init_fmt(const struct smfc_ctx *ctx,
+ 
+ static int smfc_v4l2_try_fmt(struct file *filp, void *fh, struct v4l2_format *f)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp));
+ 	const struct smfc_image_format *smfc_fmt = smfc_find_format(ctx->smfc,
+ 								    f->fmt.pix.pixelformat);
+ 
+@@ -865,7 +865,7 @@ static int smfc_v4l2_try_fmt(struct file *filp, void *fh, struct v4l2_format *f)
+ 
+ static int smfc_v4l2_s_fmt(struct file *filp, void *fh, struct v4l2_format *f)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(filp));
+ 	const struct smfc_image_format *smfc_fmt = smfc_find_format(ctx->smfc,
+ 								    f->fmt.pix.pixelformat);
+ 	int ret = smfc_v4l2_prepare_s_fmt(ctx, smfc_fmt, f->type);
+@@ -897,7 +897,7 @@ static int smfc_v4l2_s_fmt(struct file *filp, void *fh, struct v4l2_format *f)
+ 
+ static int smfc_v4l2_s_selection(struct file *file, void *fh, struct v4l2_selection *s)
+ {
+-	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(fh);
++	struct smfc_ctx *ctx = v4l2_fh_to_smfc_ctx(file_to_v4l2_fh(file));
+ 	unsigned int i;
+ 	int ret = 0;
+ 
+@@ -940,12 +940,12 @@ static int v4l2_smfc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf
+ 
+ 	vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, buf->type);
+ 
+-	if (vq->num_buffers > SMFC_MAX_PLANES) {
++	if (vb2_get_num_buffers(vq) > SMFC_MAX_PLANES) {
+ 		return -EINVAL;
+ 	}
+ 
+-	for (index = 0; index < vq->num_buffers; index++) {
+-		struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vq->bufs[index]);
++	for (index = 0; index < vb2_get_num_buffers(vq); index++) {
++		struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb2_get_buffer(vq, index));
+ 		struct v4l2_m2m_buffer *mbuf = container_of(vbuf, typeof(*mbuf), vb);
+ 		struct vb2_smfc_buffer *sbuf = container_of(mbuf, typeof(*sbuf), mb);
+ 
+diff --git a/drivers/mfd/s2mpg1x-gpio-gs201.c b/drivers/mfd/s2mpg1x-gpio-gs201.c
+index f14d7b0..048c506 100644
+--- a/drivers/mfd/s2mpg1x-gpio-gs201.c
++++ b/drivers/mfd/s2mpg1x-gpio-gs201.c
+@@ -152,7 +152,7 @@ static int s2mpg1x_gpio_get(struct gpio_chip *chip, unsigned int offset)
+ 						GPIO_OUT_MASK);
+ }
+ 
+-static void s2mpg1x_gpio_set(struct gpio_chip *chip, unsigned int offset,
++static int s2mpg1x_gpio_set(struct gpio_chip *chip, unsigned int offset,
+ 			     int value)
+ {
+ 	struct s2mpg1x_gpio *data = gpiochip_get_data(chip);
+@@ -160,6 +160,8 @@ static void s2mpg1x_gpio_set(struct gpio_chip *chip, unsigned int offset,
+ 	if (!s2mpg1x_gpio_get_direction(chip, offset))
+ 		s2mpg1x_write_gpio_ctrl_bit(data, offset, GPIO_OUT_MASK,
+ 					    (value & 0x1) << GPIO_OUT_SHIFT);
++
++	return 0;
+ }
+ 
+ static int s2mpg1x_gpio_direction_input(struct gpio_chip *chip,
+@@ -244,7 +246,7 @@ static int s2mpg1x_pinconf_get(struct pinctrl_dev *pctldev, unsigned int pin,
+ 	case PIN_CONFIG_INPUT_ENABLE:
+ 		// do nothing
+ 		break;
+-	case PIN_CONFIG_OUTPUT:
++	case PIN_CONFIG_LEVEL:
+ 		ret = s2mpg1x_read_reg(gc->id, gc->i2c,
+ 				       GPIO_CTRL_BASE[gc->id] + pin,
+ 				       &data);
+@@ -337,7 +339,7 @@ static int s2mpg1x_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin,
+ 			if (!argument)
+ 				return -EINVAL;
+ 			break;
+-		case PIN_CONFIG_OUTPUT:
++		case PIN_CONFIG_LEVEL:
+ 			data = argument ? GPIO_OUT_MASK : 0;
+ 			ret = s2mpg1x_update_reg(gc->id, gc->i2c,
+ 						 GPIO_CTRL_BASE[gc->id] + pin,
+@@ -541,9 +543,8 @@ static int s2mpg1x_gpio_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int s2mpg1x_gpio_remove(struct platform_device *pdev)
++static void s2mpg1x_gpio_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct platform_device_id s2mpg1x_gpio_id[] = {
+diff --git a/drivers/mfd/slg51000-core.c b/drivers/mfd/slg51000-core.c
+index b4abff2..84bfcf1 100644
+--- a/drivers/mfd/slg51000-core.c
++++ b/drivers/mfd/slg51000-core.c
+@@ -423,7 +423,7 @@ static void slg51000_timeout_work(struct work_struct *work)
+ 
+ static void slg51000_timer_trigger(struct timer_list *t)
+ {
+-	struct slg51000_dev *slg51000 = from_timer(slg51000, t, timer);
++	struct slg51000_dev *slg51000 = timer_container_of(slg51000, t, timer);
+ 	schedule_work(&slg51000->timeout_work);
+ }
+ 
+@@ -723,7 +723,7 @@ static int slg51000_i2c_probe(struct i2c_client *client)
+ 
+ out:
+ 	mutex_destroy(&slg51000->pwr_lock);
+-	del_timer_sync(&slg51000->timer);
++	timer_delete_sync(&slg51000->timer);
+ 	return ret;
+ }
+ 
+@@ -737,28 +737,28 @@ static void slg51000_i2c_remove(struct i2c_client *client)
+ 
+ 	mfd_remove_devices(slg51000->dev);
+ 	mutex_destroy(&slg51000->pwr_lock);
+-	del_timer_sync(&slg51000->timer);
++	timer_delete_sync(&slg51000->timer);
+ 
+ 	if (gpio_is_valid(slg51000->chip_pu_pin)) {
+ 		desc = gpio_to_desc(slg51000->chip_pu_pin);
+-		ret |= gpiod_direction_output_raw(desc, GPIOF_INIT_LOW);
++		ret |= gpiod_direction_output_raw(desc, 0);
+ 		usleep_range(1000, 1020);
+ 	}
+ 	if (gpio_is_valid(slg51000->chip_cs_pin)) {
+ 		desc = gpio_to_desc(slg51000->chip_cs_pin);
+-		ret |= gpiod_direction_output_raw(desc, GPIOF_INIT_LOW);
++		ret |= gpiod_direction_output_raw(desc, 0);
+ 		/* Put SLG51000 back to Reset state */
+ 		usleep_range(SLEEP_10000_USEC,
+ 				SLEEP_10000_USEC + SLEEP_RANGE_USEC);
+ 	}
+ 	if (gpio_is_valid(slg51000->chip_buck_pin)) {
+ 		desc = gpio_to_desc(slg51000->chip_buck_pin);
+-		ret |= gpiod_direction_output_raw(desc, GPIOF_INIT_LOW);
++		ret |= gpiod_direction_output_raw(desc, 0);
+ 		usleep_range(1000, 1020);
+ 	}
+ 	if (gpio_is_valid(slg51000->chip_bb_pin)) {
+ 		desc = gpio_to_desc(slg51000->chip_bb_pin);
+-		ret |= gpiod_direction_output_raw(desc, GPIOF_INIT_LOW);
++		ret |= gpiod_direction_output_raw(desc, 0);
+ 		usleep_range(1000, 1020);
+ 	}
+ 
+diff --git a/drivers/misc/gsc-spi.c b/drivers/misc/gsc-spi.c
+index 2b24837..7e1f82f 100644
+--- a/drivers/misc/gsc-spi.c
++++ b/drivers/misc/gsc-spi.c
+@@ -133,7 +133,7 @@ static int gsc_tpm_datagram(struct gsc_data *gsc,
+ 	int gsc_fell_over = 0;
+ 
+ 	/* Lock the SPI bus until we're completely done */
+-	spi_bus_lock(spi->master);
++	spi_bus_lock(spi->controller);
+ 
+ 	/* Check whether GSC is awake (b/142475097) */
+ 	ret = gsc_is_awake(gsc);
+@@ -213,7 +213,7 @@ static int gsc_tpm_datagram(struct gsc_data *gsc,
+ 		ret = -EFAULT;
+ 
+ exit:
+-	spi_bus_unlock(spi->master);
++	spi_bus_unlock(spi->controller);
+ 
+ 	return ret;
+ }
+@@ -223,7 +223,7 @@ static int gsc_reset(struct gsc_data *gsc)
+ 	/* Synchronize with the datagrams by locking the SPI bus */
+ 	struct spi_device *spi = gsc->spi;
+ 
+-	spi_bus_lock(spi->master);
++	spi_bus_lock(spi->controller);
+ 
+ 	/* Assert reset for at least 3ms after VDDIOM is stable; 10ms is safe */
+ 	gpio_set_value(gsc->ctdl_rst, 1);
+@@ -233,7 +233,7 @@ static int gsc_reset(struct gsc_data *gsc)
+ 	gpio_set_value(gsc->ctdl_rst, 0);
+ 	msleep(100);
+ 
+-	spi_bus_unlock(spi->master);
++	spi_bus_unlock(spi->controller);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c b/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c
+index ecf2f5d..abcf5fc 100644
+--- a/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c
++++ b/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c
+@@ -8,6 +8,7 @@
+  * Author: Hongseock Kim <hongpooh.kim@samsung.com>
+  */
+ 
++#include <linux/irqchip/irq-msi-lib.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/gpio.h>
+@@ -1625,19 +1626,16 @@ void exynos_pcie_rc_write_dbi(struct dw_pcie *pci, void __iomem *base, u32 reg,
+ 	exynos_pcie_rc_wr_own_conf(pp, reg, size, val);
+ }
+ 
+-static int exynos_pcie_rc_link_up(struct dw_pcie *pci)
++static bool exynos_pcie_rc_link_up(struct dw_pcie *pci)
+ {
+ 	struct exynos_pcie *exynos_pcie = to_exynos_pcie(pci);
+ 	u32 val;
+ 
+ 	if (exynos_pcie->state != STATE_LINK_UP)
+-		return 0;
++		return false;
+ 
+ 	val = exynos_elbi_read(exynos_pcie, PCIE_ELBI_RDLH_LINKUP) & PCIE_ELBI_LTSSM_STATE_MASK;
+-	if (val >= S_RCVRY_LOCK && val <= S_L1_IDLE)
+-		return 1;
+-
+-	return 0;
++	return val >= S_RCVRY_LOCK && val <= S_L1_IDLE;
+ }
+ 
+ static const struct dw_pcie_ops dw_pcie_ops = {
+@@ -2812,7 +2810,7 @@ static int exynos_pcie_rc_init(struct dw_pcie_rp *pp)
+ }
+ 
+ static struct dw_pcie_host_ops exynos_pcie_rc_ops = {
+-	.host_init = exynos_pcie_rc_init,
++	.init = exynos_pcie_rc_init,	/* 6.x: was .host_init */
+ };
+ 
+ void exynos_pcie_msi_post_process(struct dw_pcie_rp *pp)
+@@ -4906,10 +4904,31 @@ int register_separated_msi_vector(int ch_num, irq_handler_t handler, void *conte
+ }
+ EXPORT_SYMBOL_GPL(register_separated_msi_vector);
+ 
++static struct msi_parent_ops exynos_pcie_msi_parent_ops;
++
++static bool exynos_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *domain,
++					  struct irq_domain *real_parent,
++					  struct msi_domain_info *info)
++{
++	struct dw_pcie_rp *pp = real_parent->host_data;
++	struct exynos_pcie *exynos_pcie = to_exynos_pcie(to_dw_pcie_from_pp(pp));
++
++	if (!msi_lib_init_dev_msi_info(dev, domain, real_parent, info))
++		return false;
++
++	info->chip->irq_set_affinity = exynos_pcie_msi_set_affinity;
++	info->chip->irq_set_wake = exynos_pcie_rc_set_enable_wake;
++	if (exynos_pcie->ep_device_type == EP_QC_WIFI ||
++	    exynos_pcie->ep_device_type == EP_SAMSUNG_MODEM) {
++		info->chip->irq_mask = pci_msi_mask_irq;
++		info->chip->irq_unmask = pci_msi_unmask_irq;
++	}
++
++	return true;
++}
++
+ static int exynos_pcie_rc_add_port(struct platform_device *pdev, struct dw_pcie_rp *pp, int ch_num)
+ {
+-	struct irq_domain *msi_domain;
+-	struct msi_domain_info *msi_domain_info;
+ 	int ret, i, sep_irq;
+ 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+ 	struct exynos_pcie *exynos_pcie = to_exynos_pcie(pci);
+@@ -4970,7 +4989,7 @@ skip_sep_request_irq:
+ 	 * we would like to skip the dw_pcie_wait_for_link() in the dw_pcie_host_init()
+ 	 * so we setup this bit to avoid waiting for the link up during the enumeration.
+ 	 */
+-	dw_pcie_cap_set(pci, USE_LINKUP_IRQ);
++	pp->use_linkup_irq = true;	/* 6.13+: was dw_pcie_cap_set(pci, USE_LINKUP_IRQ) */
+ 
+ 	ret = dw_pcie_host_init(pp);
+ 	if (ret) {
+@@ -4981,16 +5000,16 @@ skip_sep_request_irq:
+ 	// Reset this back to 36-bits
+ 	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
+ 
+-	if (pp->msi_domain) {
+-		msi_domain = pp->msi_domain;
+-		msi_domain_info = (struct msi_domain_info *)msi_domain->host_data;
+-		msi_domain_info->chip->irq_set_affinity = exynos_pcie_msi_set_affinity;
+-		msi_domain_info->chip->irq_set_wake = exynos_pcie_rc_set_enable_wake;
+-		if (exynos_pcie->ep_device_type == EP_QC_WIFI ||
+-				exynos_pcie->ep_device_type == EP_SAMSUNG_MODEM) {
+-			msi_domain_info->chip->irq_mask = pci_msi_mask_irq;
+-			msi_domain_info->chip->irq_unmask = pci_msi_unmask_irq;
+-		}
++	/*
++	 * 6.18: DWC uses the MSI-parent model, so there is no single PCI/MSI
++	 * domain chip to patch here any more; each endpoint gets its own when it
++	 * allocates vectors. Hook the parent's init_dev_msi_info() so the same
++	 * affinity/wake/mask overrides land on every endpoint's MSI chip.
++	 */
++	if (pp->irq_domain) {
++		exynos_pcie_msi_parent_ops = *pp->irq_domain->msi_parent_ops;
++		exynos_pcie_msi_parent_ops.init_dev_msi_info = exynos_pcie_init_dev_msi_info;
++		pp->irq_domain->msi_parent_ops = &exynos_pcie_msi_parent_ops;
+ 	}
+ 
+ 	return 0;
+@@ -5430,7 +5449,7 @@ probe_fail:
+ 	return ret;
+ }
+ 
+-static int __exit exynos_pcie_rc_remove(struct platform_device *pdev)
++static void exynos_pcie_rc_remove(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct dw_pcie *pci = container_of(&dev, struct dw_pcie, dev);
+@@ -5439,8 +5458,6 @@ static int __exit exynos_pcie_rc_remove(struct platform_device *pdev)
+ 	dev_info(&pdev->dev, "%s\n", __func__);
+ 
+ 	mutex_destroy(&exynos_pcie->power_onoff_lock);
+-
+-	return 0;
+ }
+ 
+ #if IS_ENABLED(CONFIG_PM)
+diff --git a/drivers/performance/lat_governors/gs_governor_memlat.c b/drivers/performance/lat_governors/gs_governor_memlat.c
+index 5a9bf5b..edf43e9 100644
+--- a/drivers/performance/lat_governors/gs_governor_memlat.c
++++ b/drivers/performance/lat_governors/gs_governor_memlat.c
+@@ -386,7 +386,7 @@ err_out:
+ 	return ret;
+ }
+ 
+-static int gs_governor_memlat_driver_remove(struct platform_device *pdev)
++static void gs_governor_memlat_driver_remove(struct platform_device *pdev)
+ {
+ 	/* Stop governor servicing. */
+ 	gov_stop();
+@@ -396,8 +396,6 @@ static int gs_governor_memlat_driver_remove(struct platform_device *pdev)
+ 
+ 	/* Remove pm_qos vote here. */
+ 	gs_memlat_governor_remove_all_votes();
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id gs_governor_memlat_root_match[] = {
+diff --git a/drivers/performance/lat_governors/gs_lat_governors_trace.h b/drivers/performance/lat_governors/gs_lat_governors_trace.h
+index e3c2a3a..a3f76a8 100644
+--- a/drivers/performance/lat_governors/gs_lat_governors_trace.h
++++ b/drivers/performance/lat_governors/gs_lat_governors_trace.h
+@@ -35,7 +35,7 @@ TRACE_EVENT(gs_lat_governor,
+ 	),
+ 
+ 	TP_fast_assign(
+-		__assign_str(name, name);
++		__assign_str(name);
+ 		__entry->cpu = cpu;
+ 		__entry->ratio = ratio;
+ 		__entry->stall = stall;
+diff --git a/drivers/phy/samsung/eusb_repeater.h b/drivers/phy/samsung/eusb_repeater.h
+index 26bb74a..9223d5a 100644
+--- a/drivers/phy/samsung/eusb_repeater.h
++++ b/drivers/phy/samsung/eusb_repeater.h
+@@ -14,7 +14,7 @@
+ #ifndef __EUSB_REPEATER_H__
+ #define __EUSB_REPEATER_H__
+ 
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include <linux/completion.h>
+ #include <linux/ctype.h>
+ #include <linux/delay.h>
+diff --git a/drivers/phy/samsung/phy-exynos-mipi-dsim.c b/drivers/phy/samsung/phy-exynos-mipi-dsim.c
+index c824e95..4fbc8d5 100644
+--- a/drivers/phy/samsung/phy-exynos-mipi-dsim.c
++++ b/drivers/phy/samsung/phy-exynos-mipi-dsim.c
+@@ -10,6 +10,7 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/of_device.h>
+ #include <linux/err.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -275,7 +276,7 @@ static int exynos_mipi_dsim_phy_power_off(struct phy *phy)
+ }
+ 
+ static struct phy *exynos_mipi_phy_of_xlate(struct device *dev,
+-					struct of_phandle_args *args)
++					const struct of_phandle_args *args)
+ {
+ 	struct exynos_mipi_phy *state = dev_get_drvdata(dev);
+ 
+diff --git a/drivers/phy/samsung/phy-exynos-mipi.c b/drivers/phy/samsung/phy-exynos-mipi.c
+index 2ff6550..f6c35f8 100644
+--- a/drivers/phy/samsung/phy-exynos-mipi.c
++++ b/drivers/phy/samsung/phy-exynos-mipi.c
+@@ -6,6 +6,7 @@
+  *		http://www.samsung.com
+  */
+ 
++#include <linux/of_device.h>
+ #include <linux/err.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -938,7 +939,7 @@ static int exynos_mipi_phy_power_off(struct phy *phy)
+ }
+ 
+ static struct phy *exynos_mipi_phy_of_xlate(struct device *dev,
+-					struct of_phandle_args *args)
++					const struct of_phandle_args *args)
+ {
+ 	struct exynos_mipi_phy *state = dev_get_drvdata(dev);
+ 
+diff --git a/drivers/phy/samsung/phy-exynos-usb3p1.c b/drivers/phy/samsung/phy-exynos-usb3p1.c
+index 15a5641..15375cc 100644
+--- a/drivers/phy/samsung/phy-exynos-usb3p1.c
++++ b/drivers/phy/samsung/phy-exynos-usb3p1.c
+@@ -782,7 +782,7 @@ static u16 phy_exynos_usb_v3p1_ssp_cr_access(struct exynos_usbphy_info *info,
+ 			    (G2PHY_CRPARCON0_CR_PARA_ADDR(addr) |
+ 			     (G2PHY_CRPARCON0_CR_PARA_CLK));
+ 
+-			if (cr_op == USBCON_CR_WRITE) {
++			if (cr_op == USBCON_CR_SSP_WRITE) {
+ 				g2phy_crparcon2 =
+ 				    readl(base + EXYNOS_USBCON_G2PHY_CRPARCON2);
+ 				g2phy_crparcon2 |=
+@@ -814,7 +814,7 @@ static u16 phy_exynos_usb_v3p1_ssp_cr_access(struct exynos_usbphy_info *info,
+ 			    ~(0x1 << phy_exynos_usb_v3p1_ssp_cr_clk_down(info));
+ 
+ 		} else if (loop_cnt == 2) {
+-			if (cr_op == USBCON_CR_WRITE) {
++			if (cr_op == USBCON_CR_SSP_WRITE) {
+ 				/* Do nothing */
+ 			} else {
+ 				/* cr_op==USBCON_CR_READ */
+diff --git a/drivers/phy/samsung/phy-exynos-usbdrd.c b/drivers/phy/samsung/phy-exynos-usbdrd.c
+index c36243e..57c8880 100644
+--- a/drivers/phy/samsung/phy-exynos-usbdrd.c
++++ b/drivers/phy/samsung/phy-exynos-usbdrd.c
+@@ -13,6 +13,7 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/of_platform.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/device.h>
+@@ -2046,7 +2047,7 @@ void exynos_usbdrd_usbdp_tca_set(struct phy *phy, int mux, int low_power_en)
+ EXPORT_SYMBOL_GPL(exynos_usbdrd_usbdp_tca_set);
+ 
+ static struct phy *exynos_usbdrd_phy_xlate(struct device *dev,
+-					   struct of_phandle_args *args)
++					   const struct of_phandle_args *args)
+ {
+ 	struct exynos_usbdrd_phy *phy_drd = dev_get_drvdata(dev);
+ 
+diff --git a/drivers/pinctrl/gs/pinctrl-samsung.c b/drivers/pinctrl/gs/pinctrl-samsung.c
+index 30ee7ad..ab5eddd 100644
+--- a/drivers/pinctrl/gs/pinctrl-samsung.c
++++ b/drivers/pinctrl/gs/pinctrl-samsung.c
+@@ -659,7 +659,7 @@ static void samsung_gpio_set_value(struct gpio_chip *gc,
+ }
+ 
+ /* gpiolib gpio_set callback function */
+-static void samsung_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
++static int samsung_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
+ {
+ 	struct samsung_pin_bank *bank = gpiochip_get_data(gc);
+ 	unsigned long flags;
+@@ -667,6 +667,8 @@ static void samsung_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
+ 	raw_spin_lock_irqsave(&bank->slock, flags);
+ 	samsung_gpio_set_value(gc, offset, value);
+ 	raw_spin_unlock_irqrestore(&bank->slock, flags);
++
++	return 0;
+ }
+ 
+ /* gpiolib gpio_get callback function */
+diff --git a/drivers/pinctrl/pinctrl-slg51000.c b/drivers/pinctrl/pinctrl-slg51000.c
+index dac5aa6..32828b1 100644
+--- a/drivers/pinctrl/pinctrl-slg51000.c
++++ b/drivers/pinctrl/pinctrl-slg51000.c
+@@ -82,7 +82,7 @@ static int slg51000_gpio_get_direction(struct gpio_chip *chip,
+ 	case SLG51000_SEQ2:
+ 	case SLG51000_SEQ3:
+ 	case SLG51000_SEQ4:
+-		return GPIOF_DIR_OUT;
++		return GPIO_LINE_DIRECTION_OUT;
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+@@ -94,7 +94,7 @@ static int slg51000_gpio_get_direction(struct gpio_chip *chip,
+ 		return ret;
+ 	}
+ 
+-	return (val & SLG51000_GPIO_DIR_MASK) ? GPIOF_DIR_OUT : GPIOF_DIR_IN;
++	return (val & SLG51000_GPIO_DIR_MASK) ? GPIO_LINE_DIRECTION_OUT : GPIO_LINE_DIRECTION_IN;
+ }
+ 
+ static int slg51000_generic_seq_get_direction(struct gpio_chip *chip,
+@@ -109,7 +109,7 @@ static int slg51000_generic_seq_get_direction(struct gpio_chip *chip,
+ 	case SLG51000_GENERIC_SEQ5:
+ 	case SLG51000_GENERIC_SEQ6:
+ 	case SLG51000_GENERIC_SEQ7:
+-		return GPIOF_DIR_OUT;
++		return GPIO_LINE_DIRECTION_OUT;
+ 	default:
+ 		return -EOPNOTSUPP;
+ 	}
+@@ -149,7 +149,7 @@ static int slg51000_gpio_get(struct gpio_chip *chip, unsigned int offset)
+ 	return val;
+ }
+ 
+-static void slg51000_gpio_set(struct gpio_chip *chip, unsigned int offset,
++static int slg51000_gpio_set(struct gpio_chip *chip, unsigned int offset,
+ 			     int value)
+ {
+ 	int ret;
+@@ -176,7 +176,7 @@ static void slg51000_gpio_set(struct gpio_chip *chip, unsigned int offset,
+ 	default:
+ 		pr_err("Error: %s Unsupported GPIO offset %d\n",
+ 			__func__, offset);
+-		return;
++		return 0;
+ 	}
+ 
+ 	ret = regmap_write(data->regmap, addr, val);
+@@ -187,6 +187,8 @@ static void slg51000_gpio_set(struct gpio_chip *chip, unsigned int offset,
+ 
+ 	if (data->chip->exit_sw_test_mode)
+ 		data->chip->exit_sw_test_mode(data->regmap);
++
++	return 0;
+ }
+ 
+ static int slg51000_gpio_seq_get(struct gpio_chip *chip, unsigned int offset)
+@@ -205,7 +207,7 @@ static int slg51000_gpio_seq_get(struct gpio_chip *chip, unsigned int offset)
+ 	return val & slg51000_ctrl_bit_tbl[offset];
+ }
+ 
+-static void slg51000_gpio_seq_set(struct gpio_chip *chip, unsigned int offset,
++static int slg51000_gpio_seq_set(struct gpio_chip *chip, unsigned int offset,
+ 			     int value)
+ {
+ 	int ret;
+@@ -219,7 +221,9 @@ static void slg51000_gpio_seq_set(struct gpio_chip *chip, unsigned int offset,
+ 			__func__, offset);
+ 	}
+ 
+-	return;
++	return 0;
++
++	return 0;
+ }
+ 
+ static int slg51000_generic_seq_get(struct gpio_chip *chip, unsigned int offset)
+@@ -238,7 +242,7 @@ static int slg51000_generic_seq_get(struct gpio_chip *chip, unsigned int offset)
+ 	return val & BIT(offset);
+ }
+ 
+-static void slg51000_generic_seq_set(struct gpio_chip *chip,
++static int slg51000_generic_seq_set(struct gpio_chip *chip,
+ 				unsigned int offset, int value)
+ {
+ 	int ret;
+@@ -252,7 +256,9 @@ static void slg51000_generic_seq_set(struct gpio_chip *chip,
+ 			__func__, offset);
+ 	}
+ 
+-	return;
++	return 0;
++
++	return 0;
+ }
+ 
+ static int slg51000_gpio_direction_input(struct gpio_chip *chip,
+@@ -586,9 +592,8 @@ static int slg51000_pinctrl_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int slg51000_pinctrl_remove(struct platform_device *pdev)
++static void slg51000_pinctrl_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct platform_device_id slg51000_pinctrl_id[] = {
+diff --git a/drivers/pwm/pwm-exynos.c b/drivers/pwm/pwm-exynos.c
+index dd2ef8f..5ed08e6 100644
+--- a/drivers/pwm/pwm-exynos.c
++++ b/drivers/pwm/pwm-exynos.c
+@@ -106,7 +106,10 @@ struct samsung_pwm_save_regs {
+  * @tclk1:		external clock 1 (can be ERR_PTR if not present)
+  */
+ struct samsung_pwm_chip {
+-	struct pwm_chip chip;
++	/* 6.9+: allocated by devm_pwmchip_alloc(), this struct is its drvdata */
++	struct pwm_chip *chip;
++	/* 6.9+: replaces the removed pwm_{get,set}_chip_data() */
++	struct samsung_pwm_channel *channel_data[SAMSUNG_PWM_NUM];
+ 	struct samsung_pwm_variant variant;
+ 	u8 inverter_mask;
+ 	u8 disabled_mask;
+@@ -178,7 +181,7 @@ static void pwm_samsung_clk_disable(struct samsung_pwm_chip *chip)
+ static inline
+ struct samsung_pwm_chip *to_samsung_pwm_chip(struct pwm_chip *chip)
+ {
+-	return container_of(chip, struct samsung_pwm_chip, chip);
++	return pwmchip_get_drvdata(chip);
+ }
+ 
+ static inline unsigned int to_tcon_channel(unsigned int channel)
+@@ -251,12 +254,12 @@ static unsigned long pwm_samsung_calc_tin(struct samsung_pwm_chip *chip,
+ 				return rate;
+ 		}
+ 
+-		dev_warn(chip->chip.dev,
++		dev_warn(pwmchip_parent(chip->chip),
+ 			"tclk of PWM %d is inoperational, using tdiv\n", chan);
+ 	}
+ 
+ 	rate = pwm_samsung_get_tin_rate(chip, chan);
+-	dev_dbg(chip->chip.dev, "tin parent at %lu\n", rate);
++	dev_dbg(pwmchip_parent(chip->chip), "tin parent at %lu\n", rate);
+ 
+ 	/*
+ 	 * Compare minimum PWM frequency that can be achieved with possible
+@@ -313,7 +316,7 @@ static int pwm_samsung_request(struct pwm_chip *chip, struct pwm_device *pwm)
+ 	unsigned long flags;
+ 
+ 	if (!(our_chip->variant.output_mask & BIT(pwm->hwpwm))) {
+-		dev_warn(chip->dev,
++		dev_warn(pwmchip_parent(chip),
+ 			"tried to request PWM channel %d without output\n",
+ 			pwm->hwpwm);
+ 		return -EINVAL;
+@@ -323,7 +326,7 @@ static int pwm_samsung_request(struct pwm_chip *chip, struct pwm_device *pwm)
+ 	if (!our_chan)
+ 		return -ENOMEM;
+ 
+-	pwm_set_chip_data(pwm, our_chan);
++	our_chip->channel_data[pwm->hwpwm] = our_chan;
+ 
+ 	pwm_samsung_clk_enable(our_chip);
+ 	spin_lock_irqsave(&samsung_pwm_lock, flags);
+@@ -336,14 +339,17 @@ static int pwm_samsung_request(struct pwm_chip *chip, struct pwm_device *pwm)
+ 
+ static void pwm_samsung_free(struct pwm_chip *chip, struct pwm_device *pwm)
+ {
+-	kfree(pwm_get_chip_data(pwm));
++	struct samsung_pwm_chip *our_chip = to_samsung_pwm_chip(chip);
++
++	kfree(our_chip->channel_data[pwm->hwpwm]);
++	our_chip->channel_data[pwm->hwpwm] = NULL;
+ }
+ 
+ static void pwm_samsung_manual_update(struct samsung_pwm_chip *chip,
+ 				      struct pwm_device *pwm)
+ {
+ 	unsigned int tcon_chan = to_tcon_channel(pwm->hwpwm);
+-	struct samsung_pwm_channel *channel = pwm_get_chip_data(pwm);
++	struct samsung_pwm_channel *channel = to_samsung_pwm_chip(pwm->chip)->channel_data[pwm->hwpwm];
+ 	u32 tcon;
+ 
+ 	tcon = readl(chip->base + REG_TCON);
+@@ -368,7 +374,7 @@ static int pwm_samsung_enable(struct pwm_chip *chip, struct pwm_device *pwm)
+ {
+ 	struct samsung_pwm_chip *our_chip = to_samsung_pwm_chip(chip);
+ 	unsigned int tcon_chan = to_tcon_channel(pwm->hwpwm);
+-	struct samsung_pwm_channel *channel = pwm_get_chip_data(pwm);
++	struct samsung_pwm_channel *channel = to_samsung_pwm_chip(pwm->chip)->channel_data[pwm->hwpwm];
+ 	unsigned long flags;
+ 	u32 tcon;
+ 
+@@ -397,7 +403,7 @@ static void pwm_samsung_disable(struct pwm_chip *chip, struct pwm_device *pwm)
+ {
+ 	struct samsung_pwm_chip *our_chip = to_samsung_pwm_chip(chip);
+ 	unsigned int tcon_chan = to_tcon_channel(pwm->hwpwm);
+-	struct samsung_pwm_channel *channel = pwm_get_chip_data(pwm);
++	struct samsung_pwm_channel *channel = to_samsung_pwm_chip(pwm->chip)->channel_data[pwm->hwpwm];
+ 	unsigned long flags;
+ 	u32 tcon;
+ 
+@@ -420,7 +426,7 @@ static int __pwm_samsung_config(struct pwm_chip *chip, struct pwm_device *pwm,
+ {
+ 	struct samsung_pwm_chip *our_chip = to_samsung_pwm_chip(chip);
+ 	unsigned int tcon_chan = to_tcon_channel(pwm->hwpwm);
+-	struct samsung_pwm_channel *chan = pwm_get_chip_data(pwm);
++	struct samsung_pwm_channel *chan = to_samsung_pwm_chip(pwm->chip)->channel_data[pwm->hwpwm];
+ 	u32 tin_ns = chan->tin_ns, tcnt, tcmp, tcon;
+ 	enum duty_cycle duty_cycle;
+ 	unsigned long flags;
+@@ -442,9 +448,9 @@ static int __pwm_samsung_config(struct pwm_chip *chip, struct pwm_device *pwm,
+ 
+ 	pwm_samsung_clk_enable(our_chip);
+ 
+-	dev_dbg(our_chip->chip.dev, "pwm_pclk at %lu\n",
++	dev_dbg(pwmchip_parent(our_chip->chip), "pwm_pclk at %lu\n",
+ 			clk_get_rate(our_chip->pwm_pclk));
+-	dev_dbg(our_chip->chip.dev, "pwm_sclk at %lu\n",
++	dev_dbg(pwmchip_parent(our_chip->chip), "pwm_sclk at %lu\n",
+ 			clk_get_rate(our_chip->pwm_sclk));
+ 
+ 	/* Check to see if we are changing the clock rate of the PWM. */
+@@ -454,7 +460,7 @@ static int __pwm_samsung_config(struct pwm_chip *chip, struct pwm_device *pwm,
+ 
+ 		period = (unsigned int)(NSEC_PER_SEC / period_ns);
+ 
+-		dev_dbg(our_chip->chip.dev, "duty_ns=%d, period_ns=%d (%u)\n",
++		dev_dbg(pwmchip_parent(our_chip->chip), "duty_ns=%d, period_ns=%d (%u)\n",
+ 						duty_ns, period_ns, period);
+ 
+ 		tin_rate = pwm_samsung_calc_tin(our_chip, pwm->hwpwm, period);
+@@ -501,7 +507,7 @@ static int __pwm_samsung_config(struct pwm_chip *chip, struct pwm_device *pwm,
+ 	if (tcmp)
+ 		--tcmp;
+ 
+-	dev_dbg(our_chip->chip.dev,
++	dev_dbg(pwmchip_parent(our_chip->chip),
+ 				"tin_ns=%u, tcmp=%u/%u\n", tin_ns, tcmp, tcnt);
+ 
+ 	/* Update PWM registers. */
+@@ -519,7 +525,7 @@ static int __pwm_samsung_config(struct pwm_chip *chip, struct pwm_device *pwm,
+ 	if (chan->running == 1 && tcon & TCON_START(tcon_chan) &&
+ 	    chan->duty_cycle != duty_cycle) {
+ 		if (duty_cycle == DUTY_CYCLE_ZERO) {
+-			dev_dbg(our_chip->chip.dev, "Forcing manual update");
++			dev_dbg(pwmchip_parent(our_chip->chip), "Forcing manual update");
+ 			pwm_samsung_manual_update(our_chip, pwm);
+ 		} else {
+ 			tcon |= TCON_AUTORELOAD(tcon_chan);
+@@ -593,7 +599,7 @@ static int pwm_samsung_capture(struct pwm_chip *chip, struct pwm_device *pwm,
+ 		       struct pwm_capture *result, unsigned long timeout)
+ {
+ 	struct samsung_pwm_chip *our_chip = to_samsung_pwm_chip(chip);
+-	struct samsung_pwm_channel *chan = pwm_get_chip_data(pwm);
++	struct samsung_pwm_channel *chan = to_samsung_pwm_chip(pwm->chip)->channel_data[pwm->hwpwm];
+ 	unsigned long freq;
+ 	u32 tcon, tcnt, tcmp, polarity, enabled;
+ 	u32 tcon_chan = to_tcon_channel(pwm->hwpwm);
+@@ -608,9 +614,9 @@ static int pwm_samsung_capture(struct pwm_chip *chip, struct pwm_device *pwm,
+ 	tcnt = readl(our_chip->base + REG_TCNTB(pwm->hwpwm));
+ 	tcmp = readl(our_chip->base + REG_TCMPB(pwm->hwpwm));
+ 	freq = clk_get_rate(our_chip->pwm_sclk) / tcnt;
+-	dev_dbg(our_chip->chip.dev, "output freq = %luHz, tcnt = %u, tcmp = %u\n",
++	dev_dbg(pwmchip_parent(our_chip->chip), "output freq = %luHz, tcnt = %u, tcmp = %u\n",
+ 			freq, tcnt, tcmp);
+-	dev_dbg(our_chip->chip.dev, "pwm %sabled, polarity: %s",
++	dev_dbg(pwmchip_parent(our_chip->chip), "pwm %sabled, polarity: %s",
+ 			(enabled ? "en":"dis"), (polarity ? "inverse" : "normal"));
+ 
+ 	return 0;
+@@ -665,7 +671,6 @@ static const struct pwm_ops pwm_samsung_ops = {
+ 	.free		= pwm_samsung_free,
+ 	.apply		= pwm_samsung_apply,
+ 	.capture	= pwm_samsung_capture,
+-	.owner		= THIS_MODULE,
+ };
+ 
+ #ifdef CONFIG_OF
+@@ -709,10 +714,8 @@ MODULE_DEVICE_TABLE(of, samsung_pwm_matches);
+ 
+ static int pwm_samsung_parse_dt(struct samsung_pwm_chip *chip)
+ {
+-	struct device_node *np = chip->chip.dev->of_node;
++	struct device_node *np = pwmchip_parent(chip->chip)->of_node;
+ 	const struct of_device_id *match;
+-	struct property *prop;
+-	const __be32 *cur;
+ 	u32 val;
+ 
+ 	match = of_match_node(samsung_pwm_matches, np);
+@@ -721,9 +724,9 @@ static int pwm_samsung_parse_dt(struct samsung_pwm_chip *chip)
+ 
+ 	memcpy(&chip->variant, match->data, sizeof(chip->variant));
+ 
+-	of_property_for_each_u32(np, "samsung,pwm-outputs", prop, cur, val) {
++	of_property_for_each_u32(np, "samsung,pwm-outputs", val) {
+ 		if (val >= SAMSUNG_PWM_NUM) {
+-			dev_err(chip->chip.dev,
++			dev_err(pwmchip_parent(chip->chip),
+ 				"%s: invalid channel index in samsung,pwm-outputs property\n",
+ 								__func__);
+ 			continue;
+@@ -744,16 +747,17 @@ static int pwm_samsung_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct samsung_pwm_chip *chip;
++	struct pwm_chip *pchip;
+ 	unsigned int chan, reg_tcfg0;
+ 	int ret;
+ 
+-	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
+-	if (chip == NULL)
+-		return -ENOMEM;
++	pchip = devm_pwmchip_alloc(&pdev->dev, SAMSUNG_PWM_NUM, sizeof(*chip));
++	if (IS_ERR(pchip))
++		return PTR_ERR(pchip);
+ 
+-	chip->chip.dev = &pdev->dev;
+-	chip->chip.ops = &pwm_samsung_ops;
+-	chip->chip.npwm = SAMSUNG_PWM_NUM;
++	chip = pwmchip_get_drvdata(pchip);
++	chip->chip = pchip;
++	pchip->ops = &pwm_samsung_ops;
+ 	chip->inverter_mask = BIT(SAMSUNG_PWM_NUM) - 1;
+ #ifdef CONFIG_CPU_IDLE
+ 	chip->idle_ip_index = exynos_get_idle_ip_index(dev_name(&pdev->dev));
+@@ -848,7 +852,7 @@ static int pwm_samsung_probe(struct platform_device *pdev)
+ 	}
+ #endif
+ 
+-	ret = pwmchip_add(&chip->chip);
++	ret = pwmchip_add(chip->chip);
+ 	if (ret < 0) {
+ 		dev_err(dev, "failed to register PWM chip\n");
+ 		goto chip_add_err;
+@@ -874,16 +878,14 @@ base_clk_err:
+ 
+ }
+ 
+-static int pwm_samsung_remove(struct platform_device *pdev)
++static void pwm_samsung_remove(struct platform_device *pdev)
+ {
+ 	struct samsung_pwm_chip *chip = platform_get_drvdata(pdev);
+ 
+-	pwmchip_remove(&chip->chip);
++	pwmchip_remove(chip->chip);
+ 
+ 	clk_unprepare(chip->pwm_sclk);
+ 	clk_unprepare(chip->pwm_pclk);
+-
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+@@ -913,7 +915,7 @@ static void pwm_samsung_save_regs(struct samsung_pwm_chip *chip)
+ 	chip->save_regs.tcon = readl(chip->base + REG_TCON);
+ 
+ 	for (i = 0; i < SAMSUNG_PWM_NUM; i++) {
+-		if (!pwm_get_chip_data(&chip->chip.pwms[i]))
++		if (!chip->channel_data[i])
+ 			continue;
+ 
+ 		chip->save_regs.tcntb[i] = readl(chip->base + REG_TCNTB(i));
+@@ -933,7 +935,7 @@ static void pwm_samsung_restore_regs(struct samsung_pwm_chip *chip)
+ 	writel(chip->save_regs.tcon, chip->base + REG_TCON);
+ 
+ 	for (i = 0; i < SAMSUNG_PWM_NUM; i++) {
+-		if (!pwm_get_chip_data(&chip->chip.pwms[i]))
++		if (!chip->channel_data[i])
+ 			continue;
+ 
+ 		writel(chip->save_regs.tcntb[i], chip->base + REG_TCNTB(i));
+@@ -951,8 +953,8 @@ static int pwm_samsung_suspend(struct device *dev)
+ 		pwm_samsung_clk_enable(chip);
+ 
+ 	for (i = 0; i < SAMSUNG_PWM_NUM; ++i) {
+-		struct pwm_device *pwm = &chip->chip.pwms[i];
+-		struct samsung_pwm_channel *chan = pwm_get_chip_data(pwm);
++		struct pwm_device *pwm = &chip->chip->pwms[i];
++		struct samsung_pwm_channel *chan = to_samsung_pwm_chip(pwm->chip)->channel_data[pwm->hwpwm];
+ 		unsigned int tcon_chan = to_tcon_channel(pwm->hwpwm);
+ 
+ 		if (!chan)
+diff --git a/drivers/regulator/s2mpg12-powermeter.c b/drivers/regulator/s2mpg12-powermeter.c
+index 563f638..23737ed 100644
+--- a/drivers/regulator/s2mpg12-powermeter.c
++++ b/drivers/regulator/s2mpg12-powermeter.c
+@@ -591,7 +591,7 @@ static int s2mpg12_meter_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int s2mpg12_meter_remove(struct platform_device *pdev)
++static void s2mpg12_meter_remove(struct platform_device *pdev)
+ {
+ 	struct s2mpg12_meter *s2mpg12 = platform_get_drvdata(pdev);
+ 
+@@ -605,7 +605,6 @@ static int s2mpg12_meter_remove(struct platform_device *pdev)
+ #if IS_ENABLED(CONFIG_DRV_SAMSUNG_PMIC)
+ 	pmic_device_destroy(s2mpg12->dev->devt);
+ #endif
+-	return 0;
+ }
+ 
+ static void s2mpg12_meter_shutdown(struct platform_device *pdev)
+diff --git a/drivers/regulator/s2mpg12-regulator.c b/drivers/regulator/s2mpg12-regulator.c
+index 7fdb58e..f26e15a 100644
+--- a/drivers/regulator/s2mpg12-regulator.c
++++ b/drivers/regulator/s2mpg12-regulator.c
+@@ -1028,14 +1028,13 @@ static int s2mpg12_pmic_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int s2mpg12_pmic_remove(struct platform_device *pdev)
++static void s2mpg12_pmic_remove(struct platform_device *pdev)
+ {
+ #if IS_ENABLED(CONFIG_DRV_SAMSUNG_PMIC)
+ 	struct s2mpg12_pmic *s2mpg12 = platform_get_drvdata(pdev);
+ 
+ 	pmic_device_destroy(s2mpg12->dev->devt);
+ #endif
+-	return 0;
+ }
+ 
+ static void s2mpg12_pmic_shutdown(struct platform_device *pdev)
+diff --git a/drivers/regulator/s2mpg13-powermeter.c b/drivers/regulator/s2mpg13-powermeter.c
+index 1637e44..f06a2ee 100644
+--- a/drivers/regulator/s2mpg13-powermeter.c
++++ b/drivers/regulator/s2mpg13-powermeter.c
+@@ -613,7 +613,7 @@ static int s2mpg13_meter_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int s2mpg13_meter_remove(struct platform_device *pdev)
++static void s2mpg13_meter_remove(struct platform_device *pdev)
+ {
+ 	struct s2mpg13_meter *s2mpg13 = platform_get_drvdata(pdev);
+ 
+@@ -627,7 +627,6 @@ static int s2mpg13_meter_remove(struct platform_device *pdev)
+ #if IS_ENABLED(CONFIG_DRV_SAMSUNG_PMIC)
+ 	pmic_device_destroy(s2mpg13->dev->devt);
+ #endif
+-	return 0;
+ }
+ 
+ static void s2mpg13_meter_shutdown(struct platform_device *pdev)
+diff --git a/drivers/regulator/s2mpg13-regulator.c b/drivers/regulator/s2mpg13-regulator.c
+index 69292dd..7f839ad 100644
+--- a/drivers/regulator/s2mpg13-regulator.c
++++ b/drivers/regulator/s2mpg13-regulator.c
+@@ -827,14 +827,13 @@ static int s2mpg13_pmic_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int s2mpg13_pmic_remove(struct platform_device *pdev)
++static void s2mpg13_pmic_remove(struct platform_device *pdev)
+ {
+ #if IS_ENABLED(CONFIG_DRV_SAMSUNG_PMIC)
+ 	struct s2mpg13_pmic *s2mpg13 = platform_get_drvdata(pdev);
+ 
+ 	pmic_device_destroy(s2mpg13->dev->devt);
+ #endif
+-	return 0;
+ }
+ 
+ static void s2mpg13_pmic_shutdown(struct platform_device *pdev)
+diff --git a/drivers/regulator/slg51000-regulator.c b/drivers/regulator/slg51000-regulator.c
+index 3e64473..3858dec 100644
+--- a/drivers/regulator/slg51000-regulator.c
++++ b/drivers/regulator/slg51000-regulator.c
+@@ -372,14 +372,12 @@ static int slg51000_regulator_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int slg51000_regulator_remove(struct platform_device *pdev)
++static void slg51000_regulator_remove(struct platform_device *pdev)
+ {
+ 	struct slg51000_dev *chip = dev_get_drvdata(pdev->dev.parent);
+ 
+ 	flush_workqueue(chip->slg51000_wq);
+ 	destroy_workqueue(chip->slg51000_wq);
+-
+-	return 0;
+ }
+ 
+ static const struct platform_device_id slg51000_regulator_id[] = {
+diff --git a/drivers/rtc/rtc-s2mpg12.c b/drivers/rtc/rtc-s2mpg12.c
+index f1d0099..4c3c0a2 100644
+--- a/drivers/rtc/rtc-s2mpg12.c
++++ b/drivers/rtc/rtc-s2mpg12.c
+@@ -735,7 +735,7 @@ err_rtc_init_reg:
+ 	return ret;
+ }
+ 
+-static int s2m_rtc_remove(struct platform_device *pdev)
++static void s2m_rtc_remove(struct platform_device *pdev)
+ {
+ 	struct s2m_rtc_info *info = platform_get_drvdata(pdev);
+ 
+@@ -747,8 +747,6 @@ static int s2m_rtc_remove(struct platform_device *pdev)
+ 		device_init_wakeup(&pdev->dev, false);
+ #endif
+ 	mutex_destroy(&info->lock);
+-
+-	return 0;
+ }
+ 
+ static void s2m_rtc_shutdown(struct platform_device *pdev)
+diff --git a/drivers/soc/google/acpm/acpm.c b/drivers/soc/google/acpm/acpm.c
+index ca52b65..de1482f 100644
+--- a/drivers/soc/google/acpm/acpm.c
++++ b/drivers/soc/google/acpm/acpm.c
+@@ -351,9 +351,8 @@ static int acpm_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int acpm_remove(struct platform_device *pdev)
++static void acpm_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct of_device_id acpm_ipc_match[] = {
+diff --git a/drivers/soc/google/acpm/acpm_flexpmu_dbg.c b/drivers/soc/google/acpm/acpm_flexpmu_dbg.c
+index 5925642..5416fa3 100644
+--- a/drivers/soc/google/acpm/acpm_flexpmu_dbg.c
++++ b/drivers/soc/google/acpm/acpm_flexpmu_dbg.c
+@@ -4,6 +4,7 @@
+  *
+  */
+ 
++#include <linux/platform_device.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/of_address.h>
+@@ -498,15 +499,13 @@ err_flexpmu_info:
+ 	return ret;
+ }
+ 
+-static int exynos_flexpmu_dbg_remove(struct platform_device *pdev)
++static void exynos_flexpmu_dbg_remove(struct platform_device *pdev)
+ {
+ 	struct dbgfs_info *flexpmu_dbg_info = platform_get_drvdata(pdev);
+ 
+ 	debugfs_remove_recursive(flexpmu_dbg_root);
+ 	kfree(flexpmu_dbg_info);
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id exynos_flexpmu_dbg_match[] = {
+diff --git a/drivers/soc/google/acpm/acpm_ipc.c b/drivers/soc/google/acpm/acpm_ipc.c
+index 5e1ca52..937c75a 100644
+--- a/drivers/soc/google/acpm/acpm_ipc.c
++++ b/drivers/soc/google/acpm/acpm_ipc.c
+@@ -598,13 +598,13 @@ EXPORT_SYMBOL_GPL(acpm_ipc_send_data_sync);
+ #define arch_irq_stat() 0
+ #endif
+ 
+-extern int nr_irqs;
++/* 6.12: nr_irqs is no longer exported; use irq_get_nr_irqs() */
+ 
+ static void acpm_alloc_irq_info(bool usage)
+ {
+ 	kfree(irq_info);
+ 	if (usage)
+-		irq_info = kcalloc(nr_irqs, sizeof(struct cpu_irq_info), GFP_KERNEL);
++		irq_info = kcalloc(irq_get_nr_irqs(), sizeof(struct cpu_irq_info), GFP_KERNEL);
+ 	else
+ 		irq_info = NULL;
+ }
+@@ -642,7 +642,7 @@ static void cpu_irq_info_dump(u32 retry)
+ 			continue;
+ 
+ 		for_each_possible_cpu(cpu)
+-			irq_stat += *per_cpu_ptr(desc->kstat_irqs, cpu);
++			irq_stat += per_cpu_ptr(desc->kstat_irqs, cpu)->cnt;
+ 
+ 		if (!irq_stat)
+ 			continue;
+@@ -1136,9 +1136,8 @@ int acpm_ipc_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-int acpm_ipc_remove(struct platform_device *pdev)
++void acpm_ipc_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ bool acpm_ipc_get_rx_buffer_properties(unsigned int channel_id, void __iomem **base,
+diff --git a/drivers/soc/google/acpm/acpm_ipc.h b/drivers/soc/google/acpm/acpm_ipc.h
+index 238378e..6fffe36 100644
+--- a/drivers/soc/google/acpm/acpm_ipc.h
++++ b/drivers/soc/google/acpm/acpm_ipc.h
+@@ -149,6 +149,6 @@ extern void acpm_fw_set_retry_log_ctrl(bool enable);
+ extern unsigned int acpm_fw_get_retry_log_ctrl(void);
+ extern void acpm_ipc_set_waiting_mode(bool mode);
+ 
+-extern int acpm_ipc_remove(struct platform_device *pdev);
++extern void acpm_ipc_remove(struct platform_device *pdev);
+ extern int acpm_ipc_probe(struct platform_device *pdev);
+ #endif
+\ No newline at end of file
+diff --git a/drivers/soc/google/acpm/acpm_mbox_test.c b/drivers/soc/google/acpm/acpm_mbox_test.c
+index e84348d..54cb97b 100644
+--- a/drivers/soc/google/acpm/acpm_mbox_test.c
++++ b/drivers/soc/google/acpm/acpm_mbox_test.c
+@@ -1861,7 +1861,7 @@ err_tmu:
+ 	return ret;
+ }
+ 
+-static int acpm_mbox_test_remove(struct platform_device *pdev)
++static void acpm_mbox_test_remove(struct platform_device *pdev)
+ {
+ 	int i;
+ 
+@@ -1901,7 +1901,6 @@ static int acpm_mbox_test_remove(struct platform_device *pdev)
+ 
+ 	dev_info(mbox->device, "%s done.\n", __func__);
+ 	kfree(mbox);
+-	return 0;
+ }
+ 
+ static const struct of_device_id acpm_mbox_test_match[] = {
+diff --git a/drivers/soc/google/acpm/power_stats.c b/drivers/soc/google/acpm/power_stats.c
+index 2600683..e9e39dd 100644
+--- a/drivers/soc/google/acpm/power_stats.c
++++ b/drivers/soc/google/acpm/power_stats.c
+@@ -582,7 +582,10 @@ static struct attribute *power_stats_attrs[] = {
+ 	&dev_attr_fail_stats.attr,    NULL,
+ };
+ 
+-ATTRIBUTE_GROUPS(power_stats);
++/* only the single group is used (devm_device_add_group) */
++static const struct attribute_group power_stats_group = {
++	.attrs = power_stats_attrs,
++};
+ 
+ static int power_stats_probe(struct platform_device *pdev)
+ {
+@@ -635,18 +638,16 @@ static int power_stats_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, ps_dev);
+ 
+-	ret = devm_device_add_groups(&pdev->dev, power_stats_groups);
++	ret = devm_device_add_group(&pdev->dev, &power_stats_group);
+ 	if (ret)
+ 		dev_err(&pdev->dev, "Failed to add device groups\n");
+ 
+ 	return 0;
+ }
+ 
+-static int power_stats_remove(struct platform_device *pdev)
++static void power_stats_remove(struct platform_device *pdev)
+ {
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id power_stats_match[] = {
+diff --git a/drivers/soc/google/cal-if/acpm_dvfs.c b/drivers/soc/google/cal-if/acpm_dvfs.c
+index fd22dbb..c729e56 100644
+--- a/drivers/soc/google/cal-if/acpm_dvfs.c
++++ b/drivers/soc/google/cal-if/acpm_dvfs.c
+@@ -344,7 +344,10 @@ static struct attribute *async_dvfs_attrs[] = {
+ 	NULL,
+ };
+ 
+-ATTRIBUTE_GROUPS(async_dvfs);
++/* only the single group is used (devm_device_add_group) */
++static const struct attribute_group async_dvfs_group = {
++	.attrs = async_dvfs_attrs,
++};
+ 
+ int exynos_acpm_dvfs_init(void)
+ {
+@@ -383,7 +386,7 @@ int exynos_acpm_dvfs_init(void)
+ 					sizeof(uint32_t);
+ 			}
+ 
+-			ret2 = devm_device_add_groups(acpm_dvfs.device, async_dvfs_groups);
++			ret2 = devm_device_add_group(acpm_dvfs.device, &async_dvfs_group);
+ 			if (ret2)
+ 				dev_err(acpm_dvfs.device, "Failed to add device groups\n");
+ 
+diff --git a/drivers/soc/google/cal-if/cal-if.c b/drivers/soc/google/cal-if/cal-if.c
+index a1726da..893aa97 100644
+--- a/drivers/soc/google/cal-if/cal-if.c
++++ b/drivers/soc/google/cal-if/cal-if.c
+@@ -1,3 +1,4 @@
++#include <linux/platform_device.h>
+ #include <linux/module.h>
+ #if 0
+ #include <linux/debug-snapshot.h>
+diff --git a/drivers/soc/google/debug/debug-snapshot-log.c b/drivers/soc/google/debug/debug-snapshot-log.c
+index 286b94f..0141d77 100644
+--- a/drivers/soc/google/debug/debug-snapshot-log.c
++++ b/drivers/soc/google/debug/debug-snapshot-log.c
+@@ -201,7 +201,7 @@ void dbg_snapshot_get_freq_name(char (*freq_names)[DSS_FREQ_MAX_NAME_SIZE])
+ 	int i;
+ 
+ 	for (i = 0; i < dss_freq_size; i++)
+-		strlcpy(freq_names[i], dss_freq_name[i], DSS_FREQ_MAX_NAME_SIZE);
++		strscpy(freq_names[i], dss_freq_name[i], DSS_FREQ_MAX_NAME_SIZE);
+ }
+ EXPORT_SYMBOL_GPL(dbg_snapshot_get_freq_name);
+ 
+@@ -783,7 +783,7 @@ static void dbg_snapshot_print_irq(void)
+ 		desc = irq_data_to_desc(data);
+ 
+ 		for_each_possible_cpu(cpu)
+-			irq_stat += *per_cpu_ptr(desc->kstat_irqs, cpu);
++			irq_stat += per_cpu_ptr(desc->kstat_irqs, cpu)->cnt;
+ 
+ 		if (!irq_stat || irq_stat < irq_filter)
+ 			continue;
+@@ -875,7 +875,7 @@ void dbg_snapshot_start_log(void)
+ 				__func__, dss_freq_size, ARRAY_SIZE(dss_freq_name));
+ 			break;
+ 		}
+-		strlcpy(dss_freq_name[i], str, sizeof(dss_freq_name[i]));
++		strscpy(dss_freq_name[i], str, sizeof(dss_freq_name[i]));
+ 		++i;
+ 	}
+ 
+diff --git a/drivers/soc/google/debug/debug-snapshot-qd.c b/drivers/soc/google/debug/debug-snapshot-qd.c
+index 42f8e71..1eee776 100644
+--- a/drivers/soc/google/debug/debug-snapshot-qd.c
++++ b/drivers/soc/google/debug/debug-snapshot-qd.c
+@@ -152,7 +152,7 @@ void dbg_snapshot_qd_dump_stack(u64 sp)
+ 		dev_err(qdump_dev, "failed to add stack of cpu %d\n", cpu);
+ 
+ 	scnprintf(ktsk_entry.name, sizeof(ktsk_entry.name), "KTASK%d", cpu);
+-	strlcpy(ktsk_entry.struct_name, "task_struct",
++	strscpy(ktsk_entry.struct_name, "task_struct",
+ 			sizeof(ktsk_entry.struct_name));
+ 	ktsk_entry.virt_addr = (u64)current;
+ 	ktsk_entry.phys_addr = virt_to_phys((uintptr_t *)current);
+@@ -172,9 +172,9 @@ static void register_dss_log_item(void)
+ 	for (i = 0; i < item_num; i++) {
+ 		item = dbg_snapshot_log_get_item_by_index(i);
+ 		if (item->entry.enabled) {
+-			strlcpy(qd_entry.name, item->name,
++			strscpy(qd_entry.name, item->name,
+ 					sizeof(qd_entry.name));
+-			strlcpy(qd_entry.struct_name, item->name,
++			strscpy(qd_entry.struct_name, item->name,
+ 					sizeof(qd_entry.struct_name));
+ 			qd_entry.virt_addr = item->entry.vaddr;
+ 			qd_entry.phys_addr = item->entry.paddr;
+@@ -200,7 +200,7 @@ static void register_dss_item(void)
+ 
+ 		item = dbg_snapshot_get_item_by_index(i);
+ 		if (item->entry.enabled) {
+-			strlcpy(qd_entry.name, item->name,
++			strscpy(qd_entry.name, item->name,
+ 					sizeof(qd_entry.name));
+ 			qd_entry.struct_name[0] = '\0';
+ 			qd_entry.virt_addr = item->entry.vaddr;
+diff --git a/drivers/soc/google/debug/debug-snapshot-utils.c b/drivers/soc/google/debug/debug-snapshot-utils.c
+index 287216c..73e7f7b 100644
+--- a/drivers/soc/google/debug/debug-snapshot-utils.c
++++ b/drivers/soc/google/debug/debug-snapshot-utils.c
+@@ -4,6 +4,7 @@
+  *		http://www.samsung.com
+  */
+ 
++#include <linux/sched/signal.h>
+ #include <linux/kernel.h>
+ #include <linux/io.h>
+ #include <linux/notifier.h>
+@@ -283,9 +284,10 @@ static void dbg_snapshot_dump_one_task_info(struct task_struct *tsk, bool is_mai
+ 	sched_show_task(tsk);
+ }
+ 
++/* 6.6 removed task_struct.thread_group; next_thread() wraps to the leader the same way. */
+ static inline struct task_struct *get_next_thread(struct task_struct *tsk)
+ {
+-	return container_of(tsk->thread_group.next, struct task_struct, thread_group);
++	return next_thread(tsk);
+ }
+ 
+ static void dbg_snapshot_dump_task_info(void)
+@@ -308,7 +310,7 @@ static void dbg_snapshot_dump_task_info(void)
+ 	while (curr_tsk) {
+ 		dbg_snapshot_dump_one_task_info(curr_tsk,  true);
+ 		/* threads */
+-		if (curr_tsk->thread_group.next != NULL) {
++		if (curr_tsk->signal) {
+ 			frst_thr = get_next_thread(curr_tsk);
+ 			curr_thr = frst_thr;
+ 			if (frst_thr != curr_tsk) {
+diff --git a/drivers/soc/google/debug/etm2dram.c b/drivers/soc/google/debug/etm2dram.c
+index bcaffc3..0df5bbc 100644
+--- a/drivers/soc/google/debug/etm2dram.c
++++ b/drivers/soc/google/debug/etm2dram.c
+@@ -340,7 +340,7 @@ arm_store(struct device *dev, struct device_attribute *attr,
+ 	int ret;
+ 	struct etm2dram_private *data = dev_get_drvdata(dev);
+ 
+-	ret = strtobool(buf, &new_value);
++	ret = kstrtobool(buf, &new_value);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -420,9 +420,9 @@ static int etm2dram_probe(struct platform_device *pdev)
+ 	return etm2dram_set_databuf(data->dbuf_base, data->dbuf_size);
+ }
+ 
+-static int etm2dram_remove(struct platform_device *pdev)
++static void etm2dram_remove(struct platform_device *pdev)
+ {
+-	return etm2dram_set_databuf(0, 0);
++	etm2dram_set_databuf(0, 0);
+ }
+ 
+ static const struct of_device_id etm2dram_matches[] = {
+diff --git a/drivers/soc/google/debug/exynos-adv-tracer-s2d.c b/drivers/soc/google/debug/exynos-adv-tracer-s2d.c
+index 35d3cb4..da5650a 100644
+--- a/drivers/soc/google/debug/exynos-adv-tracer-s2d.c
++++ b/drivers/soc/google/debug/exynos-adv-tracer-s2d.c
+@@ -540,13 +540,11 @@ err_s2d_info:
+ 	return ret;
+ }
+ 
+-static int adv_tracer_s2d_remove(struct platform_device *pdev)
++static void adv_tracer_s2d_remove(struct platform_device *pdev)
+ {
+ 	struct adv_tracer_plugin *s2d = platform_get_drvdata(pdev);
+ 
+ 	adv_tracer_ipc_release_channel(s2d->id);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id adv_tracer_s2d_match[] = {
+diff --git a/drivers/soc/google/debug/exynos-adv-tracer.c b/drivers/soc/google/debug/exynos-adv-tracer.c
+index 92e3515..6d38262 100644
+--- a/drivers/soc/google/debug/exynos-adv-tracer.c
++++ b/drivers/soc/google/debug/exynos-adv-tracer.c
+@@ -4,6 +4,7 @@
+  *		http://www.samsung.com
+  */
+ 
++#include <soc/google/gs_platform_compat.h>
+ #include <linux/io.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
+@@ -42,7 +43,6 @@ static void adv_tracer_ipc_sscd_release(struct device *dev)
+ static struct sscd_platform_data sscd_pdata;
+ static struct platform_device sscd_dev = {
+ 	.name            = DEVICE_NAME,
+-	.driver_override = SSCD_NAME,
+ 	.id              = -1,
+ 	.dev             = {
+ 		.platform_data = &sscd_pdata,
+@@ -574,7 +574,7 @@ static int adv_tracer_ipc_init(struct platform_device *pdev)
+ 		eat_ipc->intr_bitoffset = INTR_FLAG_OFFSET;
+ 
+ #ifdef ADV_TRACER_SSCOREDUMP
+-	platform_device_register(&sscd_dev);
++	gs_platform_device_register_override(&sscd_dev, SSCD_NAME);
+ #endif
+ 
+ 	dev_info(&pdev->dev, "%s successful.\n", __func__);
+diff --git a/drivers/soc/google/debug/exynos-coresight-etm-whi.c b/drivers/soc/google/debug/exynos-coresight-etm-whi.c
+index 6d40b03..1c82161 100644
+--- a/drivers/soc/google/debug/exynos-coresight-etm-whi.c
++++ b/drivers/soc/google/debug/exynos-coresight-etm-whi.c
+@@ -868,7 +868,7 @@ static DEVICE_ATTR_RO(port_status);
+ #ifdef CONFIG_EXYNOS_CORESIGHT_ETR
+ static ssize_t etr_dump_read(struct file *filp,
+ 			     struct kobject *kobj,
+-			     struct bin_attribute *attr,
++			     const struct bin_attribute *attr,
+ 			     char *buffer,
+ 			     loff_t pos,
+ 			     size_t size)
+@@ -886,7 +886,7 @@ static ssize_t etr_dump_read(struct file *filp,
+ 
+ static BIN_ATTR_RO(etr_dump, 0);
+ 
+-static struct bin_attribute *exynos_etr_sysfs_attrs[] = {
++static const struct bin_attribute *const exynos_etr_sysfs_attrs[] = {
+ 	&bin_attr_etr_dump,
+ 	NULL,
+ };
+diff --git a/drivers/soc/google/debug/exynos-coresight.c b/drivers/soc/google/debug/exynos-coresight.c
+index d9a9fae..8593021 100644
+--- a/drivers/soc/google/debug/exynos-coresight.c
++++ b/drivers/soc/google/debug/exynos-coresight.c
+@@ -507,8 +507,6 @@ static const struct of_device_id of_exynos_cs_matches[] __initconst= {
+ static int exynos_cs_parsing_dt(struct device *dev)
+ {
+ 	struct device_node *np = dev->of_node;
+-	struct property *prop;
+-	const __be32 *cur;
+ 	u32 val, i = 0;
+ 	int ret;
+ 
+@@ -532,53 +530,53 @@ static int exynos_cs_parsing_dt(struct device *dev)
+ 	if (!ecs_info->sgi_base)
+ 		return -ENOMEM;
+ 
+-	of_property_for_each_u32(np, "dbg_base", prop, cur, val) {
++	of_property_for_each_u32(np, "dbg_base", val) {
+ 		if (i >= num_possible_cpus() || !val)
+ 			return -EINVAL;
+ 
+ 		ecs_info->dbg_base[i] = devm_ioremap(dev, val, SZ_4K);
+ 		if (!ecs_info->dbg_base[i]) {
+ 			dev_err(ecs_info->dev, "fail property %s(%d) ioremap\n",
+-					prop->name, i);
++					"dbg_base", i);
+ 			return -ENOMEM;
+ 		}
+ 		i++;
+ 	}
+ 
+ 	i = 0;
+-	of_property_for_each_u32(np, "cti_base", prop, cur, val) {
++	of_property_for_each_u32(np, "cti_base", val) {
+ 		if (i >= num_possible_cpus() || !val)
+ 			return -EINVAL;
+ 		ecs_info->cti_base[i] = devm_ioremap(dev, val, SZ_4K);
+ 		if (!ecs_info->cti_base[i]) {
+ 			dev_err(ecs_info->dev, "fail property %s(%d) ioremap\n",
+-					prop->name, i);
++					"cti_base", i);
+ 			return -ENOMEM;
+ 		}
+ 		i++;
+ 	}
+ 
+ 	i = 0;
+-	of_property_for_each_u32(np, "pmu_base", prop, cur, val) {
++	of_property_for_each_u32(np, "pmu_base", val) {
+ 		if (i >= num_possible_cpus() || !val)
+ 			return -EINVAL;
+ 		ecs_info->pmu_base[i] = devm_ioremap(dev, val, SZ_4K);
+ 		if (!ecs_info->pmu_base[i]) {
+ 			dev_err(ecs_info->dev, "fail property %s(%d) ioremap\n",
+-					prop->name, i);
++					"pmu_base", i);
+ 			return -ENOMEM;
+ 		}
+ 		i++;
+ 	}
+ 
+ 	i = 0;
+-	of_property_for_each_u32(np, "sgi_base", prop, cur, val) {
++	of_property_for_each_u32(np, "sgi_base", val) {
+ 		if (i >= num_possible_cpus() || !val)
+ 			return -EINVAL;
+ 		ecs_info->sgi_base[i] = devm_ioremap(dev, val, SZ_64K);
+ 		if (!ecs_info->sgi_base[i]) {
+ 			dev_err(ecs_info->dev, "fail property %s(%d) ioremap\n",
+-					prop->name, i);
++					"sgi_base", i);
+ 			return -ENOMEM;
+ 		}
+ 		i++;
+diff --git a/drivers/soc/google/debug/exynos-debug-test.c b/drivers/soc/google/debug/exynos-debug-test.c
+index c493f67..bf797d7 100644
+--- a/drivers/soc/google/debug/exynos-debug-test.c
++++ b/drivers/soc/google/debug/exynos-debug-test.c
+@@ -95,7 +95,7 @@ static const char * const test_vector[] = {
+ /* timeout for dog bark/bite */
+ #define DELAY_TIME 30000
+ 
+-static void pull_down_other_cpus(void)
++void pull_down_other_cpus(void)
+ {
+ #if IS_ENABLED(CONFIG_HOTPLUG_CPU)
+ 	int cpu, ret;
+diff --git a/drivers/soc/google/debug/exynos-ehld.c b/drivers/soc/google/debug/exynos-ehld.c
+index 7188f19..de07cfa 100644
+--- a/drivers/soc/google/debug/exynos-ehld.c
++++ b/drivers/soc/google/debug/exynos-ehld.c
+@@ -229,6 +229,10 @@ void exynos_ehld_do_policy(void)
+  * ARMv8 counter ID.
+  */
+ #define ARMV8_IDX_COUNTER0 1
++#ifndef ARMV8_PMU_COUNTER_MASK
++/* removed from <linux/perf/arm_pmuv3.h> in 6.9; was (ARMV8_PMU_MAX_COUNTERS - 1) */
++#define ARMV8_PMU_COUNTER_MASK 0x1f
++#endif
+ #define ARMV8_IDX_TO_COUNTER(x) (((x) - ARMV8_IDX_COUNTER0) & ARMV8_PMU_COUNTER_MASK)
+ 
+ static u32 exynos_ehld_read_pmu_counter(void)
+@@ -375,8 +379,8 @@ static int exynos_ehld_start_cpu(unsigned int cpu)
+ 		u64 interval = ehld_main.dbgc.interval * 1000 * 1000;
+ 
+ 		ehld_debug(1, "@%s: cpu%u ehld running with hrtimer\n", __func__, cpu);
+-		hrtimer_init(hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-		hrtimer->function = ehld_value_raw_hrtimer_fn;
++		/* 6.15: hrtimer_init() + ->function became hrtimer_setup() */
++		hrtimer_setup(hrtimer, ehld_value_raw_hrtimer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 		if (ehld_main.suspending && cpu == 0)
+ 			smp_call_function_single(0, exynos_ehld_start_cpu_hrtimer, hrtimer, 0);
+ 		else
+@@ -539,7 +543,7 @@ void exynos_ehld_event_raw_dump(unsigned int cpu, bool header)
+ 		if (i < NUM_TRACE_SKIP)
+ 			continue;
+ 		if (data->pmpcsr[count] == EHLD_PCSR_SELF) {
+-			strlcpy(buf, "(self)", sizeof(buf));
++			strscpy(buf, "(self)", sizeof(buf));
+ 		} else {
+ 			snprintf(buf, sizeof(buf), "%#016llx(%pS)",
+ 				 data->pmpcsr[count], (void *)data->pmpcsr[count]);
+@@ -928,8 +932,6 @@ static int exynos_ehld_init_dt(struct device *dev)
+ 	unsigned int cpu = 0, offset, base;
+ 	struct exynos_ehld_ctrl *ctrl;
+ 	u32 val, i;
+-	struct property *prop;
+-	const __be32 *cur;
+ 
+ 	if (of_property_read_u32(np, "cs_base", &base)) {
+ 		ehld_info(1, "ehld: no cs_base addr in device tree\n");
+@@ -943,7 +945,7 @@ static int exynos_ehld_init_dt(struct device *dev)
+ 		return -ENOMEM;
+ 
+ 	i = 0;
+-	of_property_for_each_u32(np, "sgi_base", prop, cur, val) {
++	of_property_for_each_u32(np, "sgi_base", val) {
+ 		if (i >= num_possible_cpus() || !val)
+ 			return -EINVAL;
+ 		ehld_main.sgi_base[i] = devm_ioremap(dev, val, SZ_4K);
+diff --git a/drivers/soc/google/debug/gs201-itmon.c b/drivers/soc/google/debug/gs201-itmon.c
+index 8e725e3..10cde22 100644
+--- a/drivers/soc/google/debug/gs201-itmon.c
++++ b/drivers/soc/google/debug/gs201-itmon.c
+@@ -2286,10 +2286,9 @@ static int itmon_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int itmon_remove(struct platform_device *pdev)
++static void itmon_remove(struct platform_device *pdev)
+ {
+ 	platform_set_drvdata(pdev, NULL);
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff --git a/drivers/soc/google/debug/pixel-suspend-diag.c b/drivers/soc/google/debug/pixel-suspend-diag.c
+index 46f74d7..4d837f9 100644
+--- a/drivers/soc/google/debug/pixel-suspend-diag.c
++++ b/drivers/soc/google/debug/pixel-suspend-diag.c
+@@ -248,7 +248,7 @@ static ssize_t timeout_store(struct kobject *kobj, struct kobj_attribute *attr,
+ 		pr_warn("invalid action parameter in buffer [%s]\n", buf);
+ 		return -EINVAL;
+ 	}
+-	strlcpy(item_action, buf, action_size);
++	strscpy(item_action, buf, action_size);
+ 
+ 	if (kstrtoll(item_timeout, 10, &val)) {
+ 		pr_warn("invalid timeout parameter in buffer [%s]\n", buf);
+@@ -294,7 +294,7 @@ static ssize_t action_store(struct kobject *kobj, struct kobj_attribute *attr, c
+ {
+ 	char *newline = NULL;
+ 
+-	strlcpy(pixel_suspend_diag_inst.action, buf, sizeof(pixel_suspend_diag_inst.action));
++	strscpy(pixel_suspend_diag_inst.action, buf, sizeof(pixel_suspend_diag_inst.action));
+ 	newline = strchr(pixel_suspend_diag_inst.action, '\n');
+ 	if (newline)
+ 		*newline = '\0';
+diff --git a/drivers/soc/google/debug/sjtag-driver.c b/drivers/soc/google/debug/sjtag-driver.c
+index eeb5fad..aadf7f7 100644
+--- a/drivers/soc/google/debug/sjtag-driver.c
++++ b/drivers/soc/google/debug/sjtag-driver.c
+@@ -966,9 +966,8 @@ static int sjtag_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int sjtag_remove(struct platform_device *pdev)
++static void sjtag_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct of_device_id sjtag_of_match[] = {
+diff --git a/drivers/soc/google/exynos-bcm_dbg-dt.c b/drivers/soc/google/exynos-bcm_dbg-dt.c
+index 2d408e1..ad9f8b6 100644
+--- a/drivers/soc/google/exynos-bcm_dbg-dt.c
++++ b/drivers/soc/google/exynos-bcm_dbg-dt.c
+@@ -7,6 +7,7 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/of.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/of_platform.h>
+diff --git a/drivers/soc/google/exynos-bcm_dbg.c b/drivers/soc/google/exynos-bcm_dbg.c
+index 842309d..0a3e8df 100644
+--- a/drivers/soc/google/exynos-bcm_dbg.c
++++ b/drivers/soc/google/exynos-bcm_dbg.c
+@@ -3970,7 +3970,7 @@ err_data:
+ 	return ret;
+ }
+ 
+-static int exynos_bcm_dbg_remove(struct platform_device *pdev)
++static void exynos_bcm_dbg_remove(struct platform_device *pdev)
+ {
+ 	struct exynos_bcm_dbg_data *data =
+ 					platform_get_drvdata(pdev);
+@@ -3982,7 +3982,7 @@ static int exynos_bcm_dbg_remove(struct platform_device *pdev)
+ 	ret = exynos_bcm_dbg_pd_sync_exit(data);
+ 	if (ret) {
+ 		BCM_ERR("%s: failed to pd_sync_exit\n", __func__);
+-		return ret;
++		return;
+ 	}
+ 
+ 	exynos_bcm_dbg_ipc_channel_release(data);
+@@ -3994,8 +3994,6 @@ static int exynos_bcm_dbg_remove(struct platform_device *pdev)
+ #endif
+ 
+ 	BCM_INFO("%s: exynos bcm is removed!!\n", __func__);
+-
+-	return 0;
+ }
+ 
+ static struct platform_device_id exynos_bcm_dbg_driver_ids[] = {
+diff --git a/drivers/soc/google/exynos-dm.c b/drivers/soc/google/exynos-dm.c
+index 5a8747c..7f8aef7 100644
+--- a/drivers/soc/google/exynos-dm.c
++++ b/drivers/soc/google/exynos-dm.c
+@@ -1104,15 +1104,13 @@ err_device:
+ 	return ret;
+ }
+ 
+-static int exynos_dm_remove(struct platform_device *pdev)
++static void exynos_dm_remove(struct platform_device *pdev)
+ {
+ 	struct exynos_dm_device *dm = platform_get_drvdata(pdev);
+ 
+ 	sysfs_remove_group(&dm->dev->kobj, &exynos_dm_attr_group);
+ 	mutex_destroy(&dm->lock);
+ 	kfree(dm);
+-
+-	return 0;
+ }
+ 
+ static struct platform_device_id exynos_dm_driver_ids[] = {
+diff --git a/drivers/soc/google/exynos-pd-dbg.c b/drivers/soc/google/exynos-pd-dbg.c
+index 58bcb18..5f8c161 100644
+--- a/drivers/soc/google/exynos-pd-dbg.c
++++ b/drivers/soc/google/exynos-pd-dbg.c
+@@ -108,14 +108,13 @@ static int exynos_pd_dbg_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int exynos_pd_dbg_remove(struct platform_device *pdev)
++static void exynos_pd_dbg_remove(struct platform_device *pdev)
+ {
+ 	pm_runtime_disable(&pdev->dev);
+ #ifdef CONFIG_DEBUG_FS
+ 	debugfs_remove_recursive(exynos_pd_dbg_root);
+ 	exynos_pd_dbg_root = NULL;
+ #endif
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_OF
+diff --git a/drivers/soc/google/exynos-pd_hsi0.c b/drivers/soc/google/exynos-pd_hsi0.c
+index 7356cc2..d0cc8b1 100644
+--- a/drivers/soc/google/exynos-pd_hsi0.c
++++ b/drivers/soc/google/exynos-pd_hsi0.c
+@@ -3,6 +3,7 @@
+  * Regulator control for Exynos PM HSI0 domain
+  */
+ 
++#include <linux/of.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/of_platform.h>
+@@ -206,13 +207,11 @@ static int exynos_pd_hsi0_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int exynos_pd_hsi0_remove(struct platform_device *pdev)
++static void exynos_pd_hsi0_remove(struct platform_device *pdev)
+ {
+ 	struct exynos_pd_hsi0_data *hsi0_data = platform_get_drvdata(pdev);
+ 
+ 	kfree(hsi0_data);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id hsi0_of_match[] = {
+diff --git a/drivers/soc/google/exynos-pmu-if.c b/drivers/soc/google/exynos-pmu-if.c
+index 5c5f89d..5e5740c 100644
+--- a/drivers/soc/google/exynos-pmu-if.c
++++ b/drivers/soc/google/exynos-pmu-if.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2020 Samsung Electronics Co., Ltd.
+  */
+ 
++#include <linux/of.h>
+ #include <linux/module.h>
+ #include <linux/of_platform.h>
+ #include <linux/smp.h>
+diff --git a/drivers/soc/google/hardlockup-debug.c b/drivers/soc/google/hardlockup-debug.c
+index 3164520..66364ef 100644
+--- a/drivers/soc/google/hardlockup-debug.c
++++ b/drivers/soc/google/hardlockup-debug.c
+@@ -155,7 +155,7 @@ static void pm_dev_start(void *data, struct device *dev, const char *pm_ops, int
+ 	priv->dev = dev;
+ 	priv->parent = dev->parent;
+ 	priv->event = event;
+-	strlcpy(priv->pm_ops, pm_ops, sizeof(priv->pm_ops));
++	strscpy(priv->pm_ops, pm_ops, sizeof(priv->pm_ops));
+ 	interval_tree_insert(&priv->node, &pm_dev_rbroot);
+ exit:
+ 	spin_unlock_irqrestore(&pm_trace_lock, flags);
+@@ -236,7 +236,7 @@ static unsigned long hardlockup_debug_get_locked_cpu_mask(void)
+ 	return mask;
+ }
+ 
+-static int hardlockup_debug_bug_handler(struct pt_regs *regs, unsigned long esr)
++static int __maybe_unused hardlockup_debug_bug_handler(struct pt_regs *regs, unsigned long esr)
+ {
+ 	static atomic_t show_mem_once = ATOMIC_INIT(1);
+ 	static atomic_t print_schedstat_once = ATOMIC_INIT(1);
+@@ -370,10 +370,14 @@ static int hardlockup_debug_bug_handler(struct pt_regs *regs, unsigned long esr)
+ 	return DBG_HOOK_ERROR;
+ }
+ 
+-static struct break_hook hardlockup_debug_break_hook = {
+-	.fn = hardlockup_debug_bug_handler,
+-	.imm = BUG_BRK_IMM_HARDLOCKUP,
+-};
++/*
++ * junkyard (lynx): 6.17 removed dynamically registered EL1 BRK hooks
++ * (register_kernel_break_hook()); arm64 now dispatches the kernel's own BRK
++ * immediates statically and has no vendor hook for others. The firmware-forced
++ * BUG_BRK_IMM_HARDLOCKUP therefore reaches the default BRK handler, which oopses
++ * and, with CONFIG_PANIC_ON_OOPS, panics and reboots: a hard lockup still ends
++ * in a reboot, just without this handler's extra state dump.
++ */
+ 
+ static int hardlockup_debug_panic_handler(struct notifier_block *nb,
+ 					  unsigned long l, void *buf)
+@@ -525,8 +529,6 @@ static int hardlockup_debugger_probe(struct platform_device *pdev)
+ 	atomic_notifier_chain_register(&panic_notifier_list,
+ 				       &hardlockup_debug_panic_nb);
+ 
+-	register_kernel_break_hook(&hardlockup_debug_break_hook);
+-
+ 	register_pm_notifier(&hardlockup_debugger_pm_nb);
+ 
+ 	WARN_ON(register_trace_android_vh_cpu_idle_exit(
+@@ -565,4 +567,4 @@ module_platform_driver(hardlockup_debug_driver);
+ 
+ MODULE_DESCRIPTION("Module for Debugging Hardlockups via FIQ");
+ MODULE_LICENSE("GPL v2");
+-MODULE_IMPORT_NS(MINIDUMP);
++MODULE_IMPORT_NS("MINIDUMP");
+diff --git a/drivers/soc/google/pt/pt.c b/drivers/soc/google/pt/pt.c
+index 9985c6c..a61bac8 100644
+--- a/drivers/soc/google/pt/pt.c
++++ b/drivers/soc/google/pt/pt.c
+@@ -1097,7 +1097,7 @@ static void pt_testfct(const char *name)
+ 
+ }
+ 
+-static int pt_sysctl_command(struct ctl_table *ctl, int write,
++static int pt_sysctl_command(const struct ctl_table *ctl, int write,
+ 		void __user *buffer, size_t *lenp, loff_t *ppos)
+ {
+ 	int ret;
+diff --git a/drivers/soc/google/pt/slc_acpm.c b/drivers/soc/google/pt/slc_acpm.c
+index 957996e..5002df2 100644
+--- a/drivers/soc/google/pt/slc_acpm.c
++++ b/drivers/soc/google/pt/slc_acpm.c
+@@ -9,6 +9,7 @@
+  * Author: cozette@google.com
+  */
+ 
++#include <linux/platform_device.h>
+ #include <linux/list.h>
+ #include <linux/of_platform.h>
+ #include <linux/module.h>
+diff --git a/drivers/spi/spi-s3c64xx.c b/drivers/spi/spi-s3c64xx.c
+index 39fd455..cf9bcad 100644
+--- a/drivers/spi/spi-s3c64xx.c
++++ b/drivers/spi/spi-s3c64xx.c
+@@ -196,8 +196,8 @@ static ssize_t
+ spi_dbg_store(struct device *dev, struct device_attribute *attr,
+ 	      const char *buf, size_t count)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 	struct s3c64xx_spi_info *check_sci;
+ 	int ret, input_cmd;
+@@ -420,9 +420,9 @@ static void exynos_usi_init(struct s3c64xx_spi_driver_data *sdd);
+ static void s3c64xx_spi_hwinit(struct s3c64xx_spi_driver_data *sdd,
+ 			       int channel);
+ 
+-static int s3c64xx_spi_prepare_transfer(struct spi_master *spi)
++static int s3c64xx_spi_prepare_transfer(struct spi_controller *spi)
+ {
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(spi);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(spi);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ #ifdef CONFIG_PM
+ 	int ret;
+@@ -450,9 +450,9 @@ static int s3c64xx_spi_prepare_transfer(struct spi_master *spi)
+ 	return 0;
+ }
+ 
+-static int s3c64xx_spi_unprepare_transfer(struct spi_master *spi)
++static int s3c64xx_spi_unprepare_transfer(struct spi_controller *spi)
+ {
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(spi);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(spi);
+ #ifdef CONFIG_PM
+ 	int ret;
+ #endif
+@@ -588,7 +588,7 @@ static void enable_datapath(struct s3c64xx_spi_driver_data *sdd,
+ 		sdd->state |= TXBUSY;
+ 		chcfg |= S3C64XX_SPI_CH_TXCH_ON;
+ 
+-		if (cs->cs_mode == MANUAL_CS_MODE && cs->cs_delay && !spi->cs_gpiod) {
++		if (cs->cs_mode == MANUAL_CS_MODE && cs->cs_delay && !spi_get_csgpiod(spi, 0)) {
+ 			writel(chcfg, regs + S3C64XX_SPI_CH_CFG);
+ 			udelay(cs->cs_delay);
+ 		}
+@@ -645,8 +645,8 @@ static inline void enable_cs(struct s3c64xx_spi_driver_data *sdd,
+ 		if (sdd->tgl_spi != spi) { /* if last mssg on diff device */
+ 			/* Deselect the last toggled device */
+ 			cs = sdd->tgl_spi->controller_data;
+-			if (spi->cs_gpiod)
+-				gpiod_set_value(spi->cs_gpiod, 0);
++			if (spi_get_csgpiod(spi, 0))
++				gpiod_set_value(spi_get_csgpiod(spi, 0), 0);
+ 			/* Quiesce the signals */
+ 			writel(spi->mode & SPI_CS_HIGH ?
+ 				0 : S3C64XX_SPI_SLAVE_SIG_INACT,
+@@ -656,8 +656,8 @@ static inline void enable_cs(struct s3c64xx_spi_driver_data *sdd,
+ 	}
+ 
+ 	cs = spi->controller_data;
+-	if (spi->cs_gpiod) {
+-		gpiod_set_value(spi->cs_gpiod, 1);
++	if (spi_get_csgpiod(spi, 0)) {
++		gpiod_set_value(spi_get_csgpiod(spi, 0), 1);
+ 		if (cs->cs_delay)
+ 			udelay(cs->cs_delay);
+ 	}
+@@ -762,8 +762,8 @@ static inline void disable_cs(struct s3c64xx_spi_driver_data *sdd,
+ 	if (sdd->tgl_spi == spi)
+ 		sdd->tgl_spi = NULL;
+ 
+-	if (spi->cs_gpiod)
+-		gpiod_set_value(spi->cs_gpiod, 0);
++	if (spi_get_csgpiod(spi, 0))
++		gpiod_set_value(spi_get_csgpiod(spi, 0), 0);
+ 
+ 	if (cs->cs_mode != AUTO_CS_MODE) {
+ 		/* Quiesce the signals */
+@@ -903,7 +903,8 @@ static int s3c64xx_spi_map_one_msg(struct s3c64xx_spi_driver_data *sdd,
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 	struct device *dev = &sdd->pdev->dev;
+ 
+-	if (msg->is_dma_mapped || sci->dma_mode != DMA_MODE)
++	/* 6.9 dropped spi_message.is_dma_mapped: the driver always maps itself */
++	if (sci->dma_mode != DMA_MODE)
+ 		return 0;
+ 
+ 	if (xfer->len <= ((FIFO_LVL_MASK(sdd) >> 1) + 1))
+@@ -943,7 +944,8 @@ static void s3c64xx_spi_unmap_one_msg(struct s3c64xx_spi_driver_data *sdd,
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 	struct device *dev = &sdd->pdev->dev;
+ 
+-	if (msg->is_dma_mapped || sci->dma_mode != DMA_MODE)
++	/* 6.9 dropped spi_message.is_dma_mapped: the driver always maps itself */
++	if (sci->dma_mode != DMA_MODE)
+ 		return;
+ 
+ 	if (xfer->len <= ((FIFO_LVL_MASK(sdd) >> 1) + 1))
+@@ -956,10 +958,10 @@ static void s3c64xx_spi_unmap_one_msg(struct s3c64xx_spi_driver_data *sdd,
+ 		dma_unmap_single(dev, xfer->tx_dma, xfer->len, DMA_TO_DEVICE);
+ }
+ 
+-static int s3c64xx_spi_transfer_one_message(struct spi_master *master,
++static int s3c64xx_spi_transfer_one_message(struct spi_controller *master,
+ 					    struct spi_message *msg)
+ {
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 	struct spi_device *spi = msg->spi;
+ 	struct s3c64xx_spi_csinfo *cs = spi->controller_data;
+@@ -986,7 +988,7 @@ static int s3c64xx_spi_transfer_one_message(struct spi_master *master,
+ 		s3c64xx_spi_config(sdd);
+ 	}
+ 
+-	if (!msg->is_dma_mapped && sci->dma_mode == DMA_MODE)
++	if (sci->dma_mode == DMA_MODE)
+ 		s3c64xx_spi_dma_initialize(sdd, msg);
+ 
+ 	/* Configure feedback delay */
+@@ -1066,7 +1068,7 @@ try_transfer:
+ 
+ 		if (cs->cs_mode == AUTO_CS_MODE ||
+ 		    cs->cs_mode == AUTO_CS_MODE_FORCE_QUIESCE ||
+-		    (cs->cs_mode == MANUAL_CS_MODE && cs->cs_delay && !spi->cs_gpiod)) {
++		    (cs->cs_mode == MANUAL_CS_MODE && cs->cs_delay && !spi_get_csgpiod(spi, 0))) {
+ 			/* Slave Select */
+ 			enable_cs(sdd, spi);
+ 
+@@ -1254,14 +1256,14 @@ static int s3c64xx_spi_setup(struct spi_device *spi)
+ 	struct s3c64xx_spi_info *sci;
+ 	int err;
+ 
+-	sdd = spi_master_get_devdata(spi->master);
++	sdd = spi_controller_get_devdata(spi->controller);
+ 	if (!cs && spi->dev.of_node) {
+ 		cs = s3c64xx_get_slave_ctrldata(spi);
+ 		spi->controller_data = cs;
+ 	}
+ 
+ 	if (IS_ERR(cs)) {
+-		dev_err(&spi->dev, "No CS for SPI(%d)\n", spi->chip_select);
++		dev_err(&spi->dev, "No CS for SPI(%d)\n", spi_get_chipselect(spi, 0));
+ 		return -ENODEV;
+ 	}
+ 
+@@ -1339,8 +1341,8 @@ static int s3c64xx_spi_setup(struct spi_device *spi)
+ 		 * spi driver is configured as active low. So set it here. Refer to
+ 		 * b/181043058 for more details.
+ 		 */
+-		if (spi->cs_gpiod)
+-			gpiod_set_raw_value(spi->cs_gpiod, 0);
++		if (spi_get_csgpiod(spi, 0))
++			gpiod_set_raw_value(spi_get_csgpiod(spi, 0), 0);
+ 	}
+ 
+ #ifdef CONFIG_PM
+@@ -1368,8 +1370,8 @@ setup_exit:
+ 		 * spi driver is configured as active low. So set it here. Refer to
+ 		 * b/181043058 for more details.
+ 		 */
+-		if (spi->cs_gpiod)
+-			gpiod_set_raw_value(spi->cs_gpiod, 0);
++		if (spi_get_csgpiod(spi, 0))
++			gpiod_set_raw_value(spi_get_csgpiod(spi, 0), 0);
+ 	}
+ 
+ 	spi_set_ctldata(spi, NULL);
+@@ -1394,7 +1396,7 @@ static void s3c64xx_spi_cleanup(struct spi_device *spi)
+ static irqreturn_t s3c64xx_spi_irq(int irq, void *data)
+ {
+ 	struct s3c64xx_spi_driver_data *sdd = data;
+-	struct spi_master *spi = sdd->master;
++	struct spi_controller *spi = sdd->master;
+ 	unsigned int val, clr = 0;
+ 
+ 	val = readl(sdd->regs + S3C64XX_SPI_STATUS);
+@@ -1559,7 +1561,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
+ 	struct device *dev = &pdev->dev;
+ 	struct s3c64xx_spi_driver_data *sdd;
+ 	struct s3c64xx_spi_info *sci = dev_get_platdata(&pdev->dev);
+-	struct spi_master *master;
++	struct spi_controller *master;
+ 	int ret, irq;
+ 	char clk_name[16];
+ 	int fifosize;
+@@ -1611,7 +1613,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
+ 		return irq;
+ 	}
+ 
+-	master = spi_alloc_master(&pdev->dev,
++	master = spi_alloc_host(&pdev->dev,
+ 				  sizeof(struct s3c64xx_spi_driver_data));
+ 	if (!master) {
+ 		dev_err(&pdev->dev, "Unable to allocate SPI Master\n");
+@@ -1620,7 +1622,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, master);
+ 
+-	sdd = spi_master_get_devdata(master);
++	sdd = spi_controller_get_devdata(master);
+ 	sdd->port_conf = s3c64xx_spi_get_port_config(pdev);
+ 	sdd->master = master;
+ 	sdd->cntrlr_info = sci;
+@@ -1812,7 +1814,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
+ 	pm_runtime_put_sync(&pdev->dev);
+ #endif
+ 
+-	if (spi_register_master(master)) {
++	if (spi_register_controller(master)) {
+ 		dev_err(&pdev->dev, "cannot register SPI master\n");
+ 		ret = -EBUSY;
+ 		goto err3;
+@@ -1855,21 +1857,21 @@ err2:
+ #endif
+ err0:
+ 	platform_set_drvdata(pdev, NULL);
+-	spi_master_put(master);
++	spi_controller_put(master);
+ 
+ 	return ret;
+ }
+ 
+-static int s3c64xx_spi_remove(struct platform_device *pdev)
++static void s3c64xx_spi_remove(struct platform_device *pdev)
+ {
+-	struct spi_master *master = spi_master_get(platform_get_drvdata(pdev));
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = spi_controller_get(platform_get_drvdata(pdev));
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 
+ #ifdef CONFIG_PM
+ 	pm_runtime_disable(&pdev->dev);
+ #endif
+ 
+-	spi_unregister_master(master);
++	spi_unregister_controller(master);
+ 
+ 	writel(0, sdd->regs + S3C64XX_SPI_INT_EN);
+ 
+@@ -1882,16 +1884,14 @@ static int s3c64xx_spi_remove(struct platform_device *pdev)
+ #endif
+ 
+ 	platform_set_drvdata(pdev, NULL);
+-	spi_master_put(master);
+-
+-	return 0;
++	spi_controller_put(master);
+ }
+ 
+ #ifdef CONFIG_PM
+ static void s3c64xx_spi_pin_ctrl(struct device *dev, int en)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct pinctrl_state *pin_stat;
+ 
+ 	if (!sdd->pin_idle)
+@@ -1908,8 +1908,8 @@ static void s3c64xx_spi_pin_ctrl(struct device *dev, int en)
+ 
+ static int s3c64xx_spi_runtime_suspend(struct device *dev)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 
+ 	clk_disable_unprepare(sdd->clk);
+@@ -1949,8 +1949,8 @@ static int s3c64xx_spi_runtime_suspend(struct device *dev)
+ 
+ static int s3c64xx_spi_runtime_resume(struct device *dev)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 
+ 	s3c64xx_spi_pin_ctrl(dev, 1);
+@@ -1984,13 +1984,13 @@ static int s3c64xx_spi_runtime_resume(struct device *dev)
+ #ifdef CONFIG_PM_SLEEP
+ static int s3c64xx_spi_suspend_operation(struct device *dev)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ #ifndef CONFIG_PM
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ #endif
+ 
+-	int ret = spi_master_suspend(master);
++	int ret = spi_controller_suspend(master);
+ 
+ 	if (ret) {
+ 		dev_warn(dev, "cannot suspend master\n");
+@@ -2018,8 +2018,8 @@ static int s3c64xx_spi_suspend_operation(struct device *dev)
+ 
+ static int s3c64xx_spi_resume_operation(struct device *dev)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 	int ret;
+ 
+@@ -2056,7 +2056,7 @@ static int s3c64xx_spi_resume_operation(struct device *dev)
+ 	}
+ 
+ 	/* Start the queue running */
+-	ret = spi_master_resume(master);
++	ret = spi_controller_resume(master);
+ 	if (ret)
+ 		dev_err(dev, "problem starting queue (%d)\n", ret);
+ 	else
+@@ -2067,8 +2067,8 @@ static int s3c64xx_spi_resume_operation(struct device *dev)
+ 
+ static int s3c64xx_spi_suspend(struct device *dev)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 
+ 	dev_dbg(dev, "spi suspend is handled in device suspend, dma mode = %d\n",
+@@ -2078,8 +2078,8 @@ static int s3c64xx_spi_suspend(struct device *dev)
+ 
+ static int s3c64xx_spi_resume(struct device *dev)
+ {
+-	struct spi_master *master = dev_get_drvdata(dev);
+-	struct s3c64xx_spi_driver_data *sdd = spi_master_get_devdata(master);
++	struct spi_controller *master = dev_get_drvdata(dev);
++	struct s3c64xx_spi_driver_data *sdd = spi_controller_get_devdata(master);
+ 	struct s3c64xx_spi_info *sci = sdd->cntrlr_info;
+ 
+ 	dev_dbg(dev, "spi resume is handled in device resume, dma mode = %d\n",
+diff --git a/drivers/thermal/google/s2mpg13_spmic_thermal.c b/drivers/thermal/google/s2mpg13_spmic_thermal.c
+index 48891fe..d7ad056 100644
+--- a/drivers/thermal/google/s2mpg13_spmic_thermal.c
++++ b/drivers/thermal/google/s2mpg13_spmic_thermal.c
+@@ -20,6 +20,7 @@
+ #include <linux/mfd/samsung/s2mpg13-register.h>
+ 
+ #include <thermal_core.h>
++#include <soc/google/gs_thermal_compat.h>
+ 
+ #define GTHERM_CHAN_NUM 8
+ #define SENSOR_WAIT_SLEEP_MS 50
+@@ -351,8 +352,9 @@ s2mpg13_spmic_thermal_set_hot_trip(struct s2mpg13_spmic_thermal_sensor *s, int t
+  * programmed as shutdown threshold.
+  */
+ static int s2mpg13_spmic_thermal_set_trip_temp(struct thermal_zone_device *tz,
+-					       int trip_id, int temp)
++					       const struct thermal_trip *trip_p, int temp)
+ {
++	int trip_id = gs_thermal_zone_trip_id(tz, trip_p);
+ 	struct s2mpg13_spmic_thermal_sensor *s = thermal_zone_device_priv(tz);
+ 	struct thermal_trip trip;
+ 	int ret = 0;
+@@ -360,7 +362,7 @@ static int s2mpg13_spmic_thermal_set_trip_temp(struct thermal_zone_device *tz,
+ 	if (!s->chip->sensors_ready)
+ 		return -EAGAIN;
+ 
+-	ret = __thermal_zone_get_trip(s->tzd, trip_id, &trip);
++	ret = gs_thermal_zone_get_trip(s->tzd, trip_id, &trip);
+ 	if (ret)
+ 		return -EINVAL;
+ 
+@@ -445,12 +447,12 @@ static int s2mpg13_spmic_thermal_get_hot_temp(struct thermal_zone_device *tzd)
+ 	struct thermal_trip trip;
+ 	int i;
+ 
+-	ntrips = thermal_zone_get_num_trips(tzd);
++	ntrips = gs_thermal_zone_get_num_trips(tzd);
+ 	if (ntrips <= 0)
+ 		return THERMAL_TEMP_INVALID;
+ 
+ 	for (i = 0; i < ntrips; i++) {
+-		if (!thermal_zone_get_trip(tzd, i, &trip)
++		if (!gs_thermal_zone_get_trip(tzd, i, &trip)
+ 		    && trip.type == THERMAL_TRIP_HOT)
+ 			return trip.temperature;
+ 	}
+@@ -835,7 +837,7 @@ fail:
+ 	return ret;
+ }
+ 
+-static int s2mpg13_spmic_thermal_remove(struct platform_device *pdev)
++static void s2mpg13_spmic_thermal_remove(struct platform_device *pdev)
+ {
+ 	int i;
+ 	struct s2mpg13_spmic_thermal_chip *chip = platform_get_drvdata(pdev);
+@@ -858,8 +860,6 @@ static int s2mpg13_spmic_thermal_remove(struct platform_device *pdev)
+ #endif
+ 	}
+ 	s2mpg13_spmic_thermal_unregister_tzd(chip);
+-
+-	return 0;
+ }
+ 
+ static struct platform_driver s2mpg13_spmic_thermal_driver = {
+diff --git a/drivers/thermal/samsung/exynos_cpu_cooling.c b/drivers/thermal/samsung/exynos_cpu_cooling.c
+index 2e22f72..a5e7f23 100644
+--- a/drivers/thermal/samsung/exynos_cpu_cooling.c
++++ b/drivers/thermal/samsung/exynos_cpu_cooling.c
+@@ -27,6 +27,7 @@
+ #include <soc/google/exynos_cpu_cooling.h>
+ #include <soc/google/exynos_pm_qos.h>
+ #include <thermal_core.h>
++#include <soc/google/gs_thermal_compat.h>
+ 
+ #include <trace/events/power.h>
+ #include <trace/events/thermal_exynos.h>
+@@ -930,15 +931,9 @@ static struct thermal_zone_device *parse_ect_cooling_level(
+ 	int i, temperature;
+ 	unsigned int freq;
+ 
+-	mutex_lock(&cdev->lock);
+-	list_for_each_entry(instance, &cdev->thermal_instances, cdev_node) {
+-		tz = instance->tz;
+-		if (!strncasecmp(cooling_name, tz->type, THERMAL_NAME_LENGTH)) {
+-			foundtz = true;
+-			break;
+-		}
+-	}
+-	mutex_unlock(&cdev->lock);
++	/* 6.18: thermal_instance has no ->tz; look the zone up by name instead. */
++	tz = thermal_zone_get_zone_by_name(cooling_name);
++	foundtz = !IS_ERR(tz);
+ 
+ 	if (!foundtz)
+ 		goto skip_ect;
+@@ -959,7 +954,7 @@ static struct thermal_zone_device *parse_ect_cooling_level(
+ 		temperature = function->range_list[i].lower_bound_temperature;
+ 		freq = function->range_list[i].max_frequency;
+ 
+-		instance = get_thermal_instance(tz, cdev, i);
++		instance = gs_get_thermal_instance(tz, cdev, i);
+ 		if (!instance) {
+ 			pr_err("%s: (%s, %d)instance isn't valid\n", __func__, cooling_name, i);
+ 			goto skip_ect;
+@@ -1151,7 +1146,7 @@ __exynos_cpu_cooling_register(struct device_node *np,
+ 		goto free_idle_time;
+ 	}
+ 
+-	ret = ida_simple_get(&cpufreq_ida, 0, 0, GFP_KERNEL);
++	ret = ida_alloc(&cpufreq_ida, GFP_KERNEL);
+ 	if (ret < 0) {
+ 		cdev = ERR_PTR(ret);
+ 		goto free_table;
+@@ -1246,7 +1241,7 @@ __exynos_cpu_cooling_register(struct device_node *np,
+ remove_qos_req:
+ 	freq_qos_remove_request(&cpufreq_cdev->qos_req);
+ remove_ida:
+-	ida_simple_remove(&cpufreq_ida, cpufreq_cdev->id);
++	ida_free(&cpufreq_ida, cpufreq_cdev->id);
+ free_table:
+ 	kfree(cpufreq_cdev->freq_table);
+ free_idle_time:
+diff --git a/drivers/thermal/samsung/gpu_cooling.c b/drivers/thermal/samsung/gpu_cooling.c
+index 325b829..b3be221 100644
+--- a/drivers/thermal/samsung/gpu_cooling.c
++++ b/drivers/thermal/samsung/gpu_cooling.c
+@@ -17,6 +17,7 @@
+ #include <soc/google/tmu.h>
+ 
+ #include <thermal_core.h>
++#include <soc/google/gs_thermal_compat.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/thermal_exynos_gpu.h>
+@@ -853,15 +854,9 @@ static struct thermal_zone_device * parse_ect_cooling_level(
+ 	unsigned int freq;
+ 	struct gpufreq_cooling_device *gpufreq_cdev = cdev->devdata;
+ 
+-	mutex_lock(&cdev->lock);
+-	list_for_each_entry(instance, &cdev->thermal_instances, cdev_node) {
+-		tz = instance->tz;
+-		if (!strncasecmp(cooling_name, tz->type, THERMAL_NAME_LENGTH)) {
+-			foundtz = true;
+-			break;
+-		}
+-	}
+-	mutex_unlock(&cdev->lock);
++	/* 6.18: thermal_instance has no ->tz; look the zone up by name instead. */
++	tz = thermal_zone_get_zone_by_name(cooling_name);
++	foundtz = !IS_ERR(tz);
+ 
+ 	if (!foundtz)
+ 		goto skip_ect;
+@@ -881,7 +876,7 @@ static struct thermal_zone_device * parse_ect_cooling_level(
+ 		temperature = function->range_list[i].lower_bound_temperature;
+ 		freq = function->range_list[i].max_frequency;
+ 
+-		instance = get_thermal_instance(tz, cdev, i);
++		instance = gs_get_thermal_instance(tz, cdev, i);
+ 		if (!instance) {
+ 			pr_err("%s: (%s, %d)instance isn't valid\n", __func__, cooling_name, i);
+ 			goto skip_ect;
+diff --git a/drivers/thermal/samsung/gs_tmu_v3.c b/drivers/thermal/samsung/gs_tmu_v3.c
+index 83bced9..5617a4e 100644
+--- a/drivers/thermal/samsung/gs_tmu_v3.c
++++ b/drivers/thermal/samsung/gs_tmu_v3.c
+@@ -34,6 +34,7 @@
+ #endif
+ 
+ #include <thermal_core.h>
++#include <soc/google/gs_thermal_compat.h>
+ #if IS_ENABLED(CONFIG_EXYNOS_ACPM_THERMAL)
+ #include "exynos_acpm_tmu.h"
+ #endif
+@@ -976,10 +977,10 @@ static int gs_tmu_initialize(struct platform_device *pdev)
+ 
+ 	mutex_lock(&data->lock);
+ 
+-	for (i = (thermal_zone_get_num_trips(tz) - 1); i >= 0; i--) {
++	for (i = (gs_thermal_zone_get_num_trips(tz) - 1); i >= 0; i--) {
+ 		struct thermal_trip trip;
+ 
+-		ret = thermal_zone_get_trip(tz, i, &trip);
++		ret = gs_thermal_zone_get_trip(tz, i, &trip);
+ 		if (ret) {
+ 			dev_err(&pdev->dev, "Failed to get trip %d\n", i);
+ 			goto out;
+@@ -1128,22 +1129,23 @@ static int gs_get_trend(struct thermal_zone_device *tz, const struct thermal_tri
+ 	return 0;
+ }
+ 
+-static int gs_tmu_set_trip_temp(struct thermal_zone_device *tz, int trip_id,
+-				int temp)
++static int gs_tmu_set_trip_temp(struct thermal_zone_device *tz,
++				const struct thermal_trip *trip_p, int temp)
+ {
++	int trip_id = gs_thermal_zone_trip_id(tz, trip_p);
+ 	struct gs_tmu_data *data = thermal_zone_device_priv(tz);
+ 	struct thermal_trip trip;
+ 	int i, ret;
+ 	unsigned char threshold[8] = {0, };
+ 
+-	ret = __thermal_zone_get_trip(tz, trip_id, &trip);
++	ret = gs_thermal_zone_get_trip(tz, trip_id, &trip);
+ 	if (ret) {
+ 		pr_err("Failed to get trip %d\n", trip_id);
+ 		return ret;
+ 	}
+ 
+-	for (i = (thermal_zone_get_num_trips(tz) - 1); i >= 0; i--) {
+-		ret = __thermal_zone_get_trip(tz, i, &trip);
++	for (i = (gs_thermal_zone_get_num_trips(tz) - 1); i >= 0; i--) {
++		ret = gs_thermal_zone_get_trip(tz, i, &trip);
+ 		if (ret) {
+ 			pr_err("Failed to get trip %d\n", i);
+ 			return ret;
+@@ -1223,7 +1225,7 @@ static void get_control_trips(struct gs_tmu_data *data)
+ 		struct thermal_trip trip;
+ 		int ret;
+ 
+-		ret = thermal_zone_get_trip(tz, i, &trip);
++		ret = gs_thermal_zone_get_trip(tz, i, &trip);
+ 		if (ret) {
+ 			dev_warn(&tz->device,
+ 				 "Failed to get trip point %d: %d\n", i, ret);
+@@ -1267,11 +1269,13 @@ static void allow_maximum_power(struct gs_tmu_data *data)
+ {
+ 	struct thermal_instance *instance;
+ 	struct thermal_zone_device *tz = data->tzd;
+-	const struct thermal_trip *control_temp_trip = &tz->trips[data->trip_id_control_temp];
++	const struct thermal_trip *control_temp_trip = &tz->trips[data->trip_id_control_temp].trip;
+ 
+ 	mutex_unlock(&data->lock);
+ 	mutex_lock(&tz->lock);
+-	list_for_each_entry(instance, &tz->thermal_instances, tz_node) {
++	/* 6.18: instances hang off their trip descriptor */
++	list_for_each_entry(instance, &tz->trips[data->trip_id_control_temp].thermal_instances,
++			    trip_node) {
+ 		if (instance->trip != control_temp_trip ||
+ 		    (!cdev_is_power_actor(instance->cdev)))
+ 			continue;
+@@ -1360,8 +1364,9 @@ static int gs_pi_controller(struct gs_tmu_data *data, int control_temp)
+ 	// TODO: refactor locking
+ 	mutex_unlock(&data->lock);
+ 	mutex_lock(&tz->lock);
+-	list_for_each_entry(instance, &tz->thermal_instances, tz_node) {
+-		if (instance->trip == &tz->trips[data->trip_id_control_temp] &&
++	list_for_each_entry(instance, &tz->trips[data->trip_id_control_temp].thermal_instances,
++			    trip_node) {
++		if (instance->trip == &tz->trips[data->trip_id_control_temp].trip &&
+ 		    cdev_is_power_actor(instance->cdev)) {
+ 			found_actor = true;
+ 			cdev = instance->cdev;
+@@ -1427,7 +1432,7 @@ static void gs_pi_thermal(struct gs_tmu_data *data)
+ 
+ 	mutex_lock(&data->lock);
+ 
+-	ret = thermal_zone_get_trip(tz, data->trip_id_switch_on, &trip);
++	ret = gs_thermal_zone_get_trip(tz, data->trip_id_switch_on, &trip);
+ 	if (!ret && tz->temperature < trip.temperature) {
+ 		reset_pi_params(data);
+ 		allow_maximum_power(data);
+@@ -1437,7 +1442,7 @@ static void gs_pi_thermal(struct gs_tmu_data *data)
+ 
+ 	params->switched_on = true;
+ 
+-	ret = thermal_zone_get_trip(tz, data->trip_id_control_temp, &trip);
++	ret = gs_thermal_zone_get_trip(tz, data->trip_id_control_temp, &trip);
+ 	if (ret) {
+ 		pr_warn("Failed to get the trip %d: %d\n",
+ 			data->trip_id_control_temp, ret);
+@@ -1743,10 +1748,21 @@ static void gs_throttle_hard_limit(struct kthread_work *work)
+ 	unsigned long state, max_state, prev_max_state;
+ 
+ 	mutex_lock(&tz->lock);
+-	list_for_each_entry(instance, &tz->thermal_instances, tz_node) {
+-		if (!strncmp(data->tmu_name, instance->tz->type, THERMAL_NAME_LENGTH)) {
+-			cdev = instance->cdev;
+-			break;
++	/*
++	 * 6.18: instances hang off each trip descriptor and lost ->tz. Every
++	 * instance found here belongs to tz, so the old per-instance
++	 * "instance->tz->type == tmu_name" test is a test on tz itself.
++	 */
++	if (!strncmp(data->tmu_name, tz->type, THERMAL_NAME_LENGTH)) {
++		struct thermal_trip_desc *td;
++
++		for_each_trip_desc(tz, td) {
++			instance = list_first_entry_or_null(&td->thermal_instances,
++							    struct thermal_instance, trip_node);
++			if (instance) {
++				cdev = instance->cdev;
++				break;
++			}
+ 		}
+ 	}
+ 	mutex_unlock(&tz->lock);
+@@ -2537,7 +2553,7 @@ static ssize_t offset_enabled_store(struct device *dev,
+ 		if (data->junction_offset[i] == 0)
+ 			continue;
+ 
+-		ret = thermal_zone_get_trip(tz, i, &trip);
++		ret = gs_thermal_zone_get_trip(tz, i, &trip);
+ 		if (ret) {
+ 			dev_err(&pdev->dev,
+ 				"Failed to get trip %d on %s\n",
+@@ -2554,11 +2570,8 @@ static ssize_t offset_enabled_store(struct device *dev,
+ 		}
+ 		dev_dbg(&pdev->dev, "trip_temp_%d change from %d to %d\n",
+ 			i, trip_temp, new_trip_temp);
+-		ret = tz->ops->set_trip_temp(tz, i, new_trip_temp);
+-
+-		// 6.1 moved set_trip_temp to sysfs, this is to address b/315931658
+-		if (tz->trips)
+-			tz->trips[i].temperature = new_trip_temp;
++		/* also updates the core's copy (b/315931658) */
++		ret = gs_thermal_zone_set_trip_temp(tz, i, new_trip_temp);
+ 		if (ret) {
+ 			dev_err(&pdev->dev,
+ 				"Failed to set trip_temp_%d on %s\n",
+@@ -3031,8 +3044,9 @@ static int param_update_acpm_pi_table_set(const char *val, const struct kernel_p
+ 			struct thermal_cooling_device *cdev;
+ 			bool found_actor = false;
+ 
+-			list_for_each_entry (instance, &tz->thermal_instances, tz_node) {
+-				if (instance->trip == &tz->trips[data->trip_id_control_temp] &&
++			list_for_each_entry (instance, &tz->trips[data->trip_id_control_temp].thermal_instances,
++						     trip_node) {
++				if (instance->trip == &tz->trips[data->trip_id_control_temp].trip &&
+ 				    cdev_is_power_actor(instance->cdev)) {
+ 					found_actor = true;
+ 					cdev = instance->cdev;
+@@ -3473,8 +3487,9 @@ acpm_pi_table_show(struct device *dev, struct device_attribute *devattr,
+ 	tz = data->tzd;
+ 	params = data->pi_param;
+ 
+-	list_for_each_entry (instance, &tz->thermal_instances, tz_node) {
+-		if (instance->trip == &tz->trips[data->trip_id_control_temp] &&
++	list_for_each_entry (instance, &tz->trips[data->trip_id_control_temp].thermal_instances,
++				     trip_node) {
++		if (instance->trip == &tz->trips[data->trip_id_control_temp].trip &&
+ 		    cdev_is_power_actor(instance->cdev)) {
+ 			found_actor = true;
+ 			cdev = instance->cdev;
+@@ -3520,8 +3535,9 @@ acpm_pi_table_store(struct device *dev, struct device_attribute *devattr,
+ 	tz = data->tzd;
+ 	params = data->pi_param;
+ 
+-	list_for_each_entry (instance, &tz->thermal_instances, tz_node) {
+-		if (instance->trip == &tz->trips[data->trip_id_control_temp] &&
++	list_for_each_entry (instance, &tz->trips[data->trip_id_control_temp].thermal_instances,
++				     trip_node) {
++		if (instance->trip == &tz->trips[data->trip_id_control_temp].trip &&
+ 		    cdev_is_power_actor(instance->cdev)) {
+ 			found_actor = true;
+ 			cdev = instance->cdev;
+@@ -5136,7 +5152,7 @@ static int gs_tmu_parse_ect(struct gs_tmu_data *data)
+ 			return -EINVAL;
+ 		}
+ 
+-		ntrips = thermal_zone_get_num_trips(tz);
++		ntrips = gs_thermal_zone_get_num_trips(tz);
+ 		pr_info("Trip count parsed from ECT : %d, ntrips: %d, zone : %s",
+ 			function->num_of_range, ntrips, tz->type);
+ 
+@@ -5144,7 +5160,7 @@ static int gs_tmu_parse_ect(struct gs_tmu_data *data)
+ 			temperature = function->range_list[i].lower_bound_temperature;
+ 			freq = function->range_list[i].max_frequency;
+ 
+-			tz->ops->set_trip_temp(tz, i, temperature  * MCELSIUS);
++			gs_thermal_zone_set_trip_temp(tz, i, temperature  * MCELSIUS);
+ 
+ 			pr_info("Parsed From ECT : [%d] Temperature : %d, frequency : %u\n",
+ 				i, temperature, freq);
+@@ -5200,14 +5216,14 @@ static int gs_tmu_parse_ect(struct gs_tmu_data *data)
+ 			return -EINVAL;
+ 		}
+ 
+-		ntrips = thermal_zone_get_num_trips(tz);
++		ntrips = gs_thermal_zone_get_num_trips(tz);
+ 		pr_info("Trip count parsed from ECT : %d, ntrips: %d, zone : %s",
+ 			pidtm_block->num_of_temperature, ntrips, tz->type);
+ 
+ 		for (i = 0; i < pidtm_block->num_of_temperature; ++i) {
+ 			temperature = pidtm_block->temperature_list[i];
+ 
+-			tz->ops->set_trip_temp(tz, i, temperature  * MCELSIUS);
++			gs_thermal_zone_set_trip_temp(tz, i, temperature  * MCELSIUS);
+ 
+ 			pr_info("Parsed From ECT : [%d] Temperature : %d\n", i, temperature);
+ 		}
+@@ -5284,7 +5300,7 @@ static int gs_tmu_parse_ect(struct gs_tmu_data *data)
+ 		if (value != -1) {
+ 			pr_info("Parse from ECT limited_threshold: %d\n", value);
+ 			limited_threshold = value * MCELSIUS;
+-			tz->ops->set_trip_temp(tz, 3, temperature  * MCELSIUS);
++			gs_thermal_zone_set_trip_temp(tz, 3, temperature  * MCELSIUS);
+ 			data->limited_threshold = value;
+ 		}
+ 
+@@ -5680,9 +5696,12 @@ err_sensor:
+ 	return ret;
+ }
+ 
+-static int gs_tmu_remove(struct platform_device *pdev)
++/*
++ * Was "return -EBUSY" to refuse removal, which the driver core never
++ * honoured; unbinding is already blocked by .suppress_bind_attrs.
++ */
++static void gs_tmu_remove(struct platform_device *pdev)
+ {
+-	return -EBUSY;
+ }
+ 
+ #if IS_ENABLED(CONFIG_PM_SLEEP)
+diff --git a/drivers/tty/serial/exynos_tty.c b/drivers/tty/serial/exynos_tty.c
+index 0b18b18..584ef35 100644
+--- a/drivers/tty/serial/exynos_tty.c
++++ b/drivers/tty/serial/exynos_tty.c
+@@ -225,6 +225,8 @@ static void wr_reg(struct uart_port *port, int reg, int val)
+ 	case UPIO_MEM32:
+ 		writel_relaxed(val, portaddr(port, reg));
+ 		break;
++	default:
++		break;
+ 	}
+ }
+ 
+@@ -698,7 +700,6 @@ static void exynos_serial_stop_tx(struct uart_port *port)
+ {
+ 	struct exynos_uart_port *ourport = to_ourport(port);
+ 	struct exynos_uart_dma *dma = ourport->dma;
+-	struct circ_buf *xmit = &port->state->xmit;
+ 	struct dma_tx_state state;
+ 	int count;
+ 
+@@ -719,8 +720,7 @@ static void exynos_serial_stop_tx(struct uart_port *port)
+ 					DMA_TO_DEVICE);
+ 		async_tx_ack(dma->tx_desc);
+ 		count = dma->tx_bytes_requested - state.residue;
+-		xmit->tail = (xmit->tail + count) & (UART_XMIT_SIZE - 1);
+-		port->icount.tx += count;
++		uart_xmit_advance(port, count);
+ 	}
+ 
+ 	ourport->tx_enabled = 0;
+@@ -738,7 +738,7 @@ static void exynos_serial_tx_dma_complete(void *args)
+ {
+ 	struct exynos_uart_port *ourport = args;
+ 	struct uart_port *port = &ourport->port;
+-	struct circ_buf *xmit = &port->state->xmit;
++	struct tty_port *tport = &port->state->port;
+ 	struct exynos_uart_dma *dma = ourport->dma;
+ 	struct dma_tx_state state;
+ 	unsigned long flags;
+@@ -753,11 +753,10 @@ static void exynos_serial_tx_dma_complete(void *args)
+ 
+ 	spin_lock_irqsave(&port->lock, flags);
+ 
+-	xmit->tail = (xmit->tail + count) & (UART_XMIT_SIZE - 1);
+-	port->icount.tx += count;
++	uart_xmit_advance(port, count);
+ 	ourport->tx_in_progress = 0;
+ 
+-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
++	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+ 		uart_write_wakeup(port);
+ 
+ 	exynos_serial_start_next_tx(ourport);
+@@ -822,22 +821,21 @@ static void exynos_serial_start_tx_pio(struct exynos_uart_port *ourport)
+ }
+ 
+ static int exynos_serial_start_tx_dma(struct exynos_uart_port *ourport,
+-				      unsigned int count)
++				      unsigned int count, unsigned int tail)
+ {
+ 	struct uart_port *port = &ourport->port;
+-	struct circ_buf *xmit = &port->state->xmit;
++	struct tty_port *tport = &port->state->port;
+ 	struct exynos_uart_dma *dma = ourport->dma;
+ 
+ 	if (ourport->tx_mode != EXYNOS_TX_DMA)
+ 		enable_tx_dma(ourport);
+ 
+ 	dma->tx_size = count & ~(dma_get_cache_alignment() - 1);
+-	dma->tx_transfer_addr = dma->tx_addr + xmit->tail;
++	dma->tx_transfer_addr = dma->tx_addr + tail;
+ 
+ 	if (ourport->uart_logging && dma->tx_size)
+ 		uart_copy_to_local_buf(0, &ourport->uart_local_buf,
+-				       ourport->port.state->xmit.buf +
+-				       xmit->tail, dma->tx_size);
++				       tport->xmit_buf + tail, dma->tx_size);
+ 
+ 	dma_sync_single_for_device(ourport->port.dev, dma->tx_transfer_addr,
+ 				   dma->tx_size, DMA_TO_DEVICE);
+@@ -865,11 +863,11 @@ static int exynos_serial_start_tx_dma(struct exynos_uart_port *ourport,
+ static void exynos_serial_start_next_tx(struct exynos_uart_port *ourport)
+ {
+ 	struct uart_port *port = &ourport->port;
+-	struct circ_buf *xmit = &port->state->xmit;
+-	unsigned long count;
++	struct tty_port *tport = &port->state->port;
++	unsigned int count, tail;
+ 
+ 	/* Get data size up to the end of buffer */
+-	count = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
++	count = kfifo_out_linear(&tport->xmit_fifo, &tail, UART_XMIT_SIZE);
+ 
+ 	if (!count) {
+ 		exynos_serial_stop_tx(port);
+@@ -878,16 +876,16 @@ static void exynos_serial_start_next_tx(struct exynos_uart_port *ourport)
+ 
+ 	if (!ourport->dma || !ourport->dma->tx_chan ||
+ 	    count < ourport->min_dma_size ||
+-	    xmit->tail & (dma_get_cache_alignment() - 1))
++	    tail & (dma_get_cache_alignment() - 1))
+ 		exynos_serial_start_tx_pio(ourport);
+ 	else
+-		exynos_serial_start_tx_dma(ourport, count);
++		exynos_serial_start_tx_dma(ourport, count, tail);
+ }
+ 
+ static void exynos_serial_start_tx(struct uart_port *port)
+ {
+ 	struct exynos_uart_port *ourport = to_ourport(port);
+-	struct circ_buf *xmit = &port->state->xmit;
++	struct tty_port *tport = &port->state->port;
+ 
+ 	if (!ourport->tx_enabled) {
+ 		if (port->flags & UPF_CONS_FLOW)
+@@ -899,7 +897,7 @@ static void exynos_serial_start_tx(struct uart_port *port)
+ 	}
+ 
+ 	if (ourport->dma && ourport->dma->tx_chan) {
+-		if (!uart_circ_empty(xmit) && !ourport->tx_in_progress)
++		if (!kfifo_is_empty(&tport->xmit_fifo) && !ourport->tx_in_progress)
+ 			exynos_serial_start_next_tx(ourport);
+ 	}
+ }
+@@ -1329,9 +1327,9 @@ static irqreturn_t exynos_serial_tx_chars(int irq, void *id)
+ {
+ 	struct exynos_uart_port *ourport = id;
+ 	struct uart_port *port = &ourport->port;
+-	struct circ_buf *xmit = &port->state->xmit;
++	struct tty_port *tport = &port->state->port;
+ 	unsigned long flags;
+-	int count = port->fifosize, dma_count = 0;
++	unsigned int count, dma_count = 0, tail;
+ 	unsigned char trace_buf[256] = {0, };
+ 	int trace_cnt = 0;
+ 	char buf[DATA_BYTES_PER_LINE * 3 + 1];
+@@ -1341,15 +1339,16 @@ static irqreturn_t exynos_serial_tx_chars(int irq, void *id)
+ 	exynos_set_bit(port, S3C64XX_UINTM_TXD, S3C64XX_UINTM);
+ 	wr_regl(port, S3C64XX_UINTP, S3C64XX_UINTM_TXD_MSK);
+ 
+-	count = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
++	count = kfifo_out_linear(&tport->xmit_fifo, &tail, UART_XMIT_SIZE);
+ 
+ 	if (ourport->dma && ourport->dma->tx_chan &&
+ 	    count >= ourport->min_dma_size) {
+ 		int align = dma_get_cache_alignment() -
+-			(xmit->tail & (dma_get_cache_alignment() - 1));
++			(tail & (dma_get_cache_alignment() - 1));
+ 		if (count - align >= ourport->min_dma_size) {
+ 			dma_count = count - align;
+ 			count = align;
++			tail += align;
+ 		}
+ 	}
+ 
+@@ -1366,7 +1365,7 @@ static irqreturn_t exynos_serial_tx_chars(int irq, void *id)
+ 	 * stopped, disable the uart and exit
+ 	 */
+ 
+-	if (uart_circ_empty(xmit) || uart_tx_stopped(port)) {
++	if (kfifo_is_empty(&tport->xmit_fifo) || uart_tx_stopped(port)) {
+ 		exynos_serial_stop_tx(port);
+ 		goto out;
+ 	}
+@@ -1378,30 +1377,34 @@ static irqreturn_t exynos_serial_tx_chars(int irq, void *id)
+ 		dma_count = 0;
+ 	}
+ 
+-	while (!uart_circ_empty(xmit) && count-- > 0) {
++	while (count > 0) {
++		unsigned char ch;
++
+ 		if (rd_regl(port, S3C2410_UFSTAT) & ourport->info->tx_fifofull)
+ 			break;
+ 
+-		wr_reg(port, S3C2410_UTXH, xmit->buf[xmit->tail]);
+-		if (ourport->uart_logging)
+-			trace_buf[trace_cnt++] = (unsigned
+-						  char)xmit->buf[xmit->tail];
+-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+-		port->icount.tx++;
++		/* uart_fifo_get() also accounts icount.tx */
++		if (!uart_fifo_get(port, &ch))
++			break;
++
++		wr_reg(port, S3C2410_UTXH, ch);
++		if (ourport->uart_logging && trace_cnt < sizeof(trace_buf))
++			trace_buf[trace_cnt++] = ch;
++		count--;
+ 	}
+ 
+ 	if (!count && dma_count) {
+-		exynos_serial_start_tx_dma(ourport, dma_count);
++		exynos_serial_start_tx_dma(ourport, dma_count, tail);
+ 		goto out;
+ 	}
+ 
+-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS) {
++	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS) {
+ 		spin_unlock_irqrestore(&port->lock, flags);
+ 		uart_write_wakeup(port);
+ 		spin_lock_irqsave(&port->lock, flags);
+ 	}
+ 
+-	if (uart_circ_empty(xmit))
++	if (kfifo_is_empty(&tport->xmit_fifo))
+ 		exynos_serial_stop_tx(port);
+ 
+ out:
+@@ -1581,7 +1584,7 @@ static int exynos_serial_request_dma(struct exynos_uart_port *ourport)
+ 
+ 	/* TX buffer */
+ 	dma->tx_addr = dma_map_single(ourport->port.dev,
+-				      ourport->port.state->xmit.buf,
++				      ourport->port.state->port.xmit_buf,
+ 				      UART_XMIT_SIZE, DMA_TO_DEVICE);
+ 	if (dma_mapping_error(ourport->port.dev, dma->tx_addr)) {
+ 		reason = "DMA mapping error for TX buffer";
+@@ -2869,7 +2872,7 @@ static int exynos_serial_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int exynos_serial_remove(struct platform_device *dev)
++static void exynos_serial_remove(struct platform_device *dev)
+ {
+ 	struct uart_port *port = exynos_dev_to_port(&dev->dev);
+ 
+@@ -2886,8 +2889,6 @@ static int exynos_serial_remove(struct platform_device *dev)
+ 	}
+ 
+ 	uart_unregister_driver(&exynos_uart_drv);
+-
+-	return 0;
+ }
+ 
+ /* UART power management code */
+diff --git a/drivers/ufs/ufs-exynos-swkeys.c b/drivers/ufs/ufs-exynos-swkeys.c
+index 2ce39cd..e8033da 100644
+--- a/drivers/ufs/ufs-exynos-swkeys.c
++++ b/drivers/ufs/ufs-exynos-swkeys.c
+@@ -12,7 +12,7 @@
+  * (also called the traditional FMP mode or legacy FMP mode).
+  */
+ 
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include <crypto/aes.h>
+ #include <crypto/algapi.h>
+ #include <linux/soc/samsung/exynos-smc.h>
+@@ -100,15 +100,15 @@ int exynos_ufs_crypto_init_sw_keys_mode(struct ufs_hba *hba)
+ 	hba->caps |= UFSHCD_CAP_CRYPTO;
+ 
+ 	/* Advertise crypto quirks to ufshcd-core. */
+-	hba->android_quirks |= UFSHCD_ANDROID_QUIRK_CUSTOM_CRYPTO_PROFILE |
+-		               UFSHCD_ANDROID_QUIRK_BROKEN_CRYPTO_ENABLE |
+-		               UFSHCD_ANDROID_QUIRK_KEYS_IN_PRDT;
++	hba->quirks |= UFSHCD_QUIRK_CUSTOM_CRYPTO_PROFILE |
++		       UFSHCD_QUIRK_BROKEN_CRYPTO_ENABLE |
++		       UFSHCD_QUIRK_KEYS_IN_PRDT;	/* upstream since 6.10 */
+ 	hba->sg_entry_size = sizeof(struct fmp_sg_entry);
+ 
+ 	/* Advertise crypto capabilities to the block layer. */
+ 	devm_blk_crypto_profile_init(hba->dev, &hba->crypto_profile, 0);
+ 	hba->crypto_profile.max_dun_bytes_supported = AES_BLOCK_SIZE;
+-	hba->crypto_profile.key_types_supported = BLK_CRYPTO_KEY_TYPE_STANDARD;
++	hba->crypto_profile.key_types_supported = BLK_CRYPTO_KEY_TYPE_RAW;
+ 	hba->crypto_profile.dev = hba->dev;
+ 	hba->crypto_profile.modes_supported[BLK_ENCRYPTION_MODE_AES_256_XTS] =
+ 		FMP_DATA_UNIT_SIZE;
+@@ -142,7 +142,7 @@ static void exynos_ufs_swkeys_fill_prdt(void *unused, struct ufs_hba *hba,
+ 	if (!bc)
+ 		return;
+ 
+-	enckey = bc->bc_key->raw;
++	enckey = bc->bc_key->bytes;
+ 	twkey = enckey + AES_KEYSIZE_256;
+ 	dun_lo = bc->bc_dun[0];
+ 	dun_hi = bc->bc_dun[1];
+diff --git a/drivers/ufs/ufs-exynos.c b/drivers/ufs/ufs-exynos.c
+index f8f3754..85306e6 100644
+--- a/drivers/ufs/ufs-exynos.c
++++ b/drivers/ufs/ufs-exynos.c
+@@ -366,7 +366,7 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
+ }
+ 
+ static void exynos_ufs_init_pmc_req(struct ufs_hba *hba,
+-				    struct ufs_pa_layer_attr *pwr_max,
++				    const struct ufs_pa_layer_attr *pwr_max,
+ 				    struct ufs_pa_layer_attr *pwr_req)
+ {
+ 	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+@@ -837,10 +837,24 @@ static int exynos_ufs_link_startup_notify(struct ufs_hba *hba,
+ 	return ret;
+ }
+ 
++/*
++ * 6.18 split the old pwr_change_notify(hba, notify, pwr_max, pwr_req): the
++ * core first asks negotiate_pwr_mode() for the mode to request (what PRE_CHANGE
++ * used to compute into pwr_req), then calls pwr_change_notify() with that mode
++ * for PRE_CHANGE and again for POST_CHANGE (NULL if the switch failed; 6.1
++ * only sent POST_CHANGE on success).
++ */
++static int exynos_ufs_negotiate_pwr_mode(struct ufs_hba *hba,
++					 const struct ufs_pa_layer_attr *desired_pwr_mode,
++					 struct ufs_pa_layer_attr *final_params)
++{
++	exynos_ufs_init_pmc_req(hba, desired_pwr_mode, final_params);
++	return 0;
++}
++
+ static int exynos_ufs_pwr_change_notify(struct ufs_hba *hba,
+ 					enum ufs_notify_change_status notify,
+-					struct ufs_pa_layer_attr *pwr_max,
+-					struct ufs_pa_layer_attr *pwr_req)
++					struct ufs_pa_layer_attr *final_params)
+ {
+ 	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+ 	struct uic_pwr_mode *act_pmd = &ufs->act_pmd_parm;
+@@ -858,8 +872,7 @@ static int exynos_ufs_pwr_change_notify(struct ufs_hba *hba,
+ 		if (!IS_C_STATE_ON(ufs) || ufs->h_state != H_REQ_BUSY)
+ 			PRINT_STATES(ufs);
+ 
+-		/* Set PMC parameters to be requested */
+-		exynos_ufs_init_pmc_req(hba, pwr_max, pwr_req);
++		/* PMC parameters were set by exynos_ufs_negotiate_pwr_mode() */
+ 
+ 		/* cal */
+ 		ufs->cal_param.pmd = act_pmd;
+@@ -867,6 +880,9 @@ static int exynos_ufs_pwr_change_notify(struct ufs_hba *hba,
+ 
+ 		break;
+ 	case POST_CHANGE:
++		if (!final_params)	/* the power mode change failed */
++			break;
++
+ 		/* update active lanes after pmc */
+ 		exynos_ufs_update_active_lanes(hba);
+ 
+@@ -1124,6 +1140,7 @@ static struct ufs_hba_variant_ops exynos_ufs_ops = {
+ 	.setup_clocks = exynos_ufs_setup_clocks,
+ 	.hce_enable_notify = exynos_ufs_hce_enable_notify,
+ 	.link_startup_notify = exynos_ufs_link_startup_notify,
++	.negotiate_pwr_mode = exynos_ufs_negotiate_pwr_mode,
+ 	.pwr_change_notify = exynos_ufs_pwr_change_notify,
+ 	.setup_xfer_req = exynos_ufs_set_nexus_t_xfer_req,
+ 	.setup_task_mgmt = exynos_ufs_set_nexus_t_task_mgmt,
+@@ -1757,7 +1774,7 @@ free_exynos_ufs:
+ 	return ret;
+ }
+ 
+-static int exynos_ufs_remove(struct platform_device *pdev)
++static void exynos_ufs_remove(struct platform_device *pdev)
+ {
+ 	struct exynos_ufs *ufs = dev_get_platdata(&pdev->dev);
+ 	struct ufs_hba *hba =  platform_get_drvdata(pdev);
+@@ -1773,8 +1790,6 @@ static int exynos_ufs_remove(struct platform_device *pdev)
+ 	exynos_pm_qos_remove_request(&ufs->pm_qos_int);
+ 
+ 	exynos_ufs_ctrl_phy_pwr(ufs, false);
+-
+-	return 0;
+ }
+ 
+ static const struct dev_pm_ops exynos_ufs_dev_pm_ops = {
+diff --git a/drivers/ufs/ufs-pixel-crypto.c b/drivers/ufs/ufs-pixel-crypto.c
+index 67b4803..a33e99f 100644
+--- a/drivers/ufs/ufs-pixel-crypto.c
++++ b/drivers/ufs/ufs-pixel-crypto.c
+@@ -149,7 +149,7 @@ static int pixel_ufs_keyslot_program(struct blk_crypto_profile *profile,
+ 	 */
+ 	ufshcd_block_io(hba);
+ 
+-	err = gsa_kdn_program_key(ufs->gsa_dev, slot, key->raw, key->size);
++	err = gsa_kdn_program_key(ufs->gsa_dev, slot, key->bytes, key->size);
+ 	if (err)
+ 		dev_err(ufs->dev, "kdn: failed to program key; err=%d\n", err);
+ 
+@@ -287,14 +287,14 @@ static int pixel_ufs_crypto_init_hw_keys_mode(struct ufs_hba *hba)
+ 	 * program/evict wrapped keys via the KDN, and secondly in order to
+ 	 * declare wrapped key support rather than standard key support.
+ 	 */
+-	hba->android_quirks |= UFSHCD_ANDROID_QUIRK_CUSTOM_CRYPTO_PROFILE;
++	hba->quirks |= UFSHCD_QUIRK_CUSTOM_CRYPTO_PROFILE;	/* upstream since 6.10 */
+ 
+ 	/*
+ 	 * This host controller doesn't support the standard
+ 	 * CRYPTO_GENERAL_ENABLE bit in REG_CONTROLLER_ENABLE.  Instead it just
+ 	 * always has crypto support enabled.
+ 	 */
+-	hba->android_quirks |= UFSHCD_ANDROID_QUIRK_BROKEN_CRYPTO_ENABLE;
++	hba->quirks |= UFSHCD_QUIRK_BROKEN_CRYPTO_ENABLE;
+ 
+ 	/* Advertise crypto capabilities to the block layer. */
+ 	err = devm_blk_crypto_profile_init(hba->dev, &hba->crypto_profile,
+diff --git a/drivers/ufs/ufs-pixel-fips-swkeys.c b/drivers/ufs/ufs-pixel-fips-swkeys.c
+index 92e3a51..8fc666e 100644
+--- a/drivers/ufs/ufs-pixel-fips-swkeys.c
++++ b/drivers/ufs/ufs-pixel-fips-swkeys.c
+@@ -13,7 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include <scsi/scsi_proto.h>
+ #include "ufs-pixel-fips.h"
+ #include "ufs-pixel-fips_sha256.h"
+diff --git a/drivers/ufs/ufs-pixel-fips.c b/drivers/ufs/ufs-pixel-fips.c
+index b6553eb..5c7215c 100644
+--- a/drivers/ufs/ufs-pixel-fips.c
++++ b/drivers/ufs/ufs-pixel-fips.c
+@@ -13,7 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+ #include <linux/module.h>
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include <scsi/scsi_proto.h>
+ #include "ufs-exynos-gs.h"
+ #include "ufs-pixel-fips.h"
+diff --git a/drivers/ufs/ufs-pixel-fips_sha256.c b/drivers/ufs/ufs-pixel-fips_sha256.c
+index f3b8dc7..4c97394 100644
+--- a/drivers/ufs/ufs-pixel-fips_sha256.c
++++ b/drivers/ufs/ufs-pixel-fips_sha256.c
+@@ -25,7 +25,7 @@
+ 
+ #include <linux/bitops.h>
+ #include <linux/string.h>
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include "ufs-pixel-fips_sha256.h"
+ 
+ static inline u32 Ch(u32 x, u32 y, u32 z)
+diff --git a/drivers/ufs/ufs-pixel.c b/drivers/ufs/ufs-pixel.c
+index fdd9a7a..d819704 100644
+--- a/drivers/ufs/ufs-pixel.c
++++ b/drivers/ufs/ufs-pixel.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <core/ufshcd-priv.h>
++#include <core/ufs_trace_types.h>	/* 6.x: UFS_CMD_SEND etc. moved here */
+ #include <linux/workqueue.h>
+ #include <misc/sbbm.h>
+ #include <ufs/ufs.h>
+@@ -922,7 +923,7 @@ static ssize_t manual_gc_store(struct device *dev,
+ 	}
+ 
+ 	if (!ufs->manual_gc.hagc_support) {
+-		err = ufshcd_bkops_ctrl(hba, (value == MANUAL_GC_ON) ?
++		err = ufshcd_bkops_ctrl_threshold(hba, (value == MANUAL_GC_ON) ?
+ 					BKOPS_STATUS_NON_CRITICAL:
+ 					BKOPS_STATUS_CRITICAL);
+ 		if (!hba->auto_bkops_enabled)
+@@ -991,8 +992,8 @@ void pixel_init_manual_gc(struct ufs_hba *hba)
+ 	mgc->hagc_support = true;
+ 	mgc->delay_ms = UFSHCD_MANUAL_GC_HOLD_HIBERN8;
+ 
+-	hrtimer_init(&mgc->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	mgc->hrtimer.function = pixel_mgc_hrtimer_handler;
++	hrtimer_setup(&mgc->hrtimer, pixel_mgc_hrtimer_handler, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_REL);
+ 
+ 	INIT_WORK(&mgc->hibern8_work, pixel_mgc_hibern8_work);
+ 	snprintf(wq_name, ARRAY_SIZE(wq_name), "ufs_mgc_hibern8_work_%d",
+@@ -1776,8 +1777,9 @@ static DEVICE_ATTR_RO(_name)
+ 
+ PIXEL_HC_REG_ATTR(cap, _CONTROLLER_CAPABILITIES);
+ PIXEL_HC_REG_ATTR(ver, _UFS_VERSION);
+-PIXEL_HC_REG_ATTR(hcpid, _CONTROLLER_DEV_ID);
+-PIXEL_HC_REG_ATTR(hcmid, _CONTROLLER_PROD_ID);
++/* 6.x: REG_CONTROLLER_{DEV,PROD}_ID were renamed {PID,MID} (same 0x10/0x14) */
++PIXEL_HC_REG_ATTR(hcpid, _CONTROLLER_PID);
++PIXEL_HC_REG_ATTR(hcmid, _CONTROLLER_MID);
+ PIXEL_HC_REG_ATTR(ahit, _AUTO_HIBERNATE_IDLE_TIMER);
+ PIXEL_HC_REG_ATTR(is, _INTERRUPT_STATUS);
+ PIXEL_HC_REG_ATTR(ie, _INTERRUPT_ENABLE);
+diff --git a/drivers/ufs/ufs-pixel.h b/drivers/ufs/ufs-pixel.h
+index a0f976b..08b1956 100644
+--- a/drivers/ufs/ufs-pixel.h
++++ b/drivers/ufs/ufs-pixel.h
+@@ -10,7 +10,7 @@
+ #ifndef _UFS_PIXEL_H_
+ #define _UFS_PIXEL_H_
+ 
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include <ufs/ufshcd.h>
+ #include <scsi/scsi_cmnd.h>
+ 
+diff --git a/drivers/usb/dwc3/core-exynos.h b/drivers/usb/dwc3/core-exynos.h
+index b265c39..daaf570 100644
+--- a/drivers/usb/dwc3/core-exynos.h
++++ b/drivers/usb/dwc3/core-exynos.h
+@@ -14,7 +14,7 @@
+ 
+ /* LINK Registers */
+ #define DWC3_LSKIPFREQ		0xd020
+-#define DWC3_LLUCTL		0xd024
++/* DWC3_LLUCTL: 6.18 core.h has the per-port DWC3_LLUCTL(n); port 0 is 0xd024 */
+ 
+ /* Bit fields */
+ /* Link Register - LLUCTL */
+diff --git a/drivers/usb/dwc3/dwc3-exynos-otg.c b/drivers/usb/dwc3/dwc3-exynos-otg.c
+index 78cbb05..4ac60a2 100644
+--- a/drivers/usb/dwc3/dwc3-exynos-otg.c
++++ b/drivers/usb/dwc3/dwc3-exynos-otg.c
+@@ -7,6 +7,8 @@
+  *		http://www.samsung.com
+  */
+ 
++#include <linux/of.h>
++#include <linux/of_platform.h>
+ #include <dwc3/core.h> /* $(srctree)/drivers/usb/dwc3/core.h */
+ #include <dwc3/io.h> /* $(srctree)/drivers/usb/dwc3/io.h */
+ 
+@@ -200,11 +202,11 @@ static void usb3_phy_control(struct dwc3_otg *dotg, int owner, int on)
+ 
+ 	if (on) {
+ 		dwc3_core_susphy_set(dwc, 0);
+-		exynos_usbdrd_pipe3_enable(dwc->usb3_generic_phy);
++		exynos_usbdrd_pipe3_enable(dwc->usb3_generic_phy[0]);
+ 		dwc3_core_susphy_set(dwc, 1);
+ 	} else {
+ 		dwc3_core_susphy_set(dwc, 0);
+-		exynos_usbdrd_pipe3_disable(dwc->usb3_generic_phy);
++		exynos_usbdrd_pipe3_disable(dwc->usb3_generic_phy[0]);
+ 		dwc3_core_susphy_set(dwc, 1);
+ 	}
+ }
+@@ -221,7 +223,7 @@ static void dwc3_usb3_phy_restart(struct dwc3_otg *dotg)
+ 
+ 	dev_info(dotg->exynos->dev, "ssphy restart");
+ 	usb3_phy_control(dotg, SSPHY_USB, 0);
+-	exynos_usbdrd_phy_tune(dwc->usb3_generic_phy, OTG_STATE_A_IDLE);
++	exynos_usbdrd_phy_tune(dwc->usb3_generic_phy[0], OTG_STATE_A_IDLE);
+ 	usb3_phy_control(dotg, SSPHY_USB, 1);
+ 
+ 	mutex_unlock(&dotg->role_lock);
+@@ -238,10 +240,10 @@ void dwc3_otg_phy_tune(struct dwc3 *dwc, bool is_host)
+ 		phy_state = OTG_STATE_B_IDLE;
+ 	}
+ 
+-	exynos_usbdrd_phy_tune(dwc->usb2_generic_phy,
++	exynos_usbdrd_phy_tune(dwc->usb2_generic_phy[0],
+ 			       phy_state);
+ #ifdef CONFIG_EXYNOS_USBDRD_PHY30
+-	exynos_usbdrd_phy_tune(dwc->usb3_generic_phy,
++	exynos_usbdrd_phy_tune(dwc->usb3_generic_phy[0],
+ 			       phy_state);
+ #endif
+ }
+@@ -633,7 +635,7 @@ static int dwc3_otg_usbdp_tca_cb(struct gvotable_election *el, const char *reaso
+ 		goto done;
+ 	}
+ 
+-	exynos_usbdrd_usbdp_tca_set(dwc->usb3_generic_phy, DWC_PHY_TCA_USB_ONLY,
++	exynos_usbdrd_usbdp_tca_set(dwc->usb3_generic_phy[0], DWC_PHY_TCA_USB_ONLY,
+ 				    DWC_PHY_TCA_LOW_PWR_DISABLE);
+ 
+ done:
+diff --git a/drivers/usb/dwc3/dwc3-exynos.c b/drivers/usb/dwc3/dwc3-exynos.c
+index 4e96435..002bbc2 100644
+--- a/drivers/usb/dwc3/dwc3-exynos.c
++++ b/drivers/usb/dwc3/dwc3-exynos.c
+@@ -252,17 +252,17 @@ static void dwc3_core_config(struct dwc3 *dwc, struct dwc3_exynos *exynos)
+ 	dwc3_exynos_writel(dwc->regs, DWC3_GUSB3PIPECTL(0), reg);
+ 
+ 	if (DWC3_VER_IS(DWC31, 170A)) {
+-		reg = dwc3_exynos_readl(dwc->regs, DWC3_LLUCTL);
++		reg = dwc3_exynos_readl(dwc->regs, DWC3_LLUCTL(0));
+ 		reg |= (DWC3_PENDING_HP_TIMER_US(0xb) | DWC3_EN_US_HP_TIMER);
+ 		reg |= DWC3_FORCE_GEN1;
+-		dwc3_exynos_writel(dwc->regs, DWC3_LLUCTL, reg);
++		dwc3_exynos_writel(dwc->regs, DWC3_LLUCTL(0), reg);
+ 
+ 		reg = dwc3_exynos_readl(dwc->regs, DWC3_LSKIPFREQ);
+ 		reg |= (DWC3_PM_ENTRY_TIMER_US(0x9) |
+ 			DWC3_PM_LC_TIMER_US(0x5) | DWC3_EN_PM_TIMER_US);
+ 		dwc3_exynos_writel(dwc->regs, DWC3_LSKIPFREQ, reg);
+ 	} else if (DWC3_VER_IS_WITHIN(DWC31, 180A, 190A)) {
+-		reg = dwc3_exynos_readl(dwc->regs, DWC3_LLUCTL);
++		reg = dwc3_exynos_readl(dwc->regs, DWC3_LLUCTL(0));
+ 		reg &= ~(DWC3_LLUCTL_TX_TS1_CNT_MASK);
+ 		reg |= (DWC3_PENDING_HP_TIMER_US(0xb) | DWC3_EN_US_HP_TIMER) |
+ 		    (DWC3_LLUCTL_PIPE_RESET) | (DWC3_LLUCTL_LTSSM_TIMER_OVRRD) |
+@@ -271,7 +271,7 @@ static void dwc3_core_config(struct dwc3 *dwc, struct dwc3_exynos *exynos)
+ 		if (exynos->config.force_gen1 && exynos->force_speed != USB_SPEED_SUPER_PLUS)
+ 			reg |= DWC3_FORCE_GEN1;
+ 
+-		dwc3_exynos_writel(dwc->regs, DWC3_LLUCTL, reg);
++		dwc3_exynos_writel(dwc->regs, DWC3_LLUCTL(0), reg);
+ 
+ 		reg = dwc3_exynos_readl(dwc->regs, DWC3_LSKIPFREQ);
+ 		reg &= ~(DWC3_PM_LC_TIMER_US_MASK |
+@@ -1262,8 +1262,8 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
+ 	mutex_init(&exynos->dotg_lock);
+ 	exynos->usb_data_enabled = true;
+ 
+-	exynos_usbdrd_phy_tune(exynos->dwc->usb2_generic_phy, 0);
+-	exynos_usbdrd_phy_tune(exynos->dwc->usb3_generic_phy, 0);
++	exynos_usbdrd_phy_tune(exynos->dwc->usb2_generic_phy[0], 0);
++	exynos_usbdrd_phy_tune(exynos->dwc->usb3_generic_phy[0], 0);
+ 
+ 	ret = pm_runtime_put(dev);
+ 	pm_runtime_allow(dev);
+@@ -1311,7 +1311,7 @@ vdd33_err:
+ 	return ret;
+ }
+ 
+-static int dwc3_exynos_remove(struct platform_device *pdev)
++static void dwc3_exynos_remove(struct platform_device *pdev)
+ {
+ 	struct dwc3_exynos	*exynos = platform_get_drvdata(pdev);
+ 	struct dwc3	*dwc = exynos->dwc;
+@@ -1335,8 +1335,6 @@ static int dwc3_exynos_remove(struct platform_device *pdev)
+ 		dwc3_exynos_clk_disable_unprepare(exynos);
+ 		pm_runtime_set_suspended(&pdev->dev);
+ 	}
+-
+-	return 0;
+ }
+ 
+ static void dwc3_exynos_shutdown(struct platform_device *pdev)
+diff --git a/drivers/usb/host/xhci-exynos.c b/drivers/usb/host/xhci-exynos.c
+index 1759526..0faa1c3 100644
+--- a/drivers/usb/host/xhci-exynos.c
++++ b/drivers/usb/host/xhci-exynos.c
+@@ -883,7 +883,7 @@ disable_runtime:
+ 	return ret;
+ }
+ 
+-static int xhci_exynos_remove(struct platform_device *dev)
++static void xhci_exynos_remove(struct platform_device *dev)
+ {
+ 	struct xhci_hcd_exynos *xhci_exynos = platform_get_drvdata(dev);
+ 	struct usb_hcd	*hcd = xhci_exynos->hcd;
+@@ -924,8 +924,6 @@ remove_hcd:
+ 	pm_runtime_disable(&dev->dev);
+ 	pm_runtime_put_noidle(&dev->dev);
+ 	pm_runtime_set_suspended(&dev->dev);
+-
+-	return 0;
+ }
+ 
+ static void xhci_exynos_shutdown(struct platform_device *dev)
+@@ -1006,7 +1004,7 @@ static int __maybe_unused xhci_exynos_resume(struct device *dev)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = xhci_resume(xhci, PMSG_RESUME);
++	ret = xhci_resume(xhci, false, false);	/* 6.18: (power_lost, is_auto_resume) */
+ 	if (ret) {
+ 		dev_err(xhci_exynos->dev, "%s: xhci resume failed, ret = %d\n", __func__, ret);
+ 		return ret;
+diff --git a/drivers/watchdog/s3c2410_wdt.c b/drivers/watchdog/s3c2410_wdt.c
+index ada1652..4d9ead7 100644
+--- a/drivers/watchdog/s3c2410_wdt.c
++++ b/drivers/watchdog/s3c2410_wdt.c
+@@ -1888,7 +1888,7 @@ static int s3c2410wdt_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int s3c2410wdt_remove(struct platform_device *dev)
++static void s3c2410wdt_remove(struct platform_device *dev)
+ {
+ 	int ret = 0;
+ 	struct s3c2410_wdt *wdt = platform_get_drvdata(dev);
+@@ -1896,7 +1896,7 @@ static int s3c2410wdt_remove(struct platform_device *dev)
+ 	if (wdt->drv_data->pmu_reset_func)
+ 		ret = wdt->drv_data->pmu_reset_func(wdt, true);
+ 	if (ret < 0)
+-		return ret;
++		return;
+ 
+ 	watchdog_unregister_device(&wdt->wdt_device);
+ 
+@@ -1912,8 +1912,6 @@ static int s3c2410wdt_remove(struct platform_device *dev)
+ 		WARN_ON(unregister_trace_android_vh_scheduler_tick(vh_scheduler_tick, wdt));
+ 		free_percpu(wdt->schedstat);
+ 	}
+-
+-	return ret;
+ }
+ 
+ static void s3c2410wdt_shutdown(struct platform_device *dev)
+diff --git a/include/arm-smmu-v3/pixel-iommu-fault.h b/include/arm-smmu-v3/pixel-iommu-fault.h
+new file mode 100644
+index 0000000..e8ced72
+--- /dev/null
++++ b/include/arm-smmu-v3/pixel-iommu-fault.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * junkyard (lynx): identical copy of iommu/arm-smmu-v3/include/arm-smmu-v3/
++ * pixel-iommu-fault.h. On Laguna that package provides the API; on gs101/gs201
++ * the Samsung SysMMU driver (samsung_iommu.ko) provides the same symbols, so
++ * clients port the same way on both. Keep the two in sync.
++ */
++#ifndef _PIXEL_IOMMU_FAULT_H
++#define _PIXEL_IOMMU_FAULT_H
++
++#include <linux/types.h>
++
++struct device;
++struct iommu_domain;
++
++typedef int (*pixel_iommu_fault_handler_t)(struct device *dev, unsigned long iova,
++					 u32 pasid, int flags, void *token);
++
++/*
++ * Unrecoverable faults only. Handlers may sleep, but must not register or
++ * unregister handlers, or attach/detach IOMMU domains. The SMMU holds its
++ * attachment locks while reporting a fault.
++ *
++ * Unregister before freeing the token or unloading the handler's module.
++ * Unregister waits for active callbacks. All three operations may sleep.
++ */
++int pixel_iommu_register_fault_handler(struct device *dev,
++				       pixel_iommu_fault_handler_t handler, void *token);
++void pixel_iommu_unregister_fault_handler(struct device *dev);
++/* A fault may outlive its attachment; domain may be NULL. */
++int pixel_iommu_report_fault(struct iommu_domain *domain, struct device *dev,
++			     unsigned long iova, u32 pasid, int flags);
++
++#endif /* _PIXEL_IOMMU_FAULT_H */
+diff --git a/include/linux/platform_data/spi-s3c64xx-gs.h b/include/linux/platform_data/spi-s3c64xx-gs.h
+index fa8124b..b75f0c7 100644
+--- a/include/linux/platform_data/spi-s3c64xx-gs.h
++++ b/include/linux/platform_data/spi-s3c64xx-gs.h
+@@ -117,7 +117,7 @@ struct s3c64xx_spi_driver_data {
+ 	struct clk                      *clk;
+ 	struct clk                      *src_clk;
+ 	struct platform_device          *pdev;
+-	struct spi_master               *master;
++	struct spi_controller               *master;
+ 	struct s3c64xx_spi_info  *cntrlr_info;
+ 	struct spi_device               *tgl_spi;
+ 	/* lock : lock to change sdd->state */
+diff --git a/include/linux/usb/dwc3-exynos.h b/include/linux/usb/dwc3-exynos.h
+index 7492484..f484fde 100644
+--- a/include/linux/usb/dwc3-exynos.h
++++ b/include/linux/usb/dwc3-exynos.h
+@@ -27,7 +27,7 @@
+ /* LINK Registers */
+ #define DWC3_LU3LFPSRXTIM	0xd010
+ #define DWC3_LSKIPFREQ		0xd020
+-#define DWC3_LLUCTL		0xd024
++/* DWC3_LLUCTL: 6.18 core.h has the per-port DWC3_LLUCTL(n); port 0 is 0xd024 */
+ #define DWC3_BU31RHBDBG		0xd800
+ 
+ /* Link Register - LLUCTL */
+diff --git a/include/soc/google/gs_platform_compat.h b/include/soc/google/gs_platform_compat.h
+new file mode 100644
+index 0000000..35cf3ff
+--- /dev/null
++++ b/include/soc/google/gs_platform_compat.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * junkyard (lynx): 6.18 moved driver_override from struct platform_device into
++ * struct device (set with device_set_driver_override()), so a static
++ * platform_device can no longer carry it in its initializer.
++ *
++ * gs_platform_device_register_override() is platform_device_register() with the
++ * override applied after device_initialize() (which initialises its lock) and
++ * before platform_device_add() (which triggers driver matching). The DMA-mask
++ * defaults mirror platform_device_register()'s static setup_pdev_dma_masks().
++ */
++#ifndef _GS_PLATFORM_COMPAT_H
++#define _GS_PLATFORM_COMPAT_H
++
++#include <linux/device.h>
++#include <linux/dma-mapping.h>
++#include <linux/platform_device.h>
++
++static inline int gs_platform_device_register_override(struct platform_device *pdev,
++							const char *driver_override)
++{
++	int ret;
++
++	device_initialize(&pdev->dev);
++
++	pdev->dev.dma_parms = &pdev->dma_parms;
++	if (!pdev->dev.coherent_dma_mask)
++		pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
++	if (!pdev->dev.dma_mask) {
++		pdev->platform_dma_mask = DMA_BIT_MASK(32);
++		pdev->dev.dma_mask = &pdev->platform_dma_mask;
++	}
++
++	ret = device_set_driver_override(&pdev->dev, driver_override);
++	if (ret) {
++		put_device(&pdev->dev);
++		return ret;
++	}
++
++	return platform_device_add(pdev);
++}
++
++#endif /* _GS_PLATFORM_COMPAT_H */
+diff --git a/include/soc/google/gs_thermal_compat.h b/include/soc/google/gs_thermal_compat.h
+new file mode 100644
+index 0000000..5acf44f
+--- /dev/null
++++ b/include/soc/google/gs_thermal_compat.h
+@@ -0,0 +1,106 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * junkyard (lynx): index-based thermal trip accessors for the gs101/gs201-era
++ * thermal drivers, which were written against the 6.1 thermal core.
++ *
++ * Between 6.1 and 6.18 the core moved trips into struct thermal_trip_desc
++ * (tz->trips[i].trip), hung each trip's bound cooling-device instances off
++ * the descriptor (td->thermal_instances, linked by instance->trip_node), and
++ * removed thermal_zone_get_trip(), thermal_zone_get_num_trips(),
++ * __thermal_zone_get_trip() and get_thermal_instance() from the driver API.
++ *
++ * These drivers already include the core's private thermal_core.h, so the
++ * helpers below read the same fields the removed functions used to.
++ */
++#ifndef _GS_THERMAL_COMPAT_H
++#define _GS_THERMAL_COMPAT_H
++
++#include <linux/errno.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
++#include <linux/thermal.h>
++#include <thermal_core.h>
++
++static inline int gs_thermal_zone_get_num_trips(struct thermal_zone_device *tz)
++{
++	return tz->num_trips;
++}
++
++static inline int gs_thermal_zone_get_trip(struct thermal_zone_device *tz, int trip_id,
++					   struct thermal_trip *trip)
++{
++	if (!tz || !trip || trip_id < 0 || trip_id >= tz->num_trips)
++		return -EINVAL;
++
++	*trip = tz->trips[trip_id].trip;
++	return 0;
++}
++
++/* Index of @trip within @tz, or -EINVAL if it is not one of @tz's trips. */
++static inline int gs_thermal_zone_trip_id(struct thermal_zone_device *tz,
++					  const struct thermal_trip *trip)
++{
++	int i;
++
++	for (i = 0; i < tz->num_trips; i++)
++		if (&tz->trips[i].trip == trip)
++			return i;
++	return -EINVAL;
++}
++
++/*
++ * 6.1's get_thermal_instance(): the instance binding @cdev to trip @trip_id of
++ * @tz, or NULL. Takes tz->lock and cdev->lock like the original did, so the
++ * caller must hold neither.
++ */
++static inline struct thermal_instance *
++gs_get_thermal_instance(struct thermal_zone_device *tz,
++			struct thermal_cooling_device *cdev, int trip_id)
++{
++	struct thermal_instance *pos, *target = NULL;
++
++	if (trip_id < 0 || trip_id >= tz->num_trips)
++		return NULL;
++
++	mutex_lock(&tz->lock);
++	mutex_lock(&cdev->lock);
++	list_for_each_entry(pos, &tz->trips[trip_id].thermal_instances, trip_node) {
++		if (pos->cdev == cdev) {
++			target = pos;
++			break;
++		}
++	}
++	mutex_unlock(&cdev->lock);
++	mutex_unlock(&tz->lock);
++
++	return target;
++}
++
++/*
++ * Set trip @trip_id of @tz to @temp the way 6.18's trip_point_temp_store()
++ * does: the zone's set_trip_temp() callback first, then the core's own trip
++ * update, both under the zone lock. Replaces the 6.1 pattern of calling
++ * tz->ops->set_trip_temp(tz, i, temp) and then writing tz->trips[i] by hand.
++ * The caller must not hold tz->lock.
++ */
++static inline int gs_thermal_zone_set_trip_temp(struct thermal_zone_device *tz,
++						int trip_id, int temp)
++{
++	struct thermal_trip *trip;
++	int ret = 0;
++
++	if (trip_id < 0 || trip_id >= tz->num_trips)
++		return -EINVAL;
++
++	trip = &tz->trips[trip_id].trip;
++	mutex_lock(&tz->lock);
++	if (tz->ops.set_trip_temp)
++		ret = tz->ops.set_trip_temp(tz, trip, temp);
++	if (!ret)
++		thermal_zone_set_trip_temp(tz, trip, temp);
++	mutex_unlock(&tz->lock);
++
++	return ret;
++}
++
++#endif /* _GS_THERMAL_COMPAT_H */
+diff --git a/include/trace/events/thermal_exynos.h b/include/trace/events/thermal_exynos.h
+index f386d8b..958b715 100644
+--- a/include/trace/events/thermal_exynos.h
++++ b/include/trace/events/thermal_exynos.h
+@@ -388,7 +388,7 @@ TRACE_EVENT(thermal_exynos_arm_update,
+ );
+ 
+ TRACE_EVENT(thermal_exynos_allow_max_power,
+-	TP_PROTO(const char *tmu_name, bool is_hardlimited, char *cdev_type, unsigned long state),
++	TP_PROTO(const char *tmu_name, bool is_hardlimited, const char *cdev_type, unsigned long state),
+ 
+ 	TP_ARGS(tmu_name, is_hardlimited, cdev_type, state),
+ 

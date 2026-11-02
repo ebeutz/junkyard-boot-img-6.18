@@ -137,7 +137,14 @@ KERNEL_BAZEL_FLAGS ?=
 # sandboxes / 12 GB into out/bazel/.../sandbox/_moved_trash_dir before GKI had
 # even linked, and ran a 40 GB build host out of disk mid-compile. The cost of
 # deleting synchronously is a little wall time; the alternative is ENOSPC.
-KERNEL_BAZEL_HOST_FLAGS ?= --experimental_sandbox_async_tree_delete_idle_threads=0
+#
+# --config=local (kleaf's "reduce sandboxes" mode, see the .build_kernel note)
+# keeps a persistent prepared-kernel copy PER MODULE under out/cache/ (~150 MB
+# each, ~100 modules for a Pixel device = 15 GB+). It is what the NixOS FHS env
+# needs, so it stays the default; on a small disk drop it with
+#   make ... KERNEL_BAZEL_HOST_FLAGS=--experimental_sandbox_async_tree_delete_idle_threads=0
+# (costs one full rebuild: it changes bazel's configuration hash).
+KERNEL_BAZEL_HOST_FLAGS ?= --config=local --experimental_sandbox_async_tree_delete_idle_threads=0
 # Every fragment must say where its kernel comes from — `aosp` (repo manifest
 # branch) or `grapheneos` (monorepo + sync.sh). See clone_kernel_source.
 ifeq ($(filter aosp grapheneos,$(KERNEL_SOURCE_KIND)),)
@@ -567,7 +574,6 @@ $(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_de
 	cd $(KERNEL_SOURCE_DIR); $(BAZEL) run \
 		--config=stamp \
 		--config=$(BAZEL_CONFIG) \
-		--config=local \
 		--defconfig_fragment=//custom_defconfig_mod:custom_defconfig_$(DEVICE) \
 		$(KERNEL_BAZEL_FLAGS) \
 		$(KERNEL_BAZEL_HOST_FLAGS) \

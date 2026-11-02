@@ -1,0 +1,360 @@
+From: junkyard
+Subject: [PATCH] gpu: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c b/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c
+index 22fdeb1..a6ecf2e 100644
+--- a/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c
++++ b/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c
+@@ -1390,7 +1390,7 @@ static void kbase_csf_fence_wait_callback(struct dma_fence *fence, struct dma_fe
+ 
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+ 	/* Fence gets signaled. Deactivate the timer for fence-wait timeout */
+-	del_timer(&kcpu_queue->fence_timeout);
++	timer_delete(&kcpu_queue->fence_timeout);
+ #endif
+ 
+ 	KBASE_KTRACE_ADD_CSF_KCPU(kctx->kbdev, KCPU_FENCE_WAIT_END, kcpu_queue, fence->context,
+@@ -1418,7 +1418,7 @@ static void kbasep_kcpu_fence_wait_cancel(struct kbase_kcpu_command_queue *kcpu_
+ 		 * the timer would already have been deactivated inside
+ 		 * kbase_csf_fence_wait_callback().
+ 		 */
+-		del_timer_sync(&kcpu_queue->fence_timeout);
++		timer_delete_sync(&kcpu_queue->fence_timeout);
+ #endif
+ 		if (removed)
+ 			KBASE_KTRACE_ADD_CSF_KCPU(kctx->kbdev, KCPU_FENCE_WAIT_END, kcpu_queue,
+@@ -1719,11 +1719,11 @@ static void kcpu_force_signal_fence(struct kbase_kcpu_command_queue *kcpu_queue)
+ 	 */
+ 	atomic_set(&kcpu_queue->fence_signal_pending_cnt, 0);
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+-	del = del_timer_sync(&kcpu_queue->fence_signal_timeout);
++	del = timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ 	dev_info(kctx->kbdev->dev, "kbase KCPU [%pK] delete fence signal timeout timer ret: %d",
+ 		 kcpu_queue, del);
+ #else
+-	del_timer_sync(&kcpu_queue->fence_signal_timeout);
++	timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ #endif
+ }
+ 
+@@ -1797,13 +1797,13 @@ static int kbasep_kcpu_fence_signal_process(struct kbase_kcpu_command_queue *kcp
+ #endif
+ 	} else {
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+-		int del = del_timer_sync(&kcpu_queue->fence_signal_timeout);
++		int del = timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ 
+ 		dev_dbg(kctx->kbdev->dev, "kbase KCPU delete fence signal timeout timer ret: %d",
+ 			del);
+ 		CSTD_UNUSED(del);
+ #else
+-		del_timer_sync(&kcpu_queue->fence_signal_timeout);
++		timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ #endif
+ 	}
+ 
+@@ -2896,7 +2896,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
+ 			mutex_lock(&kcpu_queue->lock);
+ 
+ 			if (atomic_read(&kcpu_queue->fence_signal_pending_cnt)) {
+-				int ret = del_timer_sync(&kcpu_queue->fence_signal_timeout);
++				int ret = timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ 
+ 				dev_dbg(kbdev->dev,
+ 					"Fence signal timeout on KCPU queue(%lu), kctx (%d_%d) was %s on suspend",
+@@ -2906,7 +2906,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
+ 
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+ 			if (kcpu_queue->fence_wait_processed) {
+-				int ret = del_timer_sync(&kcpu_queue->fence_timeout);
++				int ret = timer_delete_sync(&kcpu_queue->fence_timeout);
+ 
+ 				dev_dbg(kbdev->dev,
+ 					"Fence wait timeout on KCPU queue(%lu), kctx (%d_%d) was %s on suspend",
+diff --git a/borr_mali_kbase/csf/mali_kbase_csf_tl_reader.c b/borr_mali_kbase/csf/mali_kbase_csf_tl_reader.c
+index 4ee64e1..7fae105 100644
+--- a/borr_mali_kbase/csf/mali_kbase_csf_tl_reader.c
++++ b/borr_mali_kbase/csf/mali_kbase_csf_tl_reader.c
+@@ -348,7 +348,7 @@ void kbase_csf_tl_reader_init(struct kbase_csf_tl_reader *self, struct kbase_tls
+ 
+ void kbase_csf_tl_reader_term(struct kbase_csf_tl_reader *self)
+ {
+-	del_timer_sync(&self->read_timer);
++	timer_delete_sync(&self->read_timer);
+ }
+ 
+ int kbase_csf_tl_reader_start(struct kbase_csf_tl_reader *self, struct kbase_device *kbdev)
+@@ -406,7 +406,7 @@ void kbase_csf_tl_reader_stop(struct kbase_csf_tl_reader *self)
+ 	/* Disable the tracebuffer on the CSFFW side. */
+ 	tl_reader_update_enable_bit(self, false);
+ 
+-	del_timer_sync(&self->read_timer);
++	timer_delete_sync(&self->read_timer);
+ 
+ 	spin_lock_irqsave(&self->read_lock, flags);
+ 
+diff --git a/borr_mali_kbase/mali_kbase_core_linux.c b/borr_mali_kbase/mali_kbase_core_linux.c
+index 9b661a7..74a60b6 100644
+--- a/borr_mali_kbase/mali_kbase_core_linux.c
++++ b/borr_mali_kbase/mali_kbase_core_linux.c
+@@ -6418,7 +6418,7 @@ module_init(kbase_driver_init);
+ module_exit(kbase_driver_exit);
+ #endif
+ MODULE_LICENSE("GPL");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ MODULE_VERSION(MALI_RELEASE_NAME " (UK version " \
+ 		__stringify(BASE_UK_VERSION_MAJOR) "." \
+ 		__stringify(BASE_UK_VERSION_MINOR) ")");
+diff --git a/borr_mali_kbase/mali_kbase_jd.c b/borr_mali_kbase/mali_kbase_jd.c
+index cdc82f2..22e52fb 100644
+--- a/borr_mali_kbase/mali_kbase_jd.c
++++ b/borr_mali_kbase/mali_kbase_jd.c
+@@ -1601,7 +1601,7 @@ void kbase_jd_zap_context(struct kbase_context *kctx)
+ 	 * queued outside the job scheduler.
+ 	 */
+ 
+-	del_timer_sync(&kctx->soft_job_timeout);
++	timer_delete_sync(&kctx->soft_job_timeout);
+ 	list_for_each_safe(entry, tmp, &kctx->waiting_soft_jobs) {
+ 		katom = list_entry(entry, struct kbase_jd_atom, queue);
+ 		kbase_cancel_soft_job(katom);
+diff --git a/borr_mali_kbase/mali_kbase_softjobs.c b/borr_mali_kbase/mali_kbase_softjobs.c
+index 35769e4..526f531 100644
+--- a/borr_mali_kbase/mali_kbase_softjobs.c
++++ b/borr_mali_kbase/mali_kbase_softjobs.c
+@@ -289,7 +289,7 @@ void kbasep_complete_triggered_soft_events(struct kbase_context *kctx, u64 evt)
+ 	}
+ 
+ 	if (cancel_timer)
+-		del_timer(&kctx->soft_job_timeout);
++		timer_delete(&kctx->soft_job_timeout);
+ 	spin_unlock_irqrestore(&kctx->waiting_soft_jobs_lock, lflags);
+ }
+ 
+diff --git a/borr_mali_kbase/platform/pixel/pixel_gpu_sysfs.c b/borr_mali_kbase/platform/pixel/pixel_gpu_sysfs.c
+index f3ba28b..3c4aebd 100644
+--- a/borr_mali_kbase/platform/pixel/pixel_gpu_sysfs.c
++++ b/borr_mali_kbase/platform/pixel/pixel_gpu_sysfs.c
+@@ -746,7 +746,7 @@ static ssize_t hint_power_on_store(struct device *dev, struct device_attribute *
+ 	if (!pc)
+ 		return -ENODEV;
+ 
+-	ret = strtobool(buf, &enabled);
++	ret = kstrtobool(buf, &enabled);
+ 	if (ret)
+ 		return -EINVAL;
+ 
+diff --git a/borr_mali_kbase/tl/mali_kbase_timeline.c b/borr_mali_kbase/tl/mali_kbase_timeline.c
+index b4ffdaf..055bb88 100644
+--- a/borr_mali_kbase/tl/mali_kbase_timeline.c
++++ b/borr_mali_kbase/tl/mali_kbase_timeline.c
+@@ -269,7 +269,7 @@ void kbase_timeline_release(struct kbase_timeline *timeline)
+ 
+ 	/* Stop autoflush timer before releasing access to streams. */
+ 	atomic_set(&timeline->autoflush_timer_active, 0);
+-	del_timer_sync(&timeline->autoflush_timer);
++	timer_delete_sync(&timeline->autoflush_timer);
+ 
+ 	atomic_set(timeline->timeline_flags, 0);
+ }
+diff --git a/mali_kbase/csf/mali_kbase_csf_kcpu.c b/mali_kbase/csf/mali_kbase_csf_kcpu.c
+index e815ff2..c41d9cc 100644
+--- a/mali_kbase/csf/mali_kbase_csf_kcpu.c
++++ b/mali_kbase/csf/mali_kbase_csf_kcpu.c
+@@ -1390,7 +1390,7 @@ static void kbase_csf_fence_wait_callback(struct dma_fence *fence, struct dma_fe
+ 
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+ 	/* Fence gets signaled. Deactivate the timer for fence-wait timeout */
+-	del_timer(&kcpu_queue->fence_timeout);
++	timer_delete(&kcpu_queue->fence_timeout);
+ #endif
+ 
+ 	KBASE_KTRACE_ADD_CSF_KCPU(kctx->kbdev, KCPU_FENCE_WAIT_END, kcpu_queue, fence->context,
+@@ -1418,7 +1418,7 @@ static void kbasep_kcpu_fence_wait_cancel(struct kbase_kcpu_command_queue *kcpu_
+ 		 * the timer would already have been deactivated inside
+ 		 * kbase_csf_fence_wait_callback().
+ 		 */
+-		del_timer_sync(&kcpu_queue->fence_timeout);
++		timer_delete_sync(&kcpu_queue->fence_timeout);
+ #endif
+ 		if (removed)
+ 			KBASE_KTRACE_ADD_CSF_KCPU(kctx->kbdev, KCPU_FENCE_WAIT_END, kcpu_queue,
+@@ -1720,11 +1720,11 @@ static void kcpu_force_signal_fence(struct kbase_kcpu_command_queue *kcpu_queue)
+ 	 */
+ 	atomic_set(&kcpu_queue->fence_signal_pending_cnt, 0);
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+-	del = del_timer_sync(&kcpu_queue->fence_signal_timeout);
++	del = timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ 	dev_info(kctx->kbdev->dev, "kbase KCPU [%pK] delete fence signal timeout timer ret: %d",
+ 		 kcpu_queue, del);
+ #else
+-	del_timer_sync(&kcpu_queue->fence_signal_timeout);
++	timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ #endif
+ }
+ 
+@@ -1799,13 +1799,13 @@ static int kbasep_kcpu_fence_signal_process(struct kbase_kcpu_command_queue *kcp
+ #endif
+ 	} else {
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+-		int del = del_timer_sync(&kcpu_queue->fence_signal_timeout);
++		int del = timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ 
+ 		dev_dbg(kctx->kbdev->dev, "kbase KCPU delete fence signal timeout timer ret: %d",
+ 			del);
+ 		CSTD_UNUSED(del);
+ #else
+-		del_timer_sync(&kcpu_queue->fence_signal_timeout);
++		timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ #endif
+ 	}
+ 
+@@ -2901,7 +2901,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
+ 			mutex_lock(&kcpu_queue->lock);
+ 
+ 			if (atomic_read(&kcpu_queue->fence_signal_pending_cnt)) {
+-				int ret = del_timer_sync(&kcpu_queue->fence_signal_timeout);
++				int ret = timer_delete_sync(&kcpu_queue->fence_signal_timeout);
+ 
+ 				dev_dbg(kbdev->dev,
+ 					"Fence signal timeout on KCPU queue(%lu), kctx (%d_%d) was %s on suspend",
+@@ -2911,7 +2911,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
+ 
+ #ifdef CONFIG_MALI_FENCE_DEBUG
+ 			if (kcpu_queue->fence_wait_processed) {
+-				int ret = del_timer_sync(&kcpu_queue->fence_timeout);
++				int ret = timer_delete_sync(&kcpu_queue->fence_timeout);
+ 
+ 				dev_dbg(kbdev->dev,
+ 					"Fence wait timeout on KCPU queue(%lu), kctx (%d_%d) was %s on suspend",
+diff --git a/mali_kbase/csf/mali_kbase_csf_tl_reader.c b/mali_kbase/csf/mali_kbase_csf_tl_reader.c
+index ac22c57..6e2c95b 100644
+--- a/mali_kbase/csf/mali_kbase_csf_tl_reader.c
++++ b/mali_kbase/csf/mali_kbase_csf_tl_reader.c
+@@ -348,7 +348,7 @@ void kbase_csf_tl_reader_init(struct kbase_csf_tl_reader *self, struct kbase_tls
+ 
+ void kbase_csf_tl_reader_term(struct kbase_csf_tl_reader *self)
+ {
+-	del_timer_sync(&self->read_timer);
++	timer_delete_sync(&self->read_timer);
+ }
+ 
+ int kbase_csf_tl_reader_start(struct kbase_csf_tl_reader *self, struct kbase_device *kbdev)
+@@ -406,7 +406,7 @@ void kbase_csf_tl_reader_stop(struct kbase_csf_tl_reader *self)
+ 	/* Disable the tracebuffer on the CSFFW side. */
+ 	tl_reader_update_enable_bit(self, false);
+ 
+-	del_timer_sync(&self->read_timer);
++	timer_delete_sync(&self->read_timer);
+ 
+ 	spin_lock_irqsave(&self->read_lock, flags);
+ 
+diff --git a/mali_kbase/mali_kbase_core_linux.c b/mali_kbase/mali_kbase_core_linux.c
+index 2d5285b..fdd6bc9 100644
+--- a/mali_kbase/mali_kbase_core_linux.c
++++ b/mali_kbase/mali_kbase_core_linux.c
+@@ -4972,7 +4972,7 @@ module_init(kbase_driver_init);
+ module_exit(kbase_driver_exit);
+ #endif
+ MODULE_LICENSE("GPL");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ MODULE_VERSION(MALI_RELEASE_NAME " (UK version " \
+ 		__stringify(BASE_UK_VERSION_MAJOR) "." \
+ 		__stringify(BASE_UK_VERSION_MINOR) ")");
+diff --git a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c b/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
+index a6ab91d..6aa18c9 100644
+--- a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
++++ b/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
+@@ -738,7 +738,7 @@ static ssize_t hint_power_on_store(struct device *dev, struct device_attribute *
+ 	if (!pc)
+ 		return -ENODEV;
+ 
+-	ret = strtobool(buf, &enabled);
++	ret = kstrtobool(buf, &enabled);
+ 	if (ret)
+ 		return -EINVAL;
+ 
+diff --git a/mali_kbase/tl/mali_kbase_timeline.c b/mali_kbase/tl/mali_kbase_timeline.c
+index d315c81..8cb1ad0 100644
+--- a/mali_kbase/tl/mali_kbase_timeline.c
++++ b/mali_kbase/tl/mali_kbase_timeline.c
+@@ -273,7 +273,7 @@ void kbase_timeline_release(struct kbase_timeline *timeline)
+ 
+ 	/* Stop autoflush timer before releasing access to streams. */
+ 	atomic_set(&timeline->autoflush_timer_active, 0);
+-	del_timer_sync(&timeline->autoflush_timer);
++	timer_delete_sync(&timeline->autoflush_timer);
+ 
+ 	atomic_set(timeline->timeline_flags, 0);
+ }
+diff --git a/mali_pixel/mali_pixel_mod.c b/mali_pixel/mali_pixel_mod.c
+index f0b88a0..c1eadb5 100644
+--- a/mali_pixel/mali_pixel_mod.c
++++ b/mali_pixel/mali_pixel_mod.c
+@@ -5,7 +5,7 @@
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_DESCRIPTION("Pixel platform integration for GPU");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ MODULE_AUTHOR("<sidaths@google.com>");
+ MODULE_VERSION("1.0");
+ MODULE_SOFTDEP("pre: slc_pmon");
+diff --git a/mali_pixel/memory_group_manager.c b/mali_pixel/memory_group_manager.c
+index 8a84c4f..d65d254 100644
+--- a/mali_pixel/memory_group_manager.c
++++ b/mali_pixel/memory_group_manager.c
+@@ -690,7 +690,7 @@ static int memory_group_manager_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int memory_group_manager_remove(struct platform_device *pdev)
++static void memory_group_manager_remove(struct platform_device *pdev)
+ {
+ 	struct memory_group_manager_device *mgm_dev =
+ 		platform_get_drvdata(pdev);
+@@ -702,8 +702,6 @@ static int memory_group_manager_remove(struct platform_device *pdev)
+ 	kfree(mgm_dev);
+ 
+ 	dev_info(&pdev->dev, "Memory group manager removed successfully\n");
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id memory_group_manager_dt_ids[] = {
+diff --git a/mali_pixel/priority_control_manager.c b/mali_pixel/priority_control_manager.c
+index 4fa20d3..dbc7610 100644
+--- a/mali_pixel/priority_control_manager.c
++++ b/mali_pixel/priority_control_manager.c
+@@ -130,13 +130,11 @@ static int priority_control_manager_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int priority_control_manager_remove(struct platform_device *pdev)
++static void priority_control_manager_remove(struct platform_device *pdev)
+ {
+ 	struct priority_control_manager_device *pcm_dev = platform_get_drvdata(pdev);
+ 
+ 	dev_info(pcm_dev->data, "Priority control manager removed successfully\n");
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id priority_control_manager_dt_ids[] = {
+diff --git a/mali_pixel/protected_memory_allocator.c b/mali_pixel/protected_memory_allocator.c
+index f4798c1..8d0a99f 100644
+--- a/mali_pixel/protected_memory_allocator.c
++++ b/mali_pixel/protected_memory_allocator.c
+@@ -15,7 +15,7 @@
+ #include <linux/slab.h>
+ #include <linux/version.h>
+ 
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ 
+ #define MALI_PMA_DMA_HEAP_NAME "vframe-secure"
+ #define MALI_PMA_SLAB_SIZE (1 << 16)

@@ -1,0 +1,47 @@
+From: junkyard
+Subject: [PATCH] display/samsung: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/exynos_drm_drv.c b/exynos_drm_drv.c
+index 0c21183..0b6c5a5 100644
+--- a/exynos_drm_drv.c
++++ b/exynos_drm_drv.c
+@@ -1400,5 +1400,5 @@ MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
+ MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
+ MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
+ MODULE_DESCRIPTION("Samsung SoC DRM Driver");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ MODULE_LICENSE("GPL");
+diff --git a/exynos_drm_dsim.c b/exynos_drm_dsim.c
+index 35244d6..d809b84 100644
+--- a/exynos_drm_dsim.c
++++ b/exynos_drm_dsim.c
+@@ -13,7 +13,7 @@
+ 
+ #define pr_fmt(fmt)  "%s: " fmt, __func__
+ 
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ 
+ #include <drm/drm_of.h>
+ #include <drm/drm_crtc_helper.h>
+@@ -1687,7 +1687,7 @@ static int dsim_add_mipi_dsi_device(struct dsim_device *dsim,
+ 				scnprintf(info.type, sizeof(info.type),
+ 					"%d:%s", idx, name);
+ 			else
+-				strlcpy(info.type, name, sizeof(info.type));
++				strscpy(info.type, name, sizeof(info.type));
+ 			info.node = of_node_get(node);
+ 		}
+ 	}
+@@ -3059,7 +3059,7 @@ static ssize_t hs_clock_store(struct device *dev,
+ 		goto out;
+ 	}
+ 
+-	strlcpy(params, buf, sizeof(params));
++	strscpy(params, buf, sizeof(params));
+ 	hs_clk_str = strsep(&p, " ");
+ 	apply_now_str = strsep(&p, " ");
+ 

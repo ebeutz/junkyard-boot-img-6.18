@@ -1,0 +1,25 @@
+From: junkyard
+Subject: [PATCH] gxp/gs201: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
+index 7b57441..41b4a17 100644
+--- a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
++++ b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
+@@ -1331,4 +1331,4 @@ void gcip_iommu_unmap(struct gcip_iommu_domain *domain, dma_addr_t iova, size_t
+ 			 size, unmapped);
+ }
+ 
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/gxp-dmabuf.c b/gxp-dmabuf.c
+index b88c696..6759871 100644
+--- a/gxp-dmabuf.c
++++ b/gxp-dmabuf.c
+@@ -89,4 +89,4 @@ err_dma_buf_put:
+ 	return ERR_PTR(ret);
+ }
+ 
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");

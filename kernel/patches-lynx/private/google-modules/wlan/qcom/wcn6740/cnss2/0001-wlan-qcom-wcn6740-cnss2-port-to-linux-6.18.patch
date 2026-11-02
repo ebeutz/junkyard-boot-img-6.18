@@ -1,0 +1,352 @@
+From: junkyard
+Subject: [PATCH] wlan/qcom/wcn6740/cnss2: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/cnss2/bus.c b/cnss2/bus.c
+index 58fd891..023df1d 100644
+--- a/cnss2/bus.c
++++ b/cnss2/bus.c
+@@ -256,7 +256,7 @@ int cnss_bus_qmi_send_put(struct cnss_plat_data *plat_priv)
+ void cnss_bus_fw_boot_timeout_hdlr(struct timer_list *t)
+ {
+ 	struct cnss_plat_data *plat_priv =
+-		from_timer(plat_priv, t, fw_boot_timer);
++		timer_container_of(plat_priv, t, fw_boot_timer);
+ 
+ 	if (!plat_priv)
+ 		return;
+diff --git a/cnss2/genl.c b/cnss2/genl.c
+index 2819a1b..13ce236 100644
+--- a/cnss2/genl.c
++++ b/cnss2/genl.c
+@@ -96,9 +96,9 @@ static int cnss_genl_send_data(u8 type, char *file_name, u32 total_size,
+ 		    type, file_name, total_size, seg_id, end, data_len);
+ 
+ 	if (!file_name)
+-		strlcpy(filename, "default", sizeof(filename));
++		strscpy(filename, "default", sizeof(filename));
+ 	else
+-		strlcpy(filename, file_name, sizeof(filename));
++		strscpy(filename, file_name, sizeof(filename));
+ 
+ 	skb = genlmsg_new(NLMSG_HDRLEN +
+ 			  nla_total_size(sizeof(type)) +
+diff --git a/cnss2/main.c b/cnss2/main.c
+index 27f60ba..0c133a0 100644
+--- a/cnss2/main.c
++++ b/cnss2/main.c
+@@ -10,7 +10,7 @@
+ #include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/of_gpio.h>
+-#include <linux/pm_wakeup.h>
++#include <linux/device.h>	/* 6.18: provides pm_wakeup.h, which must not be included directly */
+ #include <linux/reboot.h>
+ #include <linux/rwsem.h>
+ #include <linux/suspend.h>
+@@ -686,7 +686,7 @@ static int cnss_fw_ready_hdlr(struct cnss_plat_data *plat_priv)
+ 	}
+ 
+ 	cnss_pr_dbg("Processing FW Init Done..\n");
+-	del_timer(&plat_priv->fw_boot_timer);
++	timer_delete(&plat_priv->fw_boot_timer);
+ 	set_bit(CNSS_FW_READY, &plat_priv->driver_state);
+ 	clear_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state);
+ 
+@@ -1031,7 +1031,7 @@ int cnss_idle_restart(struct device *dev)
+ 
+ 	if (test_bit(CNSS_IN_REBOOT, &plat_priv->driver_state)) {
+ 		cnss_pr_dbg("Reboot or shutdown is in progress, ignore idle restart\n");
+-		del_timer(&plat_priv->fw_boot_timer);
++		timer_delete(&plat_priv->fw_boot_timer);
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+@@ -2592,7 +2592,7 @@ static int cnss_init_dump_entry(struct cnss_plat_data *plat_priv)
+ 	ramdump_info->dump_data.len = ramdump_info->ramdump_size;
+ 	ramdump_info->dump_data.version = CNSS_DUMP_FORMAT_VER;
+ 	ramdump_info->dump_data.magic = CNSS_DUMP_MAGIC_VER_V2;
+-	strlcpy(ramdump_info->dump_data.name, CNSS_DUMP_NAME,
++	strscpy(ramdump_info->dump_data.name, CNSS_DUMP_NAME,
+ 		sizeof(ramdump_info->dump_data.name));
+ #if IS_ENABLED(CONFIG_WCN_GOOGLE)
+ 	return 0;
+@@ -2717,7 +2717,7 @@ static int cnss_register_ramdump_v2(struct cnss_plat_data *plat_priv)
+ 	dump_data->version = CNSS_DUMP_FORMAT_VER_V2;
+ 	dump_data->magic = CNSS_DUMP_MAGIC_VER_V2;
+ 	dump_data->seg_version = CNSS_DUMP_SEG_VER;
+-	strlcpy(dump_data->name, CNSS_DUMP_NAME,
++	strscpy(dump_data->name, CNSS_DUMP_NAME,
+ 		sizeof(dump_data->name));
+ 
+ #if !IS_ENABLED(CONFIG_WCN_GOOGLE)
+@@ -3061,7 +3061,7 @@ static int cnss_register_bus_scale(struct cnss_plat_data *plat_priv)
+ static void cnss_unregister_bus_scale(struct cnss_plat_data *plat_priv) {}
+ #endif /* CONFIG_INTERCONNECT_QCOM */
+ 
+-void cnss_daemon_connection_update_cb(void *cb_ctx, bool status)
++static void cnss_daemon_connection_update_cb(void *cb_ctx, bool status)
+ {
+ 	struct cnss_plat_data *plat_priv = cb_ctx;
+ 
+@@ -3171,7 +3171,7 @@ static ssize_t shutdown_store(struct device *dev,
+ 
+ 	if (plat_priv) {
+ 		set_bit(CNSS_IN_REBOOT, &plat_priv->driver_state);
+-		del_timer(&plat_priv->fw_boot_timer);
++		timer_delete(&plat_priv->fw_boot_timer);
+ 		complete_all(&plat_priv->power_up_complete);
+ 		complete_all(&plat_priv->cal_complete);
+ 	}
+@@ -3408,7 +3408,7 @@ static int cnss_reboot_notifier(struct notifier_block *nb,
+ 		container_of(nb, struct cnss_plat_data, reboot_nb);
+ 
+ 	set_bit(CNSS_IN_REBOOT, &plat_priv->driver_state);
+-	del_timer(&plat_priv->fw_boot_timer);
++	timer_delete(&plat_priv->fw_boot_timer);
+ 	complete_all(&plat_priv->power_up_complete);
+ 	complete_all(&plat_priv->cal_complete);
+ 	cnss_pr_dbg("Reboot is in progress with action %d\n", action);
+@@ -3482,7 +3482,7 @@ static void cnss_misc_deinit(struct cnss_plat_data *plat_priv)
+ 	device_init_wakeup(&plat_priv->plat_dev->dev, false);
+ 	unregister_reboot_notifier(&plat_priv->reboot_nb);
+ 	unregister_pm_notifier(&cnss_pm_notifier);
+-	del_timer(&plat_priv->fw_boot_timer);
++	timer_delete(&plat_priv->fw_boot_timer);
+ 	wakeup_source_unregister(plat_priv->recovery_ws);
+ 	cnss_deinit_sol_gpio(plat_priv);
+ 	kfree(plat_priv->sram_dump);
+@@ -3747,7 +3747,7 @@ out:
+ 	return ret;
+ }
+ 
+-static int cnss_remove(struct platform_device *plat_dev)
++static void cnss_remove(struct platform_device *plat_dev)
+ {
+ 	struct cnss_plat_data *plat_priv = platform_get_drvdata(plat_dev);
+ 
+@@ -3770,8 +3770,6 @@ static int cnss_remove(struct platform_device *plat_dev)
+ 
+ 	platform_set_drvdata(plat_dev, NULL);
+ 	plat_env = NULL;
+-
+-	return 0;
+ }
+ 
+ static struct platform_driver cnss_platform_driver = {
+diff --git a/cnss2/pci.c b/cnss2/pci.c
+index 5c72ee5..28c14ac 100644
+--- a/cnss2/pci.c
++++ b/cnss2/pci.c
+@@ -1178,7 +1178,7 @@ int cnss_pci_recover_link_down(struct cnss_pci_data *pci_priv)
+ 	ret = cnss_resume_pci_link(pci_priv);
+ 	if (ret) {
+ 		cnss_pr_err("Failed to resume PCI link, err = %d\n", ret);
+-		del_timer(&pci_priv->dev_rddm_timer);
++		timer_delete(&pci_priv->dev_rddm_timer);
+ 		return ret;
+ 	}
+ 
+@@ -1788,7 +1788,7 @@ int cnss_pci_start_mhi(struct cnss_pci_data *pci_priv)
+ 		  jiffies + msecs_to_jiffies(BOOT_DEBUG_TIMEOUT_MS));
+ 
+ 	ret = cnss_pci_set_mhi_state(pci_priv, CNSS_MHI_POWER_ON);
+-	del_timer_sync(&pci_priv->boot_debug_timer);
++	timer_delete_sync(&pci_priv->boot_debug_timer);
+ 	if (ret == 0)
+ 		cnss_wlan_adsp_pc_enable(pci_priv, false);
+ 
+@@ -2639,7 +2639,7 @@ static int cnss_qca6290_shutdown(struct cnss_pci_data *pci_priv)
+ 	     test_bit(CNSS_DRIVER_IDLE_SHUTDOWN, &plat_priv->driver_state) ||
+ 	     test_bit(CNSS_IN_COLD_BOOT_CAL, &plat_priv->driver_state)) &&
+ 	    test_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state)) {
+-		del_timer(&pci_priv->dev_rddm_timer);
++		timer_delete(&pci_priv->dev_rddm_timer);
+ 		cnss_pci_collect_dump_info(pci_priv, false);
+ 		CNSS_ASSERT(0);
+ 	}
+@@ -2872,7 +2872,7 @@ static void cnss_wlan_reg_driver_work(struct work_struct *work)
+ 			return;
+ 		}
+ 
+-		del_timer(&plat_priv->fw_boot_timer);
++		timer_delete(&plat_priv->fw_boot_timer);
+ 		if (test_bit(CNSS_IN_COLD_BOOT_CAL, &plat_priv->driver_state) &&
+ 		    !test_bit(CNSS_IN_REBOOT, &plat_priv->driver_state)) {
+ 			cnss_pr_err("Timeout waiting for calibration to complete\n");
+@@ -4275,7 +4275,7 @@ int cnss_get_soc_info(struct device *dev, struct cnss_soc_info *info)
+ 	info->board_id = plat_priv->board_info.board_id;
+ 	info->soc_id = plat_priv->soc_info.soc_id;
+ 	info->fw_version = plat_priv->fw_version_info.fw_version;
+-	strlcpy(info->fw_build_timestamp,
++	strscpy(info->fw_build_timestamp,
+ 		plat_priv->fw_version_info.fw_build_timestamp,
+ 		sizeof(info->fw_build_timestamp));
+ 	memcpy(&info->device_version, &plat_priv->device_version,
+@@ -5257,7 +5257,7 @@ static char *cnss_mhi_notify_status_to_str(enum mhi_callback status)
+ static void cnss_dev_rddm_timeout_hdlr(struct timer_list *t)
+ {
+ 	struct cnss_pci_data *pci_priv =
+-		from_timer(pci_priv, t, dev_rddm_timer);
++		timer_container_of(pci_priv, t, dev_rddm_timer);
+ 
+ 	if (!pci_priv)
+ 		return;
+@@ -5279,7 +5279,7 @@ static void cnss_dev_rddm_timeout_hdlr(struct timer_list *t)
+ static void cnss_boot_debug_timeout_hdlr(struct timer_list *t)
+ {
+ 	struct cnss_pci_data *pci_priv =
+-		from_timer(pci_priv, t, boot_debug_timer);
++		timer_container_of(pci_priv, t, boot_debug_timer);
+ 
+ 	if (!pci_priv)
+ 		return;
+@@ -5312,7 +5312,7 @@ static int cnss_pci_handle_mhi_sys_err(struct cnss_pci_data *pci_priv)
+ 
+ 	cnss_ignore_qmi_failure(true);
+ 	set_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state);
+-	del_timer(&plat_priv->fw_boot_timer);
++	timer_delete(&plat_priv->fw_boot_timer);
+ 	mod_timer(&pci_priv->dev_rddm_timer,
+ 		  jiffies + msecs_to_jiffies(DEV_RDDM_TIMEOUT));
+ 	cnss_pci_update_status(pci_priv, CNSS_FW_DOWN);
+@@ -5350,7 +5350,7 @@ static void cnss_mhi_notify_status(struct mhi_controller *mhi_ctrl,
+ 	case MHI_CB_FATAL_ERROR:
+ 		cnss_ignore_qmi_failure(true);
+ 		set_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state);
+-		del_timer(&plat_priv->fw_boot_timer);
++		timer_delete(&plat_priv->fw_boot_timer);
+ 		cnss_pci_update_status(pci_priv, CNSS_FW_DOWN);
+ 		cnss_reason = CNSS_REASON_DEFAULT;
+ 		break;
+@@ -5360,8 +5360,8 @@ static void cnss_mhi_notify_status(struct mhi_controller *mhi_ctrl,
+ 	case MHI_CB_EE_RDDM:
+ 		cnss_ignore_qmi_failure(true);
+ 		set_bit(CNSS_DEV_ERR_NOTIFY, &plat_priv->driver_state);
+-		del_timer(&plat_priv->fw_boot_timer);
+-		del_timer(&pci_priv->dev_rddm_timer);
++		timer_delete(&plat_priv->fw_boot_timer);
++		timer_delete(&pci_priv->dev_rddm_timer);
+ 		cnss_pci_update_status(pci_priv, CNSS_FW_DOWN);
+ 		cnss_reason = CNSS_REASON_RDDM;
+ 		break;
+@@ -5865,8 +5865,8 @@ static void cnss_pci_remove(struct pci_dev *pci_dev)
+ 	case KIWI_DEVICE_ID:
+ 	case MANGO_DEVICE_ID:
+ 		cnss_pci_wake_gpio_deinit(pci_priv);
+-		del_timer(&pci_priv->boot_debug_timer);
+-		del_timer(&pci_priv->dev_rddm_timer);
++		timer_delete(&pci_priv->boot_debug_timer);
++		timer_delete(&pci_priv->dev_rddm_timer);
+ 		break;
+ 	default:
+ 		break;
+diff --git a/cnss2/power.c b/cnss2/power.c
+index f899a12..eda5a21 100644
+--- a/cnss2/power.c
++++ b/cnss2/power.c
+@@ -1421,7 +1421,7 @@ int cnss_aop_ol_cpr_cfg_setup(struct cnss_plat_data *plat_priv,
+ 			u32 wake_volt = 0, sleep_volt = 0;
+ 
+ 			if (plat_vreg_param[j].vreg[0] == '\0')
+-				strlcpy(plat_vreg_param[j].vreg, vreg,
++				strscpy(plat_vreg_param[j].vreg, vreg,
+ 					sizeof(plat_vreg_param[j].vreg));
+ 			else if (!strnstr(plat_vreg_param[j].vreg, vreg,
+ 					  strlen(plat_vreg_param[j].vreg)))
+diff --git a/cnss2/qmi.c b/cnss2/qmi.c
+index dba4215..5d9d920 100644
+--- a/cnss2/qmi.c
++++ b/cnss2/qmi.c
+@@ -494,13 +494,13 @@ int cnss_wlfw_tgt_cap_send_sync(struct cnss_plat_data *plat_priv)
+ 			resp->fw_version_info.fw_version;
+ 		fw_build_timestamp = resp->fw_version_info.fw_build_timestamp;
+ 		fw_build_timestamp[QMI_WLFW_MAX_TIMESTAMP_LEN] = '\0';
+-		strlcpy(plat_priv->fw_version_info.fw_build_timestamp,
++		strscpy(plat_priv->fw_version_info.fw_build_timestamp,
+ 			resp->fw_version_info.fw_build_timestamp,
+ 			QMI_WLFW_MAX_TIMESTAMP_LEN + 1);
+ 	}
+ 	if (resp->fw_build_id_valid) {
+ 		resp->fw_build_id[QMI_WLFW_MAX_BUILD_ID_LEN] = '\0';
+-		strlcpy(plat_priv->fw_build_id, resp->fw_build_id,
++		strscpy(plat_priv->fw_build_id, resp->fw_build_id,
+ 			QMI_WLFW_MAX_BUILD_ID_LEN + 1);
+ 	}
+ 	if (resp->voltage_mv_valid) {
+@@ -1525,7 +1525,7 @@ int cnss_wlfw_wlan_cfg_send_sync(struct cnss_plat_data *plat_priv,
+ 	}
+ 
+ 	req->host_version_valid = 1;
+-	strlcpy(req->host_version, host_version,
++	strscpy(req->host_version, host_version,
+ 		QMI_WLFW_MAX_STR_LEN_V01 + 1);
+ 
+ 	req->tgt_cfg_valid = 1;
+@@ -2732,22 +2732,22 @@ static void cnss_wlfw_fw_mem_file_save_ind_cb(struct qmi_handle *qmi_wlfw,
+ 	}
+ 
+ 	if (ind_msg->file_name_valid)
+-		strlcpy(event_data->file_name, ind_msg->file_name,
++		strscpy(event_data->file_name, ind_msg->file_name,
+ 			QMI_WLFW_MAX_STR_LEN_V01 + 1);
+ 	if (ind_msg->source == 1) {
+ 		if (!ind_msg->file_name_valid)
+-			strlcpy(event_data->file_name, "qdss_trace_wcss_etb",
++			strscpy(event_data->file_name, "qdss_trace_wcss_etb",
+ 				QMI_WLFW_MAX_STR_LEN_V01 + 1);
+ 		cnss_driver_event_post(plat_priv, CNSS_DRIVER_EVENT_QDSS_TRACE_REQ_DATA,
+ 				       0, event_data);
+ 	} else {
+ 		if (event_data->mem_type == QMI_WLFW_MEM_QDSS_V01) {
+ 			if (!ind_msg->file_name_valid)
+-				strlcpy(event_data->file_name, "qdss_trace_ddr",
++				strscpy(event_data->file_name, "qdss_trace_ddr",
+ 					QMI_WLFW_MAX_STR_LEN_V01 + 1);
+ 		} else {
+ 			if (!ind_msg->file_name_valid)
+-				strlcpy(event_data->file_name, "fw_mem_dump",
++				strscpy(event_data->file_name, "fw_mem_dump",
+ 					QMI_WLFW_MAX_STR_LEN_V01 + 1);
+ 		}
+ 
+diff --git a/cnss_utils/cnss_plat_ipc_qmi.c b/cnss_utils/cnss_plat_ipc_qmi.c
+index 2225c2b..3da0ab6 100644
+--- a/cnss_utils/cnss_plat_ipc_qmi.c
++++ b/cnss_utils/cnss_plat_ipc_qmi.c
+@@ -136,7 +136,7 @@ void cnss_plat_ipc_debug_log_print(void *log_ctx, char *process, const char *fn,
+ static void cnss_plat_ipc_logging_init(void) {};
+ static void cnss_plat_ipc_logging_deinit(void) {};
+ 
+-void cnss_plat_ipc_debug_log_print(void *log_ctx, char *process, const char *fn,
++static void cnss_plat_ipc_debug_log_print(void *log_ctx, char *process, const char *fn,
+ 				   const char *log_level, char *fmt, ...)
+ {
+ 	struct va_format vaf;
+diff --git a/qrtr/af_qrtr.c b/qrtr/af_qrtr.c
+index 21cb211..a5d4fcf 100644
+--- a/qrtr/af_qrtr.c
++++ b/qrtr/af_qrtr.c
+@@ -18,7 +18,7 @@
+ #include <linux/wait.h>
+ #include <linux/rwsem.h>
+ #include <linux/uidgid.h>
+-#include <linux/pm_wakeup.h>
++#include <linux/device.h>	/* 6.18: provides pm_wakeup.h, which must not be included directly */
+ #include <linux/version.h>
+ #ifdef CONFIG_CNSS_OUT_OF_TREE
+ #include "ipc_logging.h"
+diff --git a/qrtr/qrtr.c b/qrtr/qrtr.c
+index 8716d6f..b95075f 100644
+--- a/qrtr/qrtr.c
++++ b/qrtr/qrtr.c
+@@ -17,7 +17,7 @@
+ #include <linux/wait.h>
+ #include <linux/rwsem.h>
+ #include <linux/uidgid.h>
+-#include <linux/pm_wakeup.h>
++#include <linux/device.h>	/* 6.18: provides pm_wakeup.h, which must not be included directly */
+ #ifdef CONFIG_CNSS_OUT_OF_TREE
+ #include "ipc_logging.h"
+ #else

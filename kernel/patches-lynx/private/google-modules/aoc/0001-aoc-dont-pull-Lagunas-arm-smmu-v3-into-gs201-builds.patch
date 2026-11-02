@@ -1,0 +1,39 @@
+From: junkyard
+Subject: [PATCH] aoc: don't pull Laguna's arm-smmu-v3 module into gs201 builds
+
+aoc_core depends on //private/google-modules/iommu/arm-smmu-v3 for
+pixel-iommu-fault.ko. Only Laguna adds that package's Kconfig
+(lga_defconfig: ARM_SMMU_V3_PIXEL, GOOGLE_ACFW_DEBUG, ...); on gs201 the
+symbols do not exist, the kernel_module builds none of its five declared
+outs, and the lynx dist fails:
+
+  ERROR: Unable to find acfw-debug.ko ... arm_smmu_v3.ko ...
+         pixel-iommu-fault.ko in .../iommu/arm-smmu-v3
+
+Depend on that module only for soc_is_laguna_or_later; keep the
+header-only fault_headers everywhere. On gs201 the pixel_iommu_*() fault
+API aoc.c calls is provided by samsung_iommu.ko (gs201_soc, which aoc_core
+already depends on), so aoc.c itself is unchanged.
+---
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 2fe1e09..e9bee63 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -80,7 +80,6 @@ ddk_module(
+         "//private/google-modules/aoc:__subpackages__",
+     ],
+     deps = [
+-        "//private/google-modules/iommu/arm-smmu-v3",
+         "//private/google-modules/iommu/arm-smmu-v3:fault_headers",
+         "//common:all_headers_aarch64",
+         "//private/google-modules/aoc_ipc:ddk_headers",
+@@ -90,6 +89,9 @@ ddk_module(
+         "//private/google-modules/trusty:trusty_headers",
+     ] + select({
+         "//private/devices/google/common:soc_is_laguna_or_later": [
++            # Only Laguna configures arm-smmu-v3 (lga_defconfig); on older SoCs
++            # its Kconfig is absent and it builds none of its declared outs.
++            "//private/google-modules/iommu/arm-smmu-v3",
+             "//private/google-modules/soc/rdo:rdo_soc_headers",
+             "//private/google-modules/soc/rdo:rdo_soc_module",
+         ],

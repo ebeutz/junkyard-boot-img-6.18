@@ -1,0 +1,49 @@
+From: junkyard
+Subject: [PATCH] fingerprint/goodix: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/gw9608/gf_spi.c b/gw9608/gf_spi.c
+index eb49a7f..ab62ded 100644
+--- a/gw9608/gf_spi.c
++++ b/gw9608/gf_spi.c
+@@ -739,7 +739,7 @@ error_dev:
+ #if defined(USE_SPI_BUS)
+ static int gf_remove(struct spi_device *spi)
+ #elif defined(USE_PLATFORM_BUS)
+-static int gf_remove(struct platform_device *pdev)
++static void gf_remove(struct platform_device *pdev)
+ #endif
+ {
+ 	struct gf_dev *gf_dev = &gf;
+@@ -755,8 +755,6 @@ static int gf_remove(struct platform_device *pdev)
+ 	device_destroy(gf_class, gf_dev->devt);
+ 	clear_bit(MINOR(gf_dev->devt), minors);
+ 	mutex_unlock(&gf_spi_lock);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id gx_match_table[] = {
+diff --git a/gw9608/platform.c b/gw9608/platform.c
+index 97ea5e0..fc127ca 100644
+--- a/gw9608/platform.c
++++ b/gw9608/platform.c
+@@ -33,7 +33,7 @@ int gf_parse_dts(struct gf_dev *gf_dev)
+ 		return gf_dev->reset_gpio;
+ 	}
+ 
+-	rc = devm_gpio_request(dev, gf_dev->reset_gpio, "goodix_reset");
++	rc = devm_gpio_request_one(dev, gf_dev->reset_gpio, GPIOF_OUT_INIT_HIGH, "goodix_reset");
+ 	if (rc) {
+ 		pr_err("failed to request reset gpio, rc = %d\n", rc);
+ 		return rc;
+@@ -46,7 +46,7 @@ int gf_parse_dts(struct gf_dev *gf_dev)
+ 		return gf_dev->irq_gpio;
+ 	}
+ 
+-	rc = devm_gpio_request(dev, gf_dev->irq_gpio, "goodix_irq");
++	rc = devm_gpio_request_one(dev, gf_dev->irq_gpio, GPIOF_IN, "goodix_irq");
+ 	if (rc) {
+ 		pr_err("failed to request irq gpio, rc = %d\n", rc);
+ 		return rc;

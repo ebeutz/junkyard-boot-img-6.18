@@ -1,0 +1,512 @@
+From: junkyard
+Subject: [PATCH] wlan/qcom/wcn6740/wlan: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c b/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c
+index 6c1fc8e..65e6c7d 100644
+--- a/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c
++++ b/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c
+@@ -2218,7 +2218,7 @@ static QDF_STATUS wlan_ipa_send_msg(qdf_netdev_t net_dev,
+ 		return QDF_STATUS_E_NOMEM;
+ 
+ 	QDF_IPA_SET_META_MSG_TYPE(&meta, type);
+-	strlcpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name, IPA_RESOURCE_NAME_MAX);
++	strscpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name, IPA_RESOURCE_NAME_MAX);
+ 	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
+ 
+ 	ipa_debug("%s: Evt: %d", QDF_IPA_WLAN_MSG_NAME(msg), QDF_IPA_MSG_META_MSG_TYPE(&meta));
+@@ -2801,7 +2801,7 @@ static QDF_STATUS __wlan_ipa_wlan_evt(qdf_netdev_t net_dev, uint8_t device_mode,
+ 		if (!msg_ex)
+ 			return QDF_STATUS_E_NOMEM;
+ 
+-		strlcpy(msg_ex->name, net_dev->name,
++		strscpy(msg_ex->name, net_dev->name,
+ 			IPA_RESOURCE_NAME_MAX);
+ 		msg_ex->num_of_attribs = 1;
+ 		msg_ex->attribs[0].attrib_type = WLAN_HDR_ATTRIB_MAC_ADDR;
+@@ -2920,7 +2920,7 @@ static QDF_STATUS __wlan_ipa_wlan_evt(qdf_netdev_t net_dev, uint8_t device_mode,
+ 		return QDF_STATUS_E_NOMEM;
+ 
+ 	QDF_IPA_SET_META_MSG_TYPE(&meta, type);
+-	strlcpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name,
++	strscpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name,
+ 		IPA_RESOURCE_NAME_MAX);
+ 	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
+ 
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h
+index 5dc2469..e5c63cd 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h
+@@ -28,7 +28,7 @@
+ 
+ #define __qdf_is_space(c) isspace(c)
+ #define __qdf_str_cmp(left, right) strcmp(left, right)
+-#define __qdf_str_lcopy(dest, src, dest_size) strlcpy(dest, src, dest_size)
++#define __qdf_str_lcopy(dest, src, dest_size) strscpy(dest, src, dest_size)
+ #define __qdf_str_left_trim(str) skip_spaces(str)
+ #define __qdf_str_len(str) strlen(str)
+ #define __qdf_str_trim(str) strim(str)
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_timer.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_timer.h
+index 1bbf212..0ddade7 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_timer.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_timer.h
+@@ -49,7 +49,7 @@ struct __qdf_timer_t {
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+ static inline void __os_timer_shim(struct timer_list *os_timer)
+ {
+-	struct __qdf_timer_t *timer = from_timer(timer, os_timer, os_timer);
++	struct __qdf_timer_t *timer = timer_container_of(timer, os_timer, os_timer);
+ 
+ 	timer->callback(timer->context);
+ }
+@@ -156,22 +156,22 @@ static inline bool __qdf_timer_mod(struct __qdf_timer_t *timer, uint32_t msec)
+ 
+ static inline bool __qdf_timer_stop(struct __qdf_timer_t *timer)
+ {
+-	return !!del_timer(&timer->os_timer);
++	return !!timer_delete(&timer->os_timer);
+ }
+ 
+ static inline void __qdf_timer_free(struct __qdf_timer_t *timer)
+ {
+ 	struct timer_list *os_timer = &timer->os_timer;
+ 
+-	del_timer_sync(os_timer);
++	timer_delete_sync(os_timer);
+ 
+ 	if (object_is_on_stack(os_timer))
+-		destroy_timer_on_stack(os_timer);
++		timer_destroy_on_stack(os_timer);
+ }
+ 
+ static inline bool __qdf_timer_sync_cancel(struct __qdf_timer_t *timer)
+ {
+-	return del_timer_sync(&timer->os_timer);
++	return timer_delete_sync(&timer->os_timer);
+ }
+ 
+ #endif /* _I_QDF_TIMER_H */
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c b/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c
+index 6926702..58e10bb 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c
++++ b/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c
+@@ -506,7 +506,7 @@ QDF_STATUS qdf_mc_timer_destroy(qdf_mc_timer_t *timer)
+ 
+ 	case QDF_TIMER_STATE_RUNNING:
+ 		/* Stop the timer first */
+-		del_timer(&(timer->platform_info.timer));
++		timer_delete(&(timer->platform_info.timer));
+ 		v_status = QDF_STATUS_SUCCESS;
+ 		break;
+ 	case QDF_TIMER_STATE_STOPPED:
+@@ -593,7 +593,7 @@ QDF_STATUS qdf_mc_timer_destroy(qdf_mc_timer_t *timer)
+ 
+ 	case QDF_TIMER_STATE_RUNNING:
+ 		/* Stop the timer first */
+-		del_timer(&(timer->platform_info.timer));
++		timer_delete(&(timer->platform_info.timer));
+ 		v_status = QDF_STATUS_SUCCESS;
+ 		break;
+ 
+@@ -753,7 +753,7 @@ QDF_STATUS qdf_mc_timer_stop(qdf_mc_timer_t *timer)
+ 
+ 	qdf_spin_unlock_irqrestore(&timer->platform_info.spinlock);
+ 
+-	del_timer(&(timer->platform_info.timer));
++	timer_delete(&(timer->platform_info.timer));
+ 
+ 	qdf_spin_lock_irqsave(&timer->platform_info.spinlock);
+ 	timer->state = QDF_TIMER_STATE_STOPPED;
+@@ -795,7 +795,7 @@ QDF_STATUS qdf_mc_timer_stop_sync(qdf_mc_timer_t *timer)
+ 	timer->state = QDF_TIMER_STATE_STOPPED;
+ 
+ 	qdf_spin_unlock_irqrestore(&timer->platform_info.spinlock);
+-	del_timer_sync(&(timer->platform_info.timer));
++	timer_delete_sync(&(timer->platform_info.timer));
+ 
+ 	qdf_try_allowing_sleep(timer->type);
+ 
+diff --git a/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c b/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c
+index c07a974..8f33c80 100644
+--- a/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c
++++ b/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c
+@@ -1077,7 +1077,7 @@ QDF_STATUS wifi_pos_populate_caps(struct wlan_objmgr_psoc *psoc,
+ 	if (!ch_list)
+ 		return QDF_STATUS_E_NOMEM;
+ 
+-	strlcpy(caps->oem_target_signature,
++	strscpy(caps->oem_target_signature,
+ 		OEM_TARGET_SIGNATURE,
+ 		OEM_TARGET_SIGNATURE_LEN);
+ 	caps->oem_target_type = wifi_pos_obj->oem_target_type;
+diff --git a/qca-wifi-host-cmn/utils/host_diag_log/src/host_diag_log.c b/qca-wifi-host-cmn/utils/host_diag_log/src/host_diag_log.c
+index ff19de2..9ab4dcd 100644
+--- a/qca-wifi-host-cmn/utils/host_diag_log/src/host_diag_log.c
++++ b/qca-wifi-host-cmn/utils/host_diag_log/src/host_diag_log.c
+@@ -169,7 +169,7 @@ void host_diag_log_wlock(uint32_t reason, const char *wake_lock_name,
+ 	wlan_diag_event.reason = reason;
+ 	wlan_diag_event.timeout = timeout;
+ 	wlan_diag_event.name_len = strlen(wake_lock_name);
+-	strlcpy(&wlan_diag_event.name[0],
++	strscpy(&wlan_diag_event.name[0],
+ 			wake_lock_name,
+ 			wlan_diag_event.name_len+1);
+ 
+diff --git a/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c b/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c
+index 7a77ab6..be379c4 100644
+--- a/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c
++++ b/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c
+@@ -2313,7 +2313,7 @@ static QDF_STATUS wlan_ipa_send_msg(qdf_netdev_t net_dev,
+ 		return QDF_STATUS_E_NOMEM;
+ 
+ 	QDF_IPA_SET_META_MSG_TYPE(&meta, type);
+-	strlcpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name, IPA_RESOURCE_NAME_MAX);
++	strscpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name, IPA_RESOURCE_NAME_MAX);
+ 	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
+ 
+ 	ipa_debug("%s: Evt: %d", QDF_IPA_WLAN_MSG_NAME(msg), QDF_IPA_MSG_META_MSG_TYPE(&meta));
+@@ -2896,7 +2896,7 @@ static QDF_STATUS __wlan_ipa_wlan_evt(qdf_netdev_t net_dev, uint8_t device_mode,
+ 		if (!msg_ex)
+ 			return QDF_STATUS_E_NOMEM;
+ 
+-		strlcpy(msg_ex->name, net_dev->name,
++		strscpy(msg_ex->name, net_dev->name,
+ 			IPA_RESOURCE_NAME_MAX);
+ 		msg_ex->num_of_attribs = 1;
+ 		msg_ex->attribs[0].attrib_type = WLAN_HDR_ATTRIB_MAC_ADDR;
+@@ -3016,7 +3016,7 @@ static QDF_STATUS __wlan_ipa_wlan_evt(qdf_netdev_t net_dev, uint8_t device_mode,
+ 		return QDF_STATUS_E_NOMEM;
+ 
+ 	QDF_IPA_SET_META_MSG_TYPE(&meta, type);
+-	strlcpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name,
++	strscpy(QDF_IPA_WLAN_MSG_NAME(msg), net_dev->name,
+ 		IPA_RESOURCE_NAME_MAX);
+ 	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
+ 
+diff --git a/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c b/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c
+index 3431050..a427dbc 100644
+--- a/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c
++++ b/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c
+@@ -1333,7 +1333,7 @@ static QDF_STATUS ol_txrx_ipa_remove_header(char *name)
+ 	qdf_ipa_ioc_del_hdr_t *ipa_hdr;
+ 
+ 	qdf_mem_zero(&hdrlookup, sizeof(hdrlookup));
+-	strlcpy(hdrlookup.name, name, sizeof(hdrlookup.name));
++	strscpy(hdrlookup.name, name, sizeof(hdrlookup.name));
+ 	ret = qdf_ipa_get_hdr(&hdrlookup);
+ 	if (ret) {
+ 		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_DEBUG,
+@@ -1551,7 +1551,7 @@ static int ol_txrx_ipa_register_interface(char *ifname,
+ 			IPA_CLIENT_WLAN1_CONS;
+ 	QDF_IPA_IOC_TX_INTF_PROP_ALT_DST_PIPE(&tx_prop[IPA_IP_v4]) =
+ 			cons_client;
+-	strlcpy(QDF_IPA_IOC_TX_INTF_PROP_HDR_NAME(&tx_prop[IPA_IP_v4]),
++	strscpy(QDF_IPA_IOC_TX_INTF_PROP_HDR_NAME(&tx_prop[IPA_IP_v4]),
+ 		ipv4_hdr_name, IPA_RESOURCE_NAME_MAX);
+ 	tx_intf.num_props++;
+ 
+@@ -1563,7 +1563,7 @@ static int ol_txrx_ipa_register_interface(char *ifname,
+ 			IPA_CLIENT_WLAN1_CONS;
+ 		QDF_IPA_IOC_TX_INTF_PROP_ALT_DST_PIPE(&tx_prop[IPA_IP_v6]) =
+ 			cons_client;
+-		strlcpy(QDF_IPA_IOC_TX_INTF_PROP_HDR_NAME(&tx_prop[IPA_IP_v6]),
++		strscpy(QDF_IPA_IOC_TX_INTF_PROP_HDR_NAME(&tx_prop[IPA_IP_v6]),
+ 			ipv6_hdr_name, IPA_RESOURCE_NAME_MAX);
+ 		tx_intf.num_props++;
+ 	}
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+index 62cf368..c1be4a5 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+@@ -7003,7 +7003,7 @@ __wlan_hdd_cfg80211_get_wifi_info(struct wiphy *wiphy,
+ 
+ 	if (tb_vendor[QCA_WLAN_VENDOR_ATTR_WIFI_INFO_DRIVER_VERSION]) {
+ 		hdd_debug("Rcvd req for Driver version");
+-		strlcpy(driver_version, QWLAN_VERSIONSTR,
++		strscpy(driver_version, QWLAN_VERSIONSTR,
+ 			sizeof(driver_version));
+ 		skb_len += strlen(driver_version) + 1;
+ 		count++;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c
+index 1a4af18..2d78432 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c
+@@ -1740,7 +1740,7 @@ QDF_STATUS hdd_cm_ft_preauth_complete(struct wlan_objmgr_vdev *vdev,
+ 		return QDF_STATUS_E_NOMEM;
+ 
+ 	/* need to send the RIC IEs first */
+-	str_len = strlcpy(buff, "RIC=", IW_CUSTOM_MAX);
++	str_len = strscpy(buff, "RIC=", IW_CUSTOM_MAX);
+ 	if (rsp->ric_ies_length &&
+ 	    (rsp->ric_ies_length <= (IW_CUSTOM_MAX - str_len))) {
+ 		qdf_mem_copy(&buff[str_len], rsp->ric_ies,
+@@ -1754,7 +1754,7 @@ QDF_STATUS hdd_cm_ft_preauth_complete(struct wlan_objmgr_vdev *vdev,
+ 
+ 	/* need to provide the Auth Resp */
+ 	qdf_mem_zero(buff, IW_CUSTOM_MAX);
+-	str_len = strlcpy(buff, "AUTH=", IW_CUSTOM_MAX);
++	str_len = strscpy(buff, "AUTH=", IW_CUSTOM_MAX);
+ 	hdd_cm_get_ft_preauth_response(vdev, rsp, &buff[str_len],
+ 				       (IW_CUSTOM_MAX - str_len),
+ 				       &auth_resp_len);
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_csr.c b/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_csr.c
+index f3ceb75..030ec85 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_csr.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_csr.c
+@@ -320,7 +320,7 @@ void wlan_hdd_debugfs_csr_init(struct hdd_adapter *adapter)
+ 
+ 	csr = &adapter->csr_file[HDD_DEBUFS_FILE_ID_OFFLOAD_INFO];
+ 	if (!csr->entry) {
+-		strlcpy(csr->name, "offload_info", max_len);
++		strscpy(csr->name, "offload_info", max_len);
+ 		csr->id = HDD_DEBUFS_FILE_ID_OFFLOAD_INFO;
+ 		csr->buf_max_size = DEBUGFS_OFFLOAD_INFO_BUF_SIZE;
+ 		csr->entry = debugfs_create_file(csr->name, 0444,
+@@ -332,7 +332,7 @@ void wlan_hdd_debugfs_csr_init(struct hdd_adapter *adapter)
+ 
+ 	csr = &adapter->csr_file[HDD_DEBUFS_FILE_ID_ROAM_SCAN_STATS_INFO];
+ 	if (!csr->entry) {
+-		strlcpy(csr->name, "roam_stats", max_len);
++		strscpy(csr->name, "roam_stats", max_len);
+ 		csr->id = HDD_DEBUFS_FILE_ID_ROAM_SCAN_STATS_INFO;
+ 		csr->buf_max_size = DEBUGFS_ROAM_SCAN_STATS_INFO_BUF_SIZE;
+ 		csr->entry = debugfs_create_file(csr->name, 0444,
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_offload.c b/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_offload.c
+index f5fda9e..702bf5b 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_offload.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_debugfs_offload.c
+@@ -294,9 +294,9 @@ wlan_hdd_ns_offload_info_debugfs(struct hdd_context *hdd_ctx,
+ 
+ 		if (info.target_ipv6_addr_ac_type[i] ==
+ 		    PMO_IPV6_ADDR_AC_TYPE)
+-			strlcpy(cast_string, "(ANY CAST)", 12);
++			strscpy(cast_string, "(ANY CAST)", 12);
+ 		else
+-			strlcpy(cast_string, "(UNI CAST)", 12);
++			strscpy(cast_string, "(UNI CAST)", 12);
+ 
+ 		ret = scnprintf(buf + length, buf_avail_len - length,
+ 				"%u. %s %s and scope is: %s\n",
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c b/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c
+index 7a68849..b3bc8f7 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c
+@@ -4141,7 +4141,7 @@ struct hdd_adapter *hdd_wlan_create_ap_dev(struct hdd_context *hdd_ctx,
+ 		(int)policy_mgr_get_concurrency_mode(hdd_ctx->psoc));
+ 
+ 	/* Init the net_device structure */
+-	strlcpy(dev->name, (const char *)iface_name, IFNAMSIZ);
++	strscpy(dev->name, (const char *)iface_name, IFNAMSIZ);
+ 
+ 	hdd_set_ap_ops(dev);
+ 
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c b/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c
+index 141adbf..2e9fccc 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c
+@@ -198,12 +198,12 @@ static int wlan_hdd_gen_wlan_version_pack(struct wlan_version_data *data,
+ 	}
+ 
+ 	data->chip_id = chip_id;
+-	strlcpy(data->chip_name, chip_name, WLAN_SVC_MAX_STR_LEN);
++	strscpy(data->chip_name, chip_name, WLAN_SVC_MAX_STR_LEN);
+ 	if (strncmp(chip_name, "Unknown", 7))
+-		strlcpy(data->chip_from, "Qualcomm", WLAN_SVC_MAX_STR_LEN);
++		strscpy(data->chip_from, "Qualcomm", WLAN_SVC_MAX_STR_LEN);
+ 	else
+-		strlcpy(data->chip_from, "Unknown", WLAN_SVC_MAX_STR_LEN);
+-	strlcpy(data->host_version, QWLAN_VERSIONSTR, WLAN_SVC_MAX_STR_LEN);
++		strscpy(data->chip_from, "Unknown", WLAN_SVC_MAX_STR_LEN);
++	strscpy(data->host_version, QWLAN_VERSIONSTR, WLAN_SVC_MAX_STR_LEN);
+ 	scnprintf(data->fw_version, WLAN_SVC_MAX_STR_LEN, "%d.%d.%d.%d",
+ 		  (fw_version & 0xf0000000) >> 28,
+ 		  (fw_version & 0xf000000) >> 24,
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index ff6a724..5e53373 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -6254,7 +6254,7 @@ hdd_alloc_station_adapter(struct hdd_context *hdd_ctx, tSirMacAddr mac_addr,
+ 	qdf_atomic_init(&adapter->cache_sta_count);
+ 
+ 	/* Init the net_device structure */
+-	strlcpy(dev->name, name, IFNAMSIZ);
++	strscpy(dev->name, name, IFNAMSIZ);
+ 
+ 	qdf_net_update_net_device_dev_addr(dev, mac_addr, sizeof(tSirMacAddr));
+ 	qdf_mem_copy(adapter->mac_addr.bytes, mac_addr, sizeof(tSirMacAddr));
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c b/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c
+index 82bd622..316f243 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c
+@@ -87,7 +87,7 @@ static int populate_oem_data_cap(struct hdd_adapter *adapter,
+ 	if (!chan_freq_list)
+ 		return -ENOMEM;
+ 
+-	strlcpy(data_cap->oem_target_signature, OEM_TARGET_SIGNATURE,
++	strscpy(data_cap->oem_target_signature, OEM_TARGET_SIGNATURE,
+ 		OEM_TARGET_SIGNATURE_LEN);
+ 	data_cap->oem_target_type = hdd_ctx->target_type;
+ 	data_cap->oem_fw_version = hdd_ctx->target_fw_version;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c b/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c
+index 07e95ae..8725a7c 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c
+@@ -113,7 +113,7 @@ hdd_sysfs_validate_and_copy_buf(char *dest_buf, size_t dest_buf_size,
+ 	 * is not needed. Doing this extra copy operation just to ensure
+ 	 * the local buf is properly null-terminated.
+ 	 */
+-	strlcpy(dest_buf, source_buf, dest_buf_size);
++	strscpy(dest_buf, source_buf, dest_buf_size);
+ 	/* default 'echo' cmd takes new line character to here */
+ 	if (dest_buf[source_buf_size - 1] == '\n')
+ 		dest_buf[source_buf_size - 1] = '\0';
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index 63f6473..34f759d 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -3346,7 +3346,7 @@ void hdd_send_rps_ind(struct hdd_adapter *adapter)
+ 			  i, rps_data.cpu_map_list[i]);
+ 	}
+ 
+-	strlcpy(rps_data.ifname, adapter->dev->name,
++	strscpy(rps_data.ifname, adapter->dev->name,
+ 			sizeof(rps_data.ifname));
+ 	wlan_hdd_send_svc_nlink_msg(hdd_ctxt->radio_index,
+ 				WLAN_SVC_RPS_ENABLE_IND,
+@@ -3392,7 +3392,7 @@ void hdd_send_rps_disable_ind(struct hdd_adapter *adapter)
+ 
+ 	qdf_mem_zero(&rps_data.cpu_map_list, sizeof(rps_data.cpu_map_list));
+ 
+-	strlcpy(rps_data.ifname, adapter->dev->name, sizeof(rps_data.ifname));
++	strscpy(rps_data.ifname, adapter->dev->name, sizeof(rps_data.ifname));
+ 	wlan_hdd_send_svc_nlink_msg(hdd_ctxt->radio_index,
+ 				    WLAN_SVC_RPS_ENABLE_IND,
+ 				    &rps_data, sizeof(rps_data));
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_wext.c b/qcacld-3.0/core/hdd/src/wlan_hdd_wext.c
+index fe9aecd..1755e5c 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_wext.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_wext.c
+@@ -3278,7 +3278,7 @@ static void wlan_get_wlm_stats_cb(void *cookie, const char *data)
+ 		return;
+ 	}
+ 	priv = osif_request_priv(request);
+-	strlcpy(priv, data, WE_MAX_STR_LEN);
++	strscpy(priv, data, WE_MAX_STR_LEN);
+ 	osif_request_complete(request);
+ 	osif_request_put(request);
+ }
+@@ -3318,7 +3318,7 @@ static int wlan_get_wlm_stats(struct hdd_adapter *adapter, uint32_t bitmask,
+ 		goto cleanup;
+ 	}
+ 	priv = osif_request_priv(request);
+-	strlcpy(response, priv, params.priv_size);
++	strscpy(response, priv, params.priv_size);
+ 
+ cleanup:
+ 	osif_request_put(request);
+diff --git a/qcacld-3.0/core/mac/src/sys/legacy/src/platform/src/sys_wrapper.c b/qcacld-3.0/core/mac/src/sys/legacy/src/platform/src/sys_wrapper.c
+index 144d262..5f74f2d 100644
+--- a/qcacld-3.0/core/mac/src/sys/legacy/src/platform/src/sys_wrapper.c
++++ b/qcacld-3.0/core/mac/src/sys/legacy/src/platform/src/sys_wrapper.c
+@@ -292,7 +292,7 @@ uint32_t tx_timer_create_intern_debug(void *pMacGlobal,
+ 
+ #ifdef WLAN_DEBUG
+ 	/* Store the timer name */
+-	strlcpy(timer_ptr->timerName, name_ptr, sizeof(timer_ptr->timerName));
++	strscpy(timer_ptr->timerName, name_ptr, sizeof(timer_ptr->timerName));
+ #endif /* Store the timer name, for Debug build only */
+ 
+ 	status =
+@@ -352,7 +352,7 @@ uint32_t tx_timer_create_intern(void *pMacGlobal, TX_TIMER *timer_ptr,
+ 
+ #ifdef WLAN_DEBUG
+ 	/* Store the timer name */
+-	strlcpy(timer_ptr->timerName, name_ptr, sizeof(timer_ptr->timerName));
++	strscpy(timer_ptr->timerName, name_ptr, sizeof(timer_ptr->timerName));
+ #endif /* Store the timer name, for Debug build only */
+ 
+ 	status = qdf_mc_timer_init(&timer_ptr->qdf_timer, QDF_TIMER_TYPE_SW,
+diff --git a/qcacld-3.0/core/pld/src/pld_common.c b/qcacld-3.0/core/pld/src/pld_common.c
+index 2ca4e8a..bfccdf1 100644
+--- a/qcacld-3.0/core/pld/src/pld_common.c
++++ b/qcacld-3.0/core/pld/src/pld_common.c
+@@ -593,19 +593,19 @@ void pld_get_default_fw_files(struct pld_fw_files *pfw_files)
+ {
+ 	memset(pfw_files, 0, sizeof(*pfw_files));
+ 
+-	strlcpy(pfw_files->image_file, PREFIX PLD_IMAGE_FILE,
++	strscpy(pfw_files->image_file, PREFIX PLD_IMAGE_FILE,
+ 		PLD_MAX_FILE_NAME);
+-	strlcpy(pfw_files->board_data, PREFIX PLD_BOARD_DATA_FILE,
++	strscpy(pfw_files->board_data, PREFIX PLD_BOARD_DATA_FILE,
+ 		PLD_MAX_FILE_NAME);
+-	strlcpy(pfw_files->otp_data, PREFIX PLD_OTP_FILE,
++	strscpy(pfw_files->otp_data, PREFIX PLD_OTP_FILE,
+ 		PLD_MAX_FILE_NAME);
+-	strlcpy(pfw_files->utf_file, PREFIX PLD_UTF_FIRMWARE_FILE,
++	strscpy(pfw_files->utf_file, PREFIX PLD_UTF_FIRMWARE_FILE,
+ 		PLD_MAX_FILE_NAME);
+-	strlcpy(pfw_files->utf_board_data, PREFIX PLD_BOARD_DATA_FILE,
++	strscpy(pfw_files->utf_board_data, PREFIX PLD_BOARD_DATA_FILE,
+ 		PLD_MAX_FILE_NAME);
+-	strlcpy(pfw_files->epping_file, PREFIX PLD_EPPING_FILE,
++	strscpy(pfw_files->epping_file, PREFIX PLD_EPPING_FILE,
+ 		PLD_MAX_FILE_NAME);
+-	strlcpy(pfw_files->setup_file, PREFIX PLD_SETUP_FILE,
++	strscpy(pfw_files->setup_file, PREFIX PLD_SETUP_FILE,
+ 		PLD_MAX_FILE_NAME);
+ }
+ 
+diff --git a/qcacld-3.0/core/pld/src/pld_ipci.c b/qcacld-3.0/core/pld/src/pld_ipci.c
+index f00a50e..445591b 100644
+--- a/qcacld-3.0/core/pld/src/pld_ipci.c
++++ b/qcacld-3.0/core/pld/src/pld_ipci.c
+@@ -636,7 +636,7 @@ int pld_ipci_get_soc_info(struct device *dev, struct pld_soc_info *info)
+ 	info->board_id = icnss_info.board_id;
+ 	info->soc_id = icnss_info.soc_id;
+ 	info->fw_version = icnss_info.fw_version;
+-	strlcpy(info->fw_build_timestamp, icnss_info.fw_build_timestamp,
++	strscpy(info->fw_build_timestamp, icnss_info.fw_build_timestamp,
+ 		sizeof(info->fw_build_timestamp));
+ 
+ 	return 0;
+diff --git a/qcacld-3.0/core/pld/src/pld_pcie.c b/qcacld-3.0/core/pld/src/pld_pcie.c
+index da9131d..f53bed5 100644
+--- a/qcacld-3.0/core/pld/src/pld_pcie.c
++++ b/qcacld-3.0/core/pld/src/pld_pcie.c
+@@ -970,7 +970,7 @@ int pld_pcie_get_soc_info(struct device *dev, struct pld_soc_info *info)
+ 	info->board_id = cnss_info.board_id;
+ 	info->soc_id = cnss_info.soc_id;
+ 	info->fw_version = cnss_info.fw_version;
+-	strlcpy(info->fw_build_timestamp, cnss_info.fw_build_timestamp,
++	strscpy(info->fw_build_timestamp, cnss_info.fw_build_timestamp,
+ 		sizeof(info->fw_build_timestamp));
+ 	info->device_version.family_number =
+ 		cnss_info.device_version.family_number;
+diff --git a/qcacld-3.0/core/pld/src/pld_pcie_fw_sim.c b/qcacld-3.0/core/pld/src/pld_pcie_fw_sim.c
+index 3282935..bc706bc 100644
+--- a/qcacld-3.0/core/pld/src/pld_pcie_fw_sim.c
++++ b/qcacld-3.0/core/pld/src/pld_pcie_fw_sim.c
+@@ -722,7 +722,7 @@ int pld_pcie_fw_sim_get_soc_info(struct device *dev, struct pld_soc_info *info)
+ 	info->board_id = cnss_info.board_id;
+ 	info->soc_id = cnss_info.soc_id;
+ 	info->fw_version = cnss_info.fw_version;
+-	strlcpy(info->fw_build_timestamp, cnss_info.fw_build_timestamp,
++	strscpy(info->fw_build_timestamp, cnss_info.fw_build_timestamp,
+ 		sizeof(info->fw_build_timestamp));
+ 	info->device_version.family_number =
+ 		cnss_info.device_version.family_number;
+diff --git a/qcacld-3.0/core/pld/src/pld_snoc.c b/qcacld-3.0/core/pld/src/pld_snoc.c
+index dcdde4d..813342e7 100644
+--- a/qcacld-3.0/core/pld/src/pld_snoc.c
++++ b/qcacld-3.0/core/pld/src/pld_snoc.c
+@@ -539,7 +539,7 @@ int pld_snoc_get_soc_info(struct device *dev, struct pld_soc_info *info)
+ 	info->board_id = icnss_info.board_id;
+ 	info->soc_id = icnss_info.soc_id;
+ 	info->fw_version = icnss_info.fw_version;
+-	strlcpy(info->fw_build_timestamp, icnss_info.fw_build_timestamp,
++	strscpy(info->fw_build_timestamp, icnss_info.fw_build_timestamp,
+ 		sizeof(info->fw_build_timestamp));
+ 
+ 	return 0;

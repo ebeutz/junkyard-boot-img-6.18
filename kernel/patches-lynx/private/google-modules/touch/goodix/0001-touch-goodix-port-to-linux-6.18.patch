@@ -1,0 +1,44 @@
+From: junkyard
+Subject: [PATCH] touch/goodix: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/goodix_brl_fwupdate.c b/goodix_brl_fwupdate.c
+index b467607..4b1857f 100644
+--- a/goodix_brl_fwupdate.c
++++ b/goodix_brl_fwupdate.c
+@@ -1224,7 +1224,7 @@ int goodix_fw_update_init(struct goodix_ts_core *core_data)
+ 	}
+ /*~[GOOG] */
+ 
+-	strlcpy(core_data->update_ctrl.fw_name, core_data->board_data.fw_name,
++	strscpy(core_data->update_ctrl.fw_name, core_data->board_data.fw_name,
+ 		sizeof(core_data->update_ctrl.fw_name));
+ 
+ 	ret = goodix_fw_sysfs_init(core_data, &core_data->update_ctrl);
+diff --git a/goodix_ts_core.h b/goodix_ts_core.h
+index 5a25249..5042b37 100644
+--- a/goodix_ts_core.h
++++ b/goodix_ts_core.h
+@@ -21,7 +21,7 @@
+ #include <linux/init.h>
+ #include <linux/firmware.h>
+ #include <linux/slab.h>
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ #include <linux/vmalloc.h>
+ #include <linux/kthread.h>
+ #include <linux/delay.h>
+diff --git a/goodix_ts_proc.c b/goodix_ts_proc.c
+index b08fb78..05443f5 100644
+--- a/goodix_ts_proc.c
++++ b/goodix_ts_proc.c
+@@ -4491,7 +4491,7 @@ int driver_test_selftest(struct goodix_ts_core *cd, char *buf, bool *result,
+ 			ts_test->result[GTP_SELFCAP_TEST];
+ 	}
+ 
+-	strlcpy(buf, rbuf, PAGE_SIZE);
++	strscpy(buf, rbuf, PAGE_SIZE);
+ 
+ exit:
+ 	return ret;

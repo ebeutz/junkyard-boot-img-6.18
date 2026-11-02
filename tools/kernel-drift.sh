@@ -124,6 +124,14 @@ patch_files() {
 	local pre; pre=$(prefix_of "$1")
 	grep -oE '^\+\+\+ b/[^[:space:]]+' "$1" | sed "s|^+++ b/|$pre|"
 }
+# Files a patch CREATES (repo-top-relative). After the apply they exist but are
+# untracked, and `git diff` never lists them, so tests 2 and 3 below must treat
+# them as ours. Their content is still fully verified: a reverse-apply only
+# succeeds if every created file matches the patch byte for byte.
+patch_new_files() {
+	local pre; pre=$(prefix_of "$1")
+	awk '/^diff --git a\//{f=$4; sub(/^b\//,"",f); next} /^new file mode/{print f}' "$1" | sed "s|^|$pre|"
+}
 # patch_apply <patch> [git-apply args...] — run from the repo top, prefixed.
 patch_apply() {
 	local p=$1; shift
@@ -205,8 +213,15 @@ for tgt in "${PROJECTS[@]}"; do
 		fi
 	fi
 
-	# 2. untracked files — compiled in, but invisible to setlocalversion (-uno)
-	untracked=$(git -C "$tgt" ls-files --others --exclude-standard 2>/dev/null)
+	# 2. untracked files — compiled in, but invisible to setlocalversion (-uno).
+	#    Files our own patches create are untracked by construction; skip them.
+	created=""
+	for p in "${PATCHES[@]}"; do
+		[ "$(top_of "$p")" = "$tgt" ] || continue
+		created+=$'\n'"$(patch_new_files "$p")"
+	done
+	untracked=$(git -C "$tgt" ls-files --others --exclude-standard 2>/dev/null \
+		| grep -vxF -f <(printf '%s\n' "$created" | sed '/^$/d') || true)
 	if [ -n "$untracked" ]; then
 		say "FATAL ($proj): untracked files are built but can never appear in any version string:"
 		printf '%s\n' "$untracked" | sed 's/^/        /' >&2
@@ -252,8 +267,13 @@ for tgt in "${PROJECTS[@]}"; do
 		# nothing, silently yielding an empty pathspec — and `git diff --numstat --`
 		# with no paths diffs everything, so the comparison quietly stops testing
 		# what it claims to. Cost me a false "clean" on a tree with a planted edit.
-		pfiles=$(patch_files "$p")
-		want=$(patch_apply "$p" --numstat 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
+		# Created files are verified by the reverse-apply above and never show
+		# in `git diff`, so compare line counts over the pre-existing files only.
+		newf=$(patch_new_files "$p")
+		pfiles=$(patch_files "$p" | grep -vxF -f <(printf '%s\n' "$newf" | sed '/^$/d') || true)
+		want=$(patch_apply "$p" --numstat 2>/dev/null \
+			| awk -v new="$newf" 'BEGIN{n=split(new,a,"\n"); for(i=1;i<=n;i++) skip[a[i]]=1}
+			                     !($3 in skip){print $1" "$2" "$3}' | sort)
 		got=$(cd "$tgt" && git diff --numstat -- $pfiles 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
 		if [ "$want" != "$got" ]; then
 			say "DRIFT ($proj): $(basename "$p") is applied, but its files carry EXTRA edits"

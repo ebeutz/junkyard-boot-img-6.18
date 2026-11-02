@@ -1,0 +1,204 @@
+From: junkyard
+Subject: [PATCH] radio/samsung/s5300: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/cp_thermal_zone.c b/cp_thermal_zone.c
+index bc0ed3a..22a6f40 100644
+--- a/cp_thermal_zone.c
++++ b/cp_thermal_zone.c
+@@ -80,7 +80,7 @@ static const struct attribute_group cp_temp_group = {
+ static int cp_sensor_get_temp(struct thermal_zone_device *tz, int *temp)
+ {
+ 	int ret = 0;
+-	struct cp_temp_sensor *s = tz->devdata;
++	struct cp_temp_sensor *s = thermal_zone_device_priv(tz);
+ 
+ 	if (s && s->valid)
+ 		*temp = s->temp;
+@@ -137,9 +137,8 @@ fail:
+ 	return ret;
+ }
+ 
+-static int cp_thermal_zone_remove(struct platform_device *pdev)
++static void cp_thermal_zone_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct of_device_id cp_thermal_zone_match[] = {
+diff --git a/dit/dit_hal.c b/dit/dit_hal.c
+index 3887a33..221ce58 100644
+--- a/dit/dit_hal.c
++++ b/dit/dit_hal.c
+@@ -243,11 +243,11 @@ static bool dit_hal_set_data_limit(struct forward_stats *stats,
+ 
+ 	spin_lock_irqsave(&dhc->stats_lock, flags);
+ 	if (stats) {
+-		strlcpy(dhc->stats.iface, stats->iface, IFNAMSIZ);
++		strscpy(dhc->stats.iface, stats->iface, IFNAMSIZ);
+ 		dhc->stats.data_warning = DIT_HAL_STATS_MAX;
+ 		dhc->stats.data_limit = stats->data_limit;
+ 	} else {
+-		strlcpy(dhc->stats.iface, limit->iface, IFNAMSIZ);
++		strscpy(dhc->stats.iface, limit->iface, IFNAMSIZ);
+ 		dhc->stats.data_warning = limit->data_warning;
+ 		dhc->stats.data_limit = limit->data_limit;
+ 	}
+@@ -323,7 +323,7 @@ static int dit_hal_add_dst_iface(bool is_upstream,
+ 		if (dhc->dst_iface[i].iface_set)
+ 			continue;
+ 
+-		strlcpy(dhc->dst_iface[i].iface, info->iface, IFNAMSIZ);
++		strscpy(dhc->dst_iface[i].iface, info->iface, IFNAMSIZ);
+ 		dhc->dst_iface[i].netdev =
+ 			dev_get_by_name(&init_net, info->iface);
+ 		if (dhc->dst_iface[i].netdev)
+diff --git a/dit_hal.c b/dit_hal.c
+index b64a3c0..d711296 100644
+--- a/dit_hal.c
++++ b/dit_hal.c
+@@ -238,11 +238,11 @@ static bool dit_hal_set_data_limit(struct forward_stats *stats,
+ 
+ 	spin_lock_irqsave(&dhc->stats_lock, flags);
+ 	if (stats) {
+-		strlcpy(dhc->stats.iface, stats->iface, IFNAMSIZ);
++		strscpy(dhc->stats.iface, stats->iface, IFNAMSIZ);
+ 		dhc->stats.data_warning = DIT_HAL_STATS_MAX;
+ 		dhc->stats.data_limit = stats->data_limit;
+ 	} else {
+-		strlcpy(dhc->stats.iface, limit->iface, IFNAMSIZ);
++		strscpy(dhc->stats.iface, limit->iface, IFNAMSIZ);
+ 		dhc->stats.data_warning = limit->data_warning;
+ 		dhc->stats.data_limit = limit->data_limit;
+ 	}
+@@ -318,7 +318,7 @@ static int dit_hal_add_dst_iface(bool is_upstream,
+ 		if (dhc->dst_iface[i].iface_set)
+ 			continue;
+ 
+-		strlcpy(dhc->dst_iface[i].iface, info->iface, IFNAMSIZ);
++		strscpy(dhc->dst_iface[i].iface, info->iface, IFNAMSIZ);
+ 		dhc->dst_iface[i].netdev =
+ 			dev_get_by_name(&init_net, info->iface);
+ 		if (dhc->dst_iface[i].netdev)
+diff --git a/link_device.c b/link_device.c
+index 037cb56..80d9052 100644
+--- a/link_device.c
++++ b/link_device.c
+@@ -153,7 +153,7 @@ static void shmem_handle_cp_crash(struct mem_link_device *mld,
+ 
+ static void handle_no_cp_crash_ack(struct timer_list *t)
+ {
+-	struct mem_link_device *mld = from_timer(mld, t, crash_ack_timer);
++	struct mem_link_device *mld = timer_container_of(mld, t, crash_ack_timer);
+ 	struct link_device *ld = &mld->link_dev;
+ 	struct modem_ctl *mc = ld->mc;
+ 
+@@ -230,7 +230,7 @@ static void link_trigger_cp_crash(struct mem_link_device *mld, u32 crash_type,
+ 	}
+ 
+ 	if (!reason_done && reason && reason[0] != '\0') {
+-		strlcpy(ld->crash_reason.string, reason, CP_CRASH_INFO_SIZE);
++		strscpy(ld->crash_reason.string, reason, CP_CRASH_INFO_SIZE);
+ 		reason_done = true;
+ 	}
+ 
+@@ -678,7 +678,7 @@ static void cmd_crash_exit_handler(struct mem_link_device *mld)
+ 	spin_unlock_irqrestore(&mld->state_lock, flags);
+ 
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 
+ 	if (atomic_read(&mld->forced_cp_crash))
+ 		mif_err("%s<-%s: CP_CRASH_ACK\n", ld->name, mc->name);
+@@ -2625,7 +2625,7 @@ static void shmem_close_tx(struct link_device *ld)
+ 	spin_unlock_irqrestore(&mld->state_lock, flags);
+ 
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 
+ 	stop_net_ifaces(ld, 0);
+ 	purge_txq(mld);
+diff --git a/modem_ctrl_s5000ap.c b/modem_ctrl_s5000ap.c
+index b7270d4..cc75c56 100644
+--- a/modem_ctrl_s5000ap.c
++++ b/modem_ctrl_s5000ap.c
+@@ -398,7 +398,7 @@ static int power_reset_cp(struct modem_ctl *mc)
+ 
+ 	/* 2cp dump WA */
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 	atomic_set(&mld->forced_cp_crash, 0);
+ 
+ 	if (ld->sbd_ipc && hrtimer_active(&mld->sbd_print_timer))
+@@ -442,7 +442,7 @@ static int power_reset_dump_cp(struct modem_ctl *mc)
+ 
+ 	/* 2cp dump WA */
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 	atomic_set(&mld->forced_cp_crash, 0);
+ 
+ 	if (ld->sbd_ipc && hrtimer_active(&mld->sbd_print_timer))
+diff --git a/modem_ctrl_s5100.c b/modem_ctrl_s5100.c
+index e87de52..bd58a29 100644
+--- a/modem_ctrl_s5100.c
++++ b/modem_ctrl_s5100.c
+@@ -394,7 +394,7 @@ static irqreturn_t cp_active_handler(int irq, void *data)
+ 				cp_state_str(mc->phone_state), cp_active);
+ 
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 
+ 	mif_stop_logging();
+ 
+@@ -1202,7 +1202,7 @@ static int silent_reset_cp(struct modem_ctl *mc)
+ 
+ 	/* 2cp dump WA */
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 	atomic_set(&mld->forced_cp_crash, 0);
+ 
+ 	mif_info("Set link mode to LINK_MODE_BOOT.\n");
+@@ -1345,7 +1345,7 @@ static int start_normal_boot(struct modem_ctl *mc)
+ 
+ 	/* 2cp dump WA */
+ 	if (timer_pending(&mld->crash_ack_timer))
+-		del_timer(&mld->crash_ack_timer);
++		timer_delete(&mld->crash_ack_timer);
+ 	atomic_set(&mld->forced_cp_crash, 0);
+ 
+ 	mif_info("Set link mode to LINK_MODE_BOOT.\n");
+diff --git a/modem_utils.c b/modem_utils.c
+index bfa1109..c11a2b6 100644
+--- a/modem_utils.c
++++ b/modem_utils.c
+@@ -264,7 +264,7 @@ __be32 ipv4str_to_be32(const char *ipv4str, size_t count)
+ 	char *next = ipstr;
+ 	int i;
+ 
+-	strlcpy(ipstr, ipv4str, ARRAY_SIZE(ipstr));
++	strscpy(ipstr, ipv4str, ARRAY_SIZE(ipstr));
+ 
+ 	for (i = 0; i < 4; i++) {
+ 		char *p;
+diff --git a/shm_ipc.c b/shm_ipc.c
+index 5668298..a373830 100644
+--- a/shm_ipc.c
++++ b/shm_ipc.c
+@@ -496,9 +496,8 @@ fail:
+ 	return ret;
+ }
+ 
+-static int cp_shmem_remove(struct platform_device *pdev)
++static void cp_shmem_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct of_device_id cp_shmem_dt_match[] = {

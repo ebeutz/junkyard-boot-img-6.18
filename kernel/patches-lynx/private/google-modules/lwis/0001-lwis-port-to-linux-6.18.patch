@@ -1,0 +1,70 @@
+From: junkyard
+Subject: [PATCH] lwis: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/platform/busan/lwis_platform_busan.c b/platform/busan/lwis_platform_busan.c
+index ad1bf0f..174be7f 100644
+--- a/platform/busan/lwis_platform_busan.c
++++ b/platform/busan/lwis_platform_busan.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2021 Google, LLC
+  */
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
+ #include "lwis_platform_busan.h"
+ 
+ #include <linux/iommu.h>
+@@ -60,7 +61,12 @@ int lwis_platform_probe(struct lwis_device *lwis_dev)
+ 	return 0;
+ }
+ 
+-static int lwis_iommu_fault_handler(struct iommu_fault *fault, void *param)
++/*
++ * 6.8 removed iommu_register_device_fault_handler(); on gs201 samsung_iommu.ko
++ * provides pixel_iommu_*() (see the Laguna port in platform/dublin).
++ */
++static int lwis_iommu_fault_handler(struct device *dev, unsigned long iova, u32 pasid,
++				    int flags, void *param)
+ {
+ 	int ret;
+ 	struct of_phandle_iterator it;
+@@ -81,7 +87,7 @@ static int lwis_iommu_fault_handler(struct iommu_fault *fault, void *param)
+ 		pr_err("\n");
+ 	}
+ 	pr_err("IOMMU Page Fault at Address: 0x%p Flag: 0x%08x. Check dmesg for sysmmu errors\n",
+-	       (void *)fault->event.addr, fault->event.flags);
++	       (void *)iova, flags);
+ 	pr_err("\n");
+ 	lwis_debug_print_transaction_info(lwis_dev);
+ 	pr_err("\n");
+@@ -93,8 +99,9 @@ static int lwis_iommu_fault_handler(struct iommu_fault *fault, void *param)
+ 	pr_err("\n");
+ 	pr_err("###############################################\n");
+ 
+-	event_payload.fault_address = fault->event.addr;
+-	event_payload.fault_flags = fault->event.flags;
++	event_payload.fault_address = iova;
++	/* as in platform/dublin: the 6.18 report carries a valid address only */
++	event_payload.fault_flags = LWIS_MEM_PAGE_FAULT_ADDRESS_VALID;
+ 	lwis_device_error_event_emit(lwis_dev, LWIS_ERROR_EVENT_ID_MEMORY_PAGE_FAULT,
+ 				     &event_payload, sizeof(event_payload));
+ 
+@@ -138,7 +145,7 @@ int lwis_platform_device_enable(struct lwis_device *lwis_dev)
+ 
+ 	if (of_find_property(lwis_dev->k_dev->of_node, "iommus", &iommus_len) && iommus_len) {
+ 		/* Activate IOMMU for the platform device */
+-		ret = iommu_register_device_fault_handler(lwis_dev->k_dev, lwis_iommu_fault_handler,
++		ret = pixel_iommu_register_fault_handler(lwis_dev->k_dev, lwis_iommu_fault_handler,
+ 							  lwis_dev);
+ 		if (ret < 0) {
+ 			pr_err("Failed to register fault handler for the device: %d\n", ret);
+@@ -198,7 +205,7 @@ int lwis_platform_device_disable(struct lwis_device *lwis_dev)
+ 
+ 	if (of_find_property(lwis_dev->k_dev->of_node, "iommus", &iommus_len) && iommus_len) {
+ 		/* Deactivate IOMMU */
+-		iommu_unregister_device_fault_handler(lwis_dev->k_dev);
++		pixel_iommu_unregister_fault_handler(lwis_dev->k_dev);
+ 	}
+ 
+ 	/* Disable platform device */

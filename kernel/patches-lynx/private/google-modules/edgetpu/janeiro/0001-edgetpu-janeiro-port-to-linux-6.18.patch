@@ -1,0 +1,16 @@
+From: junkyard
+Subject: [PATCH] edgetpu/janeiro: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/drivers/edgetpu/edgetpu-dmabuf.c b/drivers/edgetpu/edgetpu-dmabuf.c
+index 1ba6e2a..5cd7c38 100644
+--- a/drivers/edgetpu/edgetpu-dmabuf.c
++++ b/drivers/edgetpu/edgetpu-dmabuf.c
+@@ -1088,5 +1088,5 @@ int edgetpu_sync_fence_debugfs_show(struct seq_file *s, void *unused)
+ }
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ #endif

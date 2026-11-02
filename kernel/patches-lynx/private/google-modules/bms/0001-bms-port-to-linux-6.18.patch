@@ -1,0 +1,18 @@
+From: junkyard
+Subject: [PATCH] bms: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/misc/gvotable.c b/misc/gvotable.c
+index f079a4d..c745aa9 100644
+--- a/misc/gvotable.c
++++ b/misc/gvotable.c
+@@ -977,7 +977,7 @@ static int gvotable_get_current_reason_unlocked(struct gvotable_election *el,
+ 	if (max_len < 0)
+ 		return -EINVAL;
+ 	strscpy(reason, r, max_len);
+-	/* Preserve the source-length return value of the former strlcpy(). */
++	/* Preserve the source-length return value of the former strscpy(). */
+ 	return strlen(r);
+ }
+ 

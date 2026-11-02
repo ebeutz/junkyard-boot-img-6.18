@@ -1,0 +1,15 @@
+From: junkyard
+Subject: [PATCH] video/gchips: port to Linux 6.18 (lynx)
+
+TODO: describe
+---
+diff --git a/bigo.c b/bigo.c
+index 1f295c5..d2bef16 100644
+--- a/bigo.c
++++ b/bigo.c
+@@ -927,4 +927,4 @@ module_platform_driver(bigo_driver);
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Vinay Kalia <vinaykalia@google.com>");
+ MODULE_DESCRIPTION("BigWave driver");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
