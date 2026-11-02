@@ -288,6 +288,64 @@ clone_kernel_source:
         [ "${KERNEL_SYNC_ANYWAY:-0}" = 1 ] || exit 1
     fi
 
+    kind=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_SOURCE_KIND DEVICE={{ device }} | tail -1)
+
+    # ═══ GrapheneOS monorepo (devices/<device>.mk: KERNEL_SOURCE_KIND=grapheneos) ═══
+    #
+    # Not a `repo` manifest branch. KERNEL_REPO_URL is ONE git repo carrying
+    # private/devices/google/* and private/google-modules/* (separate `repo`
+    # projects on AOSP), plus aosp_manifest.xml listing what it builds against —
+    # common/ (GrapheneOS kernel_common), build/kernel, prebuilts/, external/ —
+    # each at a pinned revision. That manifest's `dependencies` group is synced
+    # exactly as the tree's own sync.sh does it (standalone manifest, partial
+    # clone); we inline sync.sh only to use our `repo` and our -j.
+    #
+    # Pinning: the monorepo commit pins everything, because aosp_manifest.xml
+    # inside it pins every dependency by SHA. `just pin_kernel_source` records it
+    # in kernel/kernel-source.<device>.rev; with that file present a FRESH clone
+    # checks out that commit. An EXISTING tree is never moved — fetching/resetting
+    # here on every build would silently revert kernel/patches and any local work.
+    if [ "$kind" = grapheneos ]; then
+        url=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_REPO_URL DEVICE={{ device }} | tail -1)
+        pin={{ justfile_directory() }}/kernel/kernel-source.{{ device }}.rev
+        if [ ! -e "$src/.git" ]; then
+            mkdir -p "$src"
+            if [ -f "$pin" ]; then
+                rev=$(tr -d '[:space:]' < "$pin")
+                echo "Cloning {{ device }} kernel $url @ pinned $rev into $src"
+                git -C "$src" init -q
+                git -C "$src" remote add origin "$url"
+                git -C "$src" fetch --depth=1 origin "$rev"
+                git -C "$src" checkout -q --detach FETCH_HEAD
+            else
+                echo "Cloning {{ device }} kernel $url @ $branch into $src (shallow; run 'just pin_kernel_source' to lock)"
+                git clone --depth=1 -b "$branch" "$url" "$src"
+            fi
+        elif [ -f "$pin" ] && [ "$(git -C "$src" rev-parse HEAD)" != "$(tr -d '[:space:]' < "$pin")" ]; then
+            echo "WARNING: $src is at $(git -C "$src" rev-parse --short HEAD), not the pinned" >&2
+            echo "         $(cat "$pin") — leaving it alone (see the pinning note above)." >&2
+        fi
+        cd "$src"
+        {{ _repo }} init --standalone-manifest \
+            -u "file://$PWD/aosp_manifest.xml" \
+            --groups=dependencies --partial-clone < /dev/null
+        {{ _repo }} sync --current-branch --no-tags -j {{ num_cpus() }}
+        # The monorepo root is itself a git project, so tools/kernel-drift.sh
+        # sees anything untracked at its top as FATAL drift. These two are ours
+        # (the fragment symlink below) and bazel's (bzlmod lockfile), not
+        # kernel content; .git/info/exclude keeps them out of `ls-files -o`.
+        for x in /custom_defconfig_mod /MODULE.bazel.lock; do
+            grep -qxF "$x" .git/info/exclude 2>/dev/null || echo "$x" >> .git/info/exclude
+        done
+        if [ ! -e custom_defconfig_mod ]; then
+            ln -s ../custom_defconfig_mod ./
+        fi
+        # See the matching note at the end of the AOSP path below.
+        rm -f {{ justfile_directory() }}/build/{{ device }}/.apply_kernel_patches
+        exit 0
+    fi
+
+    # ═══ AOSP `repo` manifest branch (KERNEL_SOURCE_KIND=aosp) ═══
     echo "Cloning {{ device }} kernel from branch: $branch into $src"
     mkdir -p "$src"
     cd "$src"
@@ -339,11 +397,23 @@ clone_kernel_source:
 # clone_kernel_source does a full sync against these exact revisions. Re-run
 # after an intentional kernel branch/version bump, then rebuild kernel + rootfs
 # modules in lockstep.
+#
+# For a GrapheneOS-monorepo device the lock is just the monorepo commit, written
+# to kernel/kernel-source.<device>.rev: its aosp_manifest.xml already pins every
+# dependency by SHA.
 [group('kernel')]
 pin_kernel_source:
-    cd {{ _kernel_source_dir }} && {{ _repo }} manifest -r \
-        -o {{ justfile_directory() }}/kernel/kernel-manifest.{{ device }}.xml
-    @echo "Wrote kernel/kernel-manifest.{{ device }}.xml — commit it to lock the kernel source."
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kind=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_SOURCE_KIND DEVICE={{ device }} | tail -1)
+    if [ "$kind" = grapheneos ]; then
+        git -C {{ _kernel_source_dir }} rev-parse HEAD > {{ justfile_directory() }}/kernel/kernel-source.{{ device }}.rev
+        echo "Wrote kernel/kernel-source.{{ device }}.rev — commit it to lock the kernel source."
+    else
+        cd {{ _kernel_source_dir }} && {{ _repo }} manifest -r \
+            -o {{ justfile_directory() }}/kernel/kernel-manifest.{{ device }}.xml
+        echo "Wrote kernel/kernel-manifest.{{ device }}.xml — commit it to lock the kernel source."
+    fi
 
 # Expunge the Bazel output and drop the kernel sentinels. Every device by
 # default, `device=<dev>` for one — same rule as `clean`.
@@ -373,10 +443,17 @@ config_kernel: clone_kernel_source
     #!/usr/bin/env bash
     set -euo pipefail
     target=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-BAZEL_TARGET DEVICE={{ device }} | tail -1)
+    cfg_target=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_CONFIG_TARGET DEVICE={{ device }} | tail -1)
+    # Same package as BAZEL_TARGET, but the :kernel_config rule rather than :dist,
+    # unless the device fragment names it (GrapheneOS: <device>/kernel_config).
+    cfg_target=${cfg_target:-${target%:*}:kernel_config}
+    cfg=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-BAZEL_CONFIG DEVICE={{ device }} | tail -1)
+    flags=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_BAZEL_FLAGS DEVICE={{ device }} | tail -1)
     cd {{ _kernel_source_dir }}
     cp ./aosp/arch/arm64/configs/gki_defconfig ./gki_defconfig_original
-    # Same package as BAZEL_TARGET, but the :kernel_config rule rather than :dist.
-    {{ _bazel }} run "${target%:*}:kernel_config" -- nconfig
+    # Same flags as .build_kernel, so nconfig shows the config the build would use.
+    {{ _bazel }} run --config="$cfg" --defconfig_fragment=//custom_defconfig_mod:custom_defconfig_{{ device }} \
+        $flags "$cfg_target" -- nconfig
     diff -up ./gki_defconfig_original aosp/arch/arm64/configs/gki_defconfig || [ $? -eq 1 ]
     rm ./gki_defconfig_original
     cd aosp && git checkout arch/arm64/configs/gki_defconfig

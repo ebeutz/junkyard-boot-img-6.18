@@ -1,0 +1,12 @@
+# lynx (GrapheneOS kernel_pixel_6.18) — kernel command line.
+#
+# 6.18 gki_defconfig's CONFIG_CMDLINE:
+#   console=ttynull stack_depot_disable=on cgroup_disable=pressure
+#   kasan.stacktrace=off kvm-arm.mode=protected bootconfig
+# with the SAME deliberate deltas felix carries over its 6.1 base:
+#   kvm-arm.mode=protected -> nvhe   (plain KVM for Debian guests, not pKVM)
+#   cgroup_disable=pressure dropped  (PSI on, for k8s/systemd-oomd)
+# plus the cgroup_enable=* list for k3s. felix's `kasan.page_alloc.sample=10` and
+# `ioremap_guard` are NOT carried over: they are in 6.1's base string, not 6.18's,
+# and ioremap_guard no longer exists (it would be handed to init as an argument).
+CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"

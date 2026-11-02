@@ -1,12 +1,17 @@
 CONFIG_SYSVIPC=y
 CONFIG_USER_NS=y
-CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"
+# CONFIG_CMDLINE is NOT here: it is a whole-string override of GKI's own
+# CONFIG_CMDLINE, and that string differs between kernel versions, so each device
+# carries its own in <device>_cmdline_defconfig (see BUILD.bazel).
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_FW_LOADER_COMPRESS=y
 CONFIG_FW_LOADER_COMPRESS_ZSTD=y
 CONFIG_VHOST_NET=y
-CONFIG_AUTOFS4_FS=y
+# AUTOFS_FS, not the old AUTOFS4_FS: the latter was only a transitional alias and
+# is gone in 6.18 (kleaf then fails the build: fragment value not in .config).
+# AUTOFS_FS is the real symbol on 6.1 too, so felix is unaffected.
+CONFIG_AUTOFS_FS=y
 CONFIG_NFS_FS=y
 CONFIG_NFS_V3_ACL=y
 CONFIG_NFS_V4=y
@@ -16,7 +21,8 @@ CONFIG_NFS_V4_1_MIGRATION=y
 CONFIG_NFS_V4_2_READ_PLUS=y
 CONFIG_POSIX_MQUEUE=y
 CONFIG_VT=y
-CONFIG_HW_CONSOLE=y
+# (CONFIG_HW_CONSOLE was dropped: it was never user-selectable — `default y` under
+# VT on 6.1 — and 6.18 removed the symbol entirely, folding it into VT.)
 CONFIG_VT_HW_CONSOLE_BINDING=y
 CONFIG_DEVMEM=y
 

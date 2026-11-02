@@ -5,9 +5,14 @@
 # SoC-level or userspace and is shared. A command-line `make VAR=val` (and the
 # justfile's size=/hostname= variables) still beats anything set here.
 
-KERNEL_BRANCH := android-gs-felix-6.1-android16
-BAZEL_CONFIG  := felix
-BAZEL_TARGET  := //private/devices/google/felix:gs201_felix_dist
+KERNEL_SOURCE_KIND  := aosp
+KERNEL_BRANCH       := android-gs-felix-6.1-android16
+BAZEL_CONFIG        := felix
+BAZEL_TARGET        := //private/devices/google/felix:gs201_felix_dist
+# 6.1 Pixel tree: GKI is prebuilt unless told to build the in-tree source, which
+# the built-in (=y) options in custom_defconfig require.
+KERNEL_BAZEL_FLAGS  := --config=use_source_tree_aosp
+KERNEL_SIGN_MODULES := 0
 
 # felix full OTA (Android 16, cp1a). sync_vendor_firmware extracts /vendor/firmware
 # (aoc.bin, ...) from this. Pinned by content hash so a rotated/corrupt OTA fails

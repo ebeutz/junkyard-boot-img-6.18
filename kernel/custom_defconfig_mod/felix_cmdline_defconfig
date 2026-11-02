@@ -1,0 +1,7 @@
+# felix (AOSP android-gs-felix-6.1) — kernel command line.
+#
+# 6.1 gki_defconfig's CONFIG_CMDLINE with two deliberate deltas:
+#   kvm-arm.mode=protected -> nvhe   (plain KVM for Debian guests, not pKVM)
+#   cgroup_disable=pressure dropped  (PSI on, for k8s/systemd-oomd)
+# plus the cgroup_enable=* list for k3s.
+CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"

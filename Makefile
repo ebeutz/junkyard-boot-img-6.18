@@ -114,6 +114,26 @@ KERNEL_SOURCE_DIR := kernel/source-$(DEVICE)
 # fragment. `:=` rather than `?=` so it always tracks $(DEVICE) even if the
 # justfile leaves a stale KERNEL_BUILD_DIR in the environment.
 KERNEL_BUILD_DIR := $(KERNEL_SOURCE_DIR)/out/$(BAZEL_CONFIG)/dist
+# Where .install_kernel takes the {vendor,system}_dlkm staging archives from.
+#
+# Straight out of dist, unless the device fragment sets KERNEL_SIGN_MODULES=1:
+# then .build_kernel writes GKI-key-signed copies here and those are installed.
+# Needed for GrapheneOS's 6.18 GKI, which is CONFIG_MODULE_SIG_FORCE=y — kleaf's
+# vendor modules are signed (if at all) by the DEVICE kernel_build's throwaway
+# key, which the GKI Image does not trust, so unsigned-by-GKI = refused at load.
+# GrapheneOS's own tools/build_dist.sh re-signs its flat dist/*.ko for the same
+# reason; it deliberately leaves the archives alone, so we sign copies instead.
+# Copies (not in-place) so dist stays byte-for-byte what bazel produced.
+KERNEL_STAGING_DIR := $(if $(filter 1,$(KERNEL_SIGN_MODULES)),$(BUILD_DIR)/kernel-staging-signed,$(KERNEL_BUILD_DIR))
+# Extra per-device bazel flags (devices/<device>.mk). felix's 6.1 tree needs
+# --config=use_source_tree_aosp to build GKI from source; GrapheneOS's 6.18 tree
+# always does, has no such config, and wants --disable_randstruct instead.
+KERNEL_BAZEL_FLAGS ?=
+# Every fragment must say where its kernel comes from — `aosp` (repo manifest
+# branch) or `grapheneos` (monorepo + sync.sh). See clone_kernel_source.
+ifeq ($(filter aosp grapheneos,$(KERNEL_SOURCE_KIND)),)
+$(error devices/$(DEVICE).mk: KERNEL_SOURCE_KIND must be 'aosp' or 'grapheneos', got '$(KERNEL_SOURCE_KIND)')
+endif
 # Per-device, because the two devices build different kernel branches and every
 # /lib/modules/<ver>/ path downstream keys on this value. Kept under kernel/
 # rather than $(BUILD_DIR) because the justfile reads it at PARSE time, before
@@ -494,6 +514,11 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 		exit 1; \
 		;; \
 	esac
+	# git apply from a SUBDIRECTORY silently skips every path ("Skipped patch"),
+	# and --check then passes vacuously. In GrapheneOS's monorepo
+	# private/devices/google/gs201 is such a subdirectory, not its own repo, so
+	# each patch is applied from the repo top with --directory=<prefix> (an empty
+	# prefix for a project that is its own repo — the AOSP `repo` layout).
 	@set -e; \
 	if [ -z "$(PATCH_FILES)" ]; then \
 		echo "No kernel patches to apply."; \
@@ -508,10 +533,13 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 			echo "       (run 'just clone_kernel_source' first)"; \
 			exit 1; \
 		fi; \
-		if (cd "$$tgt" && git apply --check --reverse "$$abs" >/dev/null 2>&1); then \
+		top=$$(git -C "$$tgt" rev-parse --show-toplevel); \
+		pre=$$(git -C "$$tgt" rev-parse --show-prefix); \
+		dirarg=$${pre:+--directory=$$pre}; \
+		if (cd "$$top" && git apply $$dirarg --check --reverse "$$abs" >/dev/null 2>&1); then \
 			echo "already applied: $$rel"; \
-		elif (cd "$$tgt" && git apply --check "$$abs" >/dev/null 2>&1); then \
-			(cd "$$tgt" && git apply "$$abs"); \
+		elif (cd "$$top" && git apply $$dirarg --check "$$abs" >/dev/null 2>&1); then \
+			(cd "$$top" && git apply $$dirarg "$$abs"); \
 			echo "APPLIED: $$rel"; \
 		else \
 			echo "ERROR: $$rel does not apply to $$tgt and is not already applied."; \
@@ -521,13 +549,13 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 	done
 	touch $@
 
-$(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_defconfig_mod/custom_defconfig | $(BUILD_DIR)
+$(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_defconfig_mod/custom_defconfig kernel/custom_defconfig_mod/$(DEVICE)_cmdline_defconfig tools/sign-kernel-modules.sh | $(BUILD_DIR)
 	cd $(KERNEL_SOURCE_DIR); $(BAZEL) run \
-		--config=use_source_tree_aosp \
 		--config=stamp \
 		--config=$(BAZEL_CONFIG) \
 		--config=local \
-		--defconfig_fragment=//custom_defconfig_mod:custom_defconfig \
+		--defconfig_fragment=//custom_defconfig_mod:custom_defconfig_$(DEVICE) \
+		$(KERNEL_BAZEL_FLAGS) \
 		$(BAZEL_TARGET)
 	@echo "Updating kernel version string"
 	# Derive KERNEL_VERSION from the module staging archive, NOT from `strings Image`.
@@ -568,6 +596,10 @@ $(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_de
 	fi; \
 	echo "  kernel version: $$KVER"; \
 	printf '%s\n' "$$KVER" > $(KERNEL_VERSION_FILE)
+	# KERNEL_SIGN_MODULES=1 (devices/<device>.mk): re-sign every module in the
+	# staging archives with the GKI build's key, into $(KERNEL_STAGING_DIR). Runs
+	# here, in the bazel FHS env, because sign-file is a kleaf-built host tool.
+	$(if $(filter 1,$(KERNEL_SIGN_MODULES)),tools/sign-kernel-modules.sh $(KERNEL_SOURCE_DIR) $(KERNEL_BUILD_DIR) $(KERNEL_STAGING_DIR),@true)
 	touch $@
 
 $(S_SYNCFW): | $(BUILD_DIR)
@@ -832,7 +864,7 @@ $(S_INSTK): $(S_KERNEL) $(S_PKGS) | $(BUILD_DIR)
 		sudo rm -rf $(UNPACK_DIR)/"$$staging"; \
 		sudo mkdir -p $(UNPACK_DIR)/"$$staging" && \
 		sudo tar \
-			-xvzf $(KERNEL_BUILD_DIR)/"$$staging"_staging_archive.tar.gz \
+			-xvzf $(KERNEL_STAGING_DIR)/"$$staging"_staging_archive.tar.gz \
 			-C $(UNPACK_DIR)/"$$staging"; \
 		sudo rsync -avK --include='*/' --include='*.ko' --exclude='*' $(UNPACK_DIR)/"$$staging"/ $(SYSROOT_DIR)/; \
 		sudo sh -c "cat $(UNPACK_DIR)/\"$$staging\"/lib/modules/$(KERNEL_VERSION)/modules.order \

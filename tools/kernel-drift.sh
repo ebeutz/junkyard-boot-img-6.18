@@ -95,15 +95,45 @@ for _p in ${PATCHES[@]+"${PATCHES[@]}"}; do
 	echo fatal; exit 2
 done
 
-# The only project whose git state feeds CONFIG_LOCALVERSION_AUTO.
-VERSION_PROJECT="aosp"
+# The only project whose git state feeds CONFIG_LOCALVERSION_AUTO. Resolved to a
+# real path: in GrapheneOS's tree `aosp` is a symlink to `common`, and projects
+# below are compared by real path, so the alias and the target are one project.
+VERSION_PROJECT=$(realpath -e "$SRC/aosp" 2>/dev/null || echo "$SRC/aosp")
 
 encodable=0
 fatal=0
 say() { printf '  %s\n' "$*" >&2; }
 
-patch_files() { grep -oE '^\+\+\+ b/[^[:space:]]+' "$1" | sed 's|^+++ b/||'; }
+# ═══ PROJECT DIR vs. GIT REPO ═════════════════════════════════════════════════
+#
+# A patch lives at kernel/patches/<project-dir>/, and each patch is -p1 relative
+# to <project-dir>. Under AOSP `repo` every project-dir is its own git repo. In
+# GrapheneOS's monorepo it is not: private/devices/google/gs201 is a plain
+# SUBDIRECTORY of one big repo. So everything below works in terms of the
+# containing repo (top_of) and the project-dir's path inside it (prefix_of):
+#   * `git apply` must run from the repo top with --directory=<prefix>; run from
+#     the subdirectory it prints "Skipped patch" and --check passes VACUOUSLY,
+#     which here would mean a false "already applied"/"clean".
+#   * `git diff --name-only` always prints repo-top-relative paths, so the
+#     patch's own file list is prefixed to match.
 proj_of()     { dirname "${1#kernel/patches/}"; }
+top_of()      { git -C "$SRC/$(proj_of "$1")" rev-parse --show-toplevel 2>/dev/null; }
+prefix_of()   { git -C "$SRC/$(proj_of "$1")" rev-parse --show-prefix 2>/dev/null; }
+patch_files() {
+	local pre; pre=$(prefix_of "$1")
+	grep -oE '^\+\+\+ b/[^[:space:]]+' "$1" | sed "s|^+++ b/|$pre|"
+}
+# patch_apply <patch> [git-apply args...] — run from the repo top, prefixed.
+patch_apply() {
+	local p=$1; shift
+	local pre abs; pre=$(prefix_of "$p"); abs=$(readlink -f "$p")
+	(cd "$(top_of "$p")" && git apply ${pre:+"--directory=$pre"} "$@" "$abs")
+}
+# Display name of a project (repo top), relative to $SRC; "." for the monorepo root.
+name_of() {
+	local r; r=$(realpath --relative-to="$(realpath "$SRC")" "$1")
+	printf '%s' "$r"
+}
 
 # ★ Clear --assume-unchanged ourselves rather than trusting the caller to have
 # done it. This is not defensiveness for its own sake: a caller that forgets
@@ -113,11 +143,11 @@ proj_of()     { dirname "${1#kernel/patches/}"; }
 # "clean" against a tree with a deliberate extra edit sitting in it. A check whose
 # failure mode is a false all-clear has to own its preconditions.
 for p in "${PATCHES[@]}"; do
-	proj=$(proj_of "$p"); tgt="$SRC/$proj"
-	[ -d "$tgt" ] || continue
+	[ -d "$SRC/$(proj_of "$p")" ] || continue
+	top=$(top_of "$p") || continue
 	while read -r f; do
 		[ -n "$f" ] || continue
-		git -C "$tgt" update-index --no-assume-unchanged "$f" 2>/dev/null || true
+		git -C "$top" update-index --no-assume-unchanged "$f" 2>/dev/null || true
 	done <<< "$(patch_files "$p")"
 done
 
@@ -134,19 +164,25 @@ fi
 # Skip out/ (build output, full of generated git-less trees and bazel caches) and
 # .repo/ (repo's own bookkeeping, not a build input — its manifests project
 # carries an untracked file as a matter of course).
+#
+# Absolute REAL paths, so that (a) the monorepo root — whose .git sits directly
+# in $SRC — is a project like any other (the old `sed "s|^$SRC/||"` left it as
+# the bare $SRC and every per-project path then doubled up), and (b) a patch
+# matches its project by the repo it actually lands in (top_of), not by the
+# spelling of its kernel/patches/ directory.
 mapfile -t PROJECTS < <(
 	find "$SRC" -maxdepth 6 -name .git -not -path '*/out/*' -not -path '*/.repo/*' 2>/dev/null \
-		| sed 's|/\.git$||' | sed "s|^$SRC/||" | sort
+		| sed 's|/\.git$||' | xargs -r -d '\n' realpath | sort -u
 )
 [ ${#PROJECTS[@]} -gt 0 ] || { say "FATAL: no git projects under $SRC (run 'just clone_kernel_source')"; echo fatal; exit 2; }
 
-for proj in "${PROJECTS[@]}"; do
-	tgt="$SRC/$proj"
+for tgt in "${PROJECTS[@]}"; do
+	proj=$(name_of "$tgt")
 
 	# Files our patches touch in this project (empty for unpatched projects).
 	ours=""
 	for p in "${PATCHES[@]}"; do
-		[ "$(proj_of "$p")" = "$proj" ] || continue
+		[ "$(top_of "$p")" = "$tgt" ] || continue
 		ours+=$'\n'"$(patch_files "$p")"
 	done
 	ours=$(printf '%s\n' "$ours" | sed '/^$/d' | sort -u)
@@ -156,7 +192,7 @@ for proj in "${PROJECTS[@]}"; do
 	if [ -n "$changed" ]; then
 		extra=$(comm -23 <(printf '%s\n' "$changed") <(printf '%s\n' "$ours"))
 		if [ -n "$extra" ]; then
-			if [ "$proj" = "$VERSION_PROJECT" ]; then
+			if [ "$tgt" = "$VERSION_PROJECT" ]; then
 				say "DRIFT ($proj): modified files that are not ours:"
 				printf '%s\n' "$extra" | sed 's/^/        /' >&2
 				encodable=1
@@ -178,9 +214,8 @@ for proj in "${PROJECTS[@]}"; do
 
 	# 3. each patch present, intact, and with no extra edits inside its files
 	for p in "${PATCHES[@]}"; do
-		[ "$(proj_of "$p")" = "$proj" ] || continue
-		abs=$(readlink -f "$p")
-		if ! (cd "$tgt" && git apply --check --reverse "$abs" >/dev/null 2>&1); then
+		[ "$(top_of "$p")" = "$tgt" ] || continue
+		if ! patch_apply "$p" --check --reverse >/dev/null 2>&1; then
 			# NOT-YET-APPLIED IS NOT DRIFT. This check runs BEFORE the apply
 			# stanza, so on a pristine tree — a fresh clone_kernel_source, or any
 			# `repo sync`, which is the documented path that also drops the
@@ -195,11 +230,20 @@ for proj in "${PROJECTS[@]}"; do
 			# the tree is HEAD, which is exactly the state the apply stanza
 			# expects. Only a patch that goes neither way is real drift — a
 			# partial application, or a tree edited out from under the patch.
-			if (cd "$tgt" && git apply --check "$abs" >/dev/null 2>&1); then
+			if patch_apply "$p" --check >/dev/null 2>&1; then
+				# ...but only if its files are untouched. A hand edit that does not
+				# overlap a hunk still lets the patch apply forward, and without
+				# this the edit was reported "clean" and then built in unrecorded.
+				pf=$(patch_files "$p")
+				if [ -n "$(cd "$tgt" && git diff --name-only -- $pf 2>/dev/null)" ]; then
+					say "DRIFT ($proj): $(basename "$p") is not applied, yet its files are modified:"
+					(cd "$tgt" && git diff --name-only -- $pf) | sed 's/^/        /' >&2
+					if [ "$tgt" = "$VERSION_PROJECT" ]; then encodable=1; else fatal=1; fi
+				fi
 				continue
 			fi
 			say "DRIFT ($proj): $(basename "$p") neither applies nor is already applied"
-			if [ "$proj" = "$VERSION_PROJECT" ]; then encodable=1; else fatal=1; fi
+			if [ "$tgt" = "$VERSION_PROJECT" ]; then encodable=1; else fatal=1; fi
 			continue
 		fi
 		# Resolve the file list HERE, before any cd: $p is repo-relative, so
@@ -208,13 +252,13 @@ for proj in "${PROJECTS[@]}"; do
 		# with no paths diffs everything, so the comparison quietly stops testing
 		# what it claims to. Cost me a false "clean" on a tree with a planted edit.
 		pfiles=$(patch_files "$p")
-		want=$(cd "$tgt" && git apply --numstat "$abs" 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
+		want=$(patch_apply "$p" --numstat 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
 		got=$(cd "$tgt" && git diff --numstat -- $pfiles 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
 		if [ "$want" != "$got" ]; then
 			say "DRIFT ($proj): $(basename "$p") is applied, but its files carry EXTRA edits"
 			say "        expected: $(printf '%s' "$want" | tr '\n' ';')"
 			say "        actual:   $(printf '%s' "$got" | tr '\n' ';')"
-			if [ "$proj" = "$VERSION_PROJECT" ]; then encodable=1; else fatal=1; fi
+			if [ "$tgt" = "$VERSION_PROJECT" ]; then encodable=1; else fatal=1; fi
 		fi
 	done
 done
