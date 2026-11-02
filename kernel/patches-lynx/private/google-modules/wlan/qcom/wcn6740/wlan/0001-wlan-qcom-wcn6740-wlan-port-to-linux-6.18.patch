@@ -2,13 +2,25 @@ From: junkyard
 Subject: [PATCH] wlan/qcom/wcn6740/wlan: port to Linux 6.18 (lynx)
 
 Port private/google-modules/wlan/qcom/wcn6740/wlan to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
-Mechanical API migrations, no intended behaviour change:
+API migrations. Mostly mechanical; entries that change behaviour say so:
 
   - strlcpy() removed, use strscpy() (6.8)
   - del_timer*() renamed timer_delete*() (6.15)
   - from_timer() renamed timer_container_of() (6.16)
+  - cfg80211_ops: 6.18 adapters (station/key ops take wireless_dev, radio_idx,
+    cfg80211_ap_update, rx_addr) mapping onto the existing handlers; see
+    the comment above wlan_hdd_cfg80211_ops
+  - cfg80211_new_sta()/cfg80211_del_sta() take the wireless_dev (6.18)
+  - dummy NAPI netdev allocated with alloc_netdev_dummy() (6.10)
+  - GRO_NORMAL batch state moved to napi->gro (6.15); hrtimer_setup() (6.15)
+  - txq_trans_update() takes the netdev; skb_frag_ref() moved to <linux/skbuff_ref.h>
+  - sysctl proc_handler takes a const ctl_table (6.11): pktlog uses a local copy
+  - qdf_thread_run(): kCFI-safe trampoline instead of casting QDF_STATUS (*)(void *)
+    to int (*)(void *), which would trap at runtime under the GKI's kCFI
+  - relax unused-but-set-parameter / missing-prototypes / implicit-enum-enum-cast
+    to warnings (new clang diagnostics, fatal with CONFIG_WERROR)
 
-25 files.
+35 files.
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
@@ -44,6 +56,65 @@ index 6c1fc8e..65e6c7d 100644
  		IPA_RESOURCE_NAME_MAX);
  	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
  
+diff --git a/qca-wifi-host-cmn/qdf/inc/osdep.h b/qca-wifi-host-cmn/qdf/inc/osdep.h
+index b8456e6..8721868 100644
+--- a/qca-wifi-host-cmn/qdf/inc/osdep.h
++++ b/qca-wifi-host-cmn/qdf/inc/osdep.h
+@@ -69,9 +69,16 @@
+  * Deduce if tasklets are available.  If not then
+  * fall back to using the immediate work queue.
+  */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
++/* 6.11: proc_handler takes a const struct ctl_table */
++#define qdf_sysctl_decl(f, ctl, write, filp, buffer, lenp, ppos) \
++	f(const struct ctl_table *ctl, int32_t write, void *buffer, \
++	size_t *lenp, loff_t *ppos)
++#else
+ #define qdf_sysctl_decl(f, ctl, write, filp, buffer, lenp, ppos) \
+ 	f(struct ctl_table *ctl, int32_t write, void *buffer, \
+ 	size_t *lenp, loff_t *ppos)
++#endif
+ 
+ #define QDF_SYSCTL_PROC_DOINTVEC(ctl, write, filp, buffer, lenp, ppos) \
+ 	__QDF_SYSCTL_PROC_DOINTVEC(ctl, write, filp, buffer, lenp, ppos)
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h
+index 811e4b6..3da8697 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h
+@@ -144,8 +144,12 @@ static inline void  __qdf_hrtimer_init(__qdf_hrtimer_data_t *timer,
+ 	timer->ctx = ctx;
+ 
+ 	if (timer->ctx == QDF_CONTEXT_HARDWARE) {
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))
++		hrtimer_setup(hrtimer, cback, clock, hrt_mode);
++#else
+ 		hrtimer_init(hrtimer, clock, hrt_mode);
+ 		hrtimer->function = cback;
++#endif
+ 	} else if (timer->ctx == QDF_CONTEXT_TASKLET) {
+ 		QDF_BUG(0);
+ 	}
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h
+index 4725740..594b592 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h
+@@ -43,11 +43,16 @@ struct qdf_net_if;
+ static inline QDF_STATUS
+ __qdf_net_if_create_dummy_if(struct qdf_net_if *nif)
+ {
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
++	/* 6.10 removed init_dummy_netdev(); in-place dummy init is gone */
++	return QDF_STATUS_E_NOSUPPORT;
++#else
+ 	int ret;
+ 
+ 	ret = init_dummy_netdev((struct net_device *)nif);
+ 
+ 	return qdf_status_from_os_return(ret);
++#endif
+ }
+ 
+ /**
 diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h
 index 5dc2469..e5c63cd 100644
 --- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_str.h
@@ -137,6 +208,80 @@ index 6926702..58e10bb 100644
  
  	qdf_try_allowing_sleep(timer->type);
  
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/qdf_nbuf.c b/qca-wifi-host-cmn/qdf/linux/src/qdf_nbuf.c
+index 3727f79..3c424c4 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/qdf_nbuf.c
++++ b/qca-wifi-host-cmn/qdf/linux/src/qdf_nbuf.c
+@@ -22,6 +22,10 @@
+  * QCA driver framework(QDF) network buffer management APIs
+  */
+ 
++#include <linux/version.h>
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
++#include <linux/skbuff_ref.h>	/* skb_frag_ref() moved here in 6.10 */
++#endif
+ #include <linux/hashtable.h>
+ #include <linux/kernel.h>
+ #include <linux/version.h>
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c b/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
+index 83f8e8b..20bfb1c 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
++++ b/qca-wifi-host-cmn/qdf/linux/src/qdf_threads.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ /* Include Files */
++#include <linux/slab.h>
+ #include <qdf_threads.h>
+ #include <qdf_types.h>
+ #include <qdf_trace.h>
+@@ -146,14 +147,44 @@ qdf_export_symbol(qdf_create_thread);
+ 
+ static uint16_t qdf_thread_id;
+ 
++/*
++ * junkyard (lynx): kthread_create() wants int (*)(void *), qdf_thread_func is
++ * QDF_STATUS (*)(void *). The old cast trips -Wcast-function-type-strict, and
++ * under the GKI's kCFI the indirect call through the mismatched type would
++ * trap at runtime, so call the qdf function from a correctly typed trampoline.
++ * The trampoline frees its argument; if the thread is stopped before it ever
++ * runs, kthread() never calls it and the small allocation is leaked.
++ */
++struct qdf_thread_tramp {
++	qdf_thread_func callback;
++	void *context;
++};
++
++static int qdf_thread_trampoline(void *arg)
++{
++	struct qdf_thread_tramp tramp = *(struct qdf_thread_tramp *)arg;
++
++	kfree(arg);
++	return (int)tramp.callback(tramp.context);
++}
++
+ qdf_thread_t *qdf_thread_run(qdf_thread_func callback, void *context)
+ {
+ 	struct task_struct *thread;
++	struct qdf_thread_tramp *tramp;
+ 
+-	thread = kthread_create((qdf_thread_os_func)callback, context,
++	tramp = kmalloc(sizeof(*tramp), GFP_KERNEL);
++	if (!tramp)
++		return NULL;
++	tramp->callback = callback;
++	tramp->context = context;
++
++	thread = kthread_create(qdf_thread_trampoline, tramp,
+ 				"qdf %u", qdf_thread_id++);
+-	if (IS_ERR(thread))
++	if (IS_ERR(thread)) {
++		kfree(tramp);
+ 		return NULL;
++	}
+ 
+ 	get_task_struct(thread);
+ 	wake_up_process(thread);
 diff --git a/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c b/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c
 index c07a974..8f33c80 100644
 --- a/qca-wifi-host-cmn/umac/wifi_pos/src/wifi_pos_main.c
@@ -163,6 +308,51 @@ index ff19de2..9ab4dcd 100644
  			wake_lock_name,
  			wlan_diag_event.name_len+1);
  
+diff --git a/qca-wifi-host-cmn/utils/pktlog/linux_ac.c b/qca-wifi-host-cmn/utils/pktlog/linux_ac.c
+index bc052e6..07164f5 100644
+--- a/qca-wifi-host-cmn/utils/pktlog/linux_ac.c
++++ b/qca-wifi-host-cmn/utils/pktlog/linux_ac.c
+@@ -204,8 +204,13 @@ static void pktlog_cleanup(struct ath_pktlog_info *pl_info)
+ 
+ /* sysctl procfs handler to enable pktlog */
+ static int
+-qdf_sysctl_decl(ath_sysctl_pktlog_enable, ctl, write, filp, buffer, lenp, ppos)
++qdf_sysctl_decl(ath_sysctl_pktlog_enable, ctl_in, write, filp, buffer, lenp, ppos)
+ {
++	/*
++	 * junkyard (lynx): the table is const since 6.11; point a private copy
++	 * at the local value instead of retargeting the registered entry.
++	 */
++	struct ctl_table ctl_copy = *ctl_in, *ctl = &ctl_copy;
+ 	int ret, enable;
+ 	ol_ath_generic_softc_handle scn;
+ 	struct pktlog_dev_t *pl_dev;
+@@ -267,8 +272,13 @@ static int get_pktlog_bufsize(struct pktlog_dev_t *pl_dev)
+ 
+ /* sysctl procfs handler to set/get pktlog size */
+ static int
+-qdf_sysctl_decl(ath_sysctl_pktlog_size, ctl, write, filp, buffer, lenp, ppos)
++qdf_sysctl_decl(ath_sysctl_pktlog_size, ctl_in, write, filp, buffer, lenp, ppos)
+ {
++	/*
++	 * junkyard (lynx): the table is const since 6.11; point a private copy
++	 * at the local value instead of retargeting the registered entry.
++	 */
++	struct ctl_table ctl_copy = *ctl_in, *ctl = &ctl_copy;
+ 	int ret, size;
+ 	ol_ath_generic_softc_handle scn;
+ 	struct pktlog_dev_t *pl_dev;
+diff --git a/qcacld-3.0/Kbuild b/qcacld-3.0/Kbuild
+index 50d95db..4a4727b 100644
+--- a/qcacld-3.0/Kbuild
++++ b/qcacld-3.0/Kbuild
+@@ -4502,3 +4502,6 @@ OBJS_DIRS += $(dir $(OBJS)) \
+ CLEAN_DIRS := $(addsuffix *.o,$(sort $(OBJS_DIRS))) \
+ 	      $(addsuffix .*.o.cmd,$(sort $(OBJS_DIRS)))
+ clean-files := $(CLEAN_DIRS)
++# junkyard (lynx): clang warnings that are new since 6.1 and fatal under CONFIG_WERROR
++ccflags-y += -Wno-error=unused-but-set-parameter -Wno-error=missing-prototypes \
++	-Wno-error=implicit-enum-enum-cast
 diff --git a/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c b/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c
 index 7a77ab6..be379c4 100644
 --- a/qcacld-3.0/components/ipa/core/src/wlan_ipa_core.c
@@ -225,8 +415,100 @@ index 3431050..a427dbc 100644
  			ipv6_hdr_name, IPA_RESOURCE_NAME_MAX);
  		tx_intf.num_props++;
  	}
+diff --git a/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c b/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c
+index 0fd24c2..de45cf0 100644
+--- a/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c
++++ b/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c
+@@ -779,11 +779,21 @@ static int dp_rx_tm_thread_napi_poll(struct napi_struct *napi, int budget)
+ static void dp_rx_tm_thread_napi_init(struct dp_rx_thread *rx_thread)
+ {
+ 	/* Todo - optimize to use only one dummy netdev for all thread napis */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
++	/* 6.10 removed init_dummy_netdev(); the dummy netdev is allocated */
++	rx_thread->netdev = alloc_netdev_dummy(0);
++	if (!rx_thread->netdev) {
++		dp_err("failed to allocate dummy netdev for rx thread NAPI");
++		return;
++	}
++	netif_napi_add_weight(rx_thread->netdev, &rx_thread->napi,
++			      dp_rx_tm_thread_napi_poll, 64);
++#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
+ 	init_dummy_netdev(&rx_thread->netdev);
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
+ 	netif_napi_add_weight(&rx_thread->netdev, &rx_thread->napi,
+ 			      dp_rx_tm_thread_napi_poll, 64);
+ #else
++	init_dummy_netdev(&rx_thread->netdev);
+ 	netif_napi_add(&rx_thread->netdev, &rx_thread->napi,
+ 		       dp_rx_tm_thread_napi_poll, 64);
+ #endif
+@@ -798,7 +808,15 @@ static void dp_rx_tm_thread_napi_init(struct dp_rx_thread *rx_thread)
+  */
+ static void dp_rx_tm_thread_napi_deinit(struct dp_rx_thread *rx_thread)
+ {
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
++	if (!rx_thread->netdev)
++		return;
++	netif_napi_del(&rx_thread->napi);
++	free_netdev(rx_thread->netdev);
++	rx_thread->netdev = NULL;
++#else
+ 	netif_napi_del(&rx_thread->napi);
++#endif
+ }
+ 
+ /*
+diff --git a/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.h b/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.h
+index f628a91..9a214d2 100644
+--- a/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.h
++++ b/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.h
+@@ -124,7 +124,11 @@ struct dp_rx_thread {
+ 	struct dp_rx_tm_handle_cmn *rtm_handle_cmn;
+ 	struct napi_struct napi;
+ 	qdf_wait_queue_head_t wait_q;
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
++	struct net_device *netdev;	/* 6.10: alloc_netdev_dummy() */
++#else
+ 	struct net_device netdev;
++#endif
+ };
+ 
+ /**
+diff --git a/qcacld-3.0/core/dp/txrx3.0/dp_txrx.h b/qcacld-3.0/core/dp/txrx3.0/dp_txrx.h
+index a2cb76b..65cd9f2 100644
+--- a/qcacld-3.0/core/dp/txrx3.0/dp_txrx.h
++++ b/qcacld-3.0/core/dp/txrx3.0/dp_txrx.h
+@@ -20,6 +20,7 @@
+ #ifndef _DP_TXRX_H
+ #define _DP_TXRX_H
+ 
++#include <net/gro.h>
+ #include <wlan_objmgr_psoc_obj.h>
+ #include <dp_rx_thread.h>
+ #include <qdf_trace.h>
+@@ -68,11 +69,20 @@ static inline void dp_rx_napi_gro_flush(struct napi_struct *napi,
+ 		if (flush_code != DP_RX_GRO_LOW_TPUT_FLUSH)
+ 			napi_gro_flush(napi, false);
+ 
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))
++		/* 6.15: GRO_NORMAL batching state lives in napi->gro */
++		if (napi->gro.rx_count) {
++			netif_receive_skb_list(&napi->gro.rx_list);
++			qdf_init_list_head(&napi->gro.rx_list);
++			napi->gro.rx_count = 0;
++		}
++#else
+ 		if (napi->rx_count) {
+ 			netif_receive_skb_list(&napi->rx_list);
+ 			qdf_init_list_head(&napi->rx_list);
+ 			napi->rx_count = 0;
+ 		}
++#endif
+ 	}
+ }
+ #else
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
-index 62cf368..c1be4a5 100644
+index 62cf368..55a7677 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
 +++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
 @@ -7003,7 +7003,7 @@ __wlan_hdd_cfg80211_get_wifi_info(struct wiphy *wiphy,
@@ -238,6 +520,234 @@ index 62cf368..c1be4a5 100644
  			sizeof(driver_version));
  		skb_len += strlen(driver_version) + 1;
  		count++;
+@@ -24500,40 +24500,192 @@ bool wlan_hdd_cfg80211_rx_control_port(struct net_device *dev,
+  * @key_mgmt_set_pmk = Set pmk key management
+  * @update_connect_params = Update connect params
+  */
++/*
++ * junkyard (lynx): Linux 6.18 cfg80211_ops adapters.
++ *
++ * Between 6.1 and 6.18 cfg80211 moved the station and key ops from
++ * struct net_device to struct wireless_dev (6.18), passed change_beacon a
++ * struct cfg80211_ap_update (6.7), added radio_idx to the wiphy-wide ops
++ * (6.17), link_id to get_tx_power (6.14), rx_addr to remain_on_channel (6.13)
++ * and a net_device to set_monitor_channel (6.10). Rather than rewrite every
++ * handler (and the version-guarded chains inside them), each op below maps
++ * the 6.18 signature onto the existing handler:
++ *
++ *  - wireless_dev -> wdev->netdev. Under 6.1 these ops were only reachable
++ *    for wdevs with a netdev, so a netdev-less wdev gets -EOPNOTSUPP.
++ *  - radio_idx / link_id are dropped: this driver registers a single radio
++ *    and no MLO links.
++ *  - a non-NULL rx_addr is refused, since the handler cannot filter on it.
++ */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0))
++static int jy618_wlan_hdd_change_station(struct wiphy *wiphy, struct wireless_dev *wdev, const u8 *mac, struct station_parameters *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_change_station(wiphy, wdev->netdev, mac, params);
++}
++
++static int jy618_wlan_hdd_cfg80211_change_beacon(struct wiphy *wiphy, struct net_device *dev, struct cfg80211_ap_update *info)
++{
++	return wlan_hdd_cfg80211_change_beacon(wiphy, dev, &info->beacon);
++}
++
++static int jy618_wlan_hdd_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id, u8 key_index, bool pairwise, const u8 *mac_addr, struct key_params *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_add_key(wiphy, wdev->netdev, link_id, key_index, pairwise, mac_addr, params);
++}
++
++static int jy618_wlan_hdd_cfg80211_get_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id, u8 key_index, bool pairwise, const u8 *mac_addr, void *cookie, void (*callback)(void *cookie, struct key_params *))
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_get_key(wiphy, wdev->netdev, link_id, key_index, pairwise, mac_addr, cookie, callback);
++}
++
++static int jy618_wlan_hdd_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id, u8 key_index, bool pairwise, const u8 *mac_addr)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_del_key(wiphy, wdev->netdev, link_id, key_index, pairwise, mac_addr);
++}
++
++static int jy618_wlan_hdd_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed)
++{
++	return wlan_hdd_cfg80211_set_wiphy_params(wiphy, changed);
++}
++
++static int jy618_wlan_hdd_cfg80211_set_txpower(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx, enum nl80211_tx_power_setting type, int mbm)
++{
++	return wlan_hdd_cfg80211_set_txpower(wiphy, wdev, type, mbm);
++}
++
++static int jy618_wlan_hdd_cfg80211_get_txpower(struct wiphy *wiphy, struct wireless_dev *wdev, int radio_idx, unsigned int link_id, int *dbm)
++{
++	return wlan_hdd_cfg80211_get_txpower(wiphy, wdev, dbm);
++}
++
++static int jy618_wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy, struct wireless_dev *wdev, struct ieee80211_channel *chan, unsigned int duration, u64 *cookie, const u8 *rx_addr)
++{
++	/* rx_addr filtering (6.13) is not implemented by this driver */
++	if (rx_addr)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_remain_on_channel(wiphy, wdev, chan, duration, cookie);
++}
++
++static int jy618_wlan_hdd_set_default_mgmt_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id, u8 key_index)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_set_default_mgmt_key(wiphy, wdev->netdev, link_id, key_index);
++}
++
++static int jy618_wlan_hdd_cfg80211_set_default_beacon_key(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id, u8 key_index)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_set_default_beacon_key(wiphy, wdev->netdev, link_id, key_index);
++}
++
++static int jy618_wlan_hdd_cfg80211_dump_station(struct wiphy *wiphy, struct wireless_dev *wdev, int idx, u8 *mac, struct station_info *sinfo)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_dump_station(wiphy, wdev->netdev, idx, mac, sinfo);
++}
++
++static int jy618_wlan_hdd_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev, const u8 *mac, struct station_info *sinfo)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_get_station(wiphy, wdev->netdev, mac, sinfo);
++}
++
++static int jy618_wlan_hdd_cfg80211_del_station(struct wiphy *wiphy, struct wireless_dev *wdev, struct station_del_parameters *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_del_station(wiphy, wdev->netdev, params);
++}
++
++static int jy618_wlan_hdd_cfg80211_add_station(struct wiphy *wiphy, struct wireless_dev *wdev, const u8 *mac, struct station_parameters *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++	return wlan_hdd_cfg80211_add_station(wiphy, wdev->netdev, mac, params);
++}
++
++static int jy618_wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy, struct net_device *dev, struct cfg80211_chan_def *chandef)
++{
++	return wlan_hdd_cfg80211_set_mon_ch(wiphy, chandef);
++}
++
++static int jy618_wlan_hdd_cfg80211_set_chainmask(struct wiphy *wiphy, int radio_idx, u32 tx_ant, u32 rx_ant)
++{
++	return wlan_hdd_cfg80211_set_chainmask(wiphy, tx_ant, rx_ant);
++}
++
++static int jy618_wlan_hdd_cfg80211_get_chainmask(struct wiphy *wiphy, int radio_idx, u32 *tx_ant, u32 *rx_ant)
++{
++	return wlan_hdd_cfg80211_get_chainmask(wiphy, tx_ant, rx_ant);
++}
++
++#else
++#define jy618_wlan_hdd_change_station wlan_hdd_change_station
++#define jy618_wlan_hdd_cfg80211_change_beacon wlan_hdd_cfg80211_change_beacon
++#define jy618_wlan_hdd_cfg80211_add_key wlan_hdd_cfg80211_add_key
++#define jy618_wlan_hdd_cfg80211_get_key wlan_hdd_cfg80211_get_key
++#define jy618_wlan_hdd_cfg80211_del_key wlan_hdd_cfg80211_del_key
++#define jy618_wlan_hdd_cfg80211_set_wiphy_params wlan_hdd_cfg80211_set_wiphy_params
++#define jy618_wlan_hdd_cfg80211_set_txpower wlan_hdd_cfg80211_set_txpower
++#define jy618_wlan_hdd_cfg80211_get_txpower wlan_hdd_cfg80211_get_txpower
++#define jy618_wlan_hdd_cfg80211_remain_on_channel wlan_hdd_cfg80211_remain_on_channel
++#define jy618_wlan_hdd_set_default_mgmt_key wlan_hdd_set_default_mgmt_key
++#define jy618_wlan_hdd_cfg80211_set_default_beacon_key wlan_hdd_cfg80211_set_default_beacon_key
++#define jy618_wlan_hdd_cfg80211_dump_station wlan_hdd_cfg80211_dump_station
++#define jy618_wlan_hdd_cfg80211_get_station wlan_hdd_cfg80211_get_station
++#define jy618_wlan_hdd_cfg80211_del_station wlan_hdd_cfg80211_del_station
++#define jy618_wlan_hdd_cfg80211_add_station wlan_hdd_cfg80211_add_station
++#define jy618_wlan_hdd_cfg80211_set_mon_ch wlan_hdd_cfg80211_set_mon_ch
++#define jy618_wlan_hdd_cfg80211_set_chainmask wlan_hdd_cfg80211_set_chainmask
++#define jy618_wlan_hdd_cfg80211_get_chainmask wlan_hdd_cfg80211_get_chainmask
++#endif
++
+ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+ 	.add_virtual_intf = wlan_hdd_add_virtual_intf,
+ 	.del_virtual_intf = wlan_hdd_del_virtual_intf,
+ 	.change_virtual_intf = wlan_hdd_cfg80211_change_iface,
+-	.change_station = wlan_hdd_change_station,
++	.change_station = jy618_wlan_hdd_change_station,
+ 	.start_ap = wlan_hdd_cfg80211_start_ap,
+-	.change_beacon = wlan_hdd_cfg80211_change_beacon,
++	.change_beacon = jy618_wlan_hdd_cfg80211_change_beacon,
+ 	.stop_ap = wlan_hdd_cfg80211_stop_ap,
+ 	.change_bss = wlan_hdd_cfg80211_change_bss,
+-	.add_key = wlan_hdd_cfg80211_add_key,
+-	.get_key = wlan_hdd_cfg80211_get_key,
+-	.del_key = wlan_hdd_cfg80211_del_key,
++	.add_key = jy618_wlan_hdd_cfg80211_add_key,
++	.get_key = jy618_wlan_hdd_cfg80211_get_key,
++	.del_key = jy618_wlan_hdd_cfg80211_del_key,
+ 	.set_default_key = wlan_hdd_cfg80211_set_default_key,
+ 	.scan = wlan_hdd_cfg80211_scan,
+ 	.connect = wlan_hdd_cfg80211_connect,
+ 	.disconnect = wlan_hdd_cfg80211_disconnect,
+-	.set_wiphy_params = wlan_hdd_cfg80211_set_wiphy_params,
+-	.set_tx_power = wlan_hdd_cfg80211_set_txpower,
+-	.get_tx_power = wlan_hdd_cfg80211_get_txpower,
+-	.remain_on_channel = wlan_hdd_cfg80211_remain_on_channel,
++	.set_wiphy_params = jy618_wlan_hdd_cfg80211_set_wiphy_params,
++	.set_tx_power = jy618_wlan_hdd_cfg80211_set_txpower,
++	.get_tx_power = jy618_wlan_hdd_cfg80211_get_txpower,
++	.remain_on_channel = jy618_wlan_hdd_cfg80211_remain_on_channel,
+ 	.cancel_remain_on_channel = wlan_hdd_cfg80211_cancel_remain_on_channel,
+ 	.mgmt_tx = wlan_hdd_mgmt_tx,
+ 	.mgmt_tx_cancel_wait = wlan_hdd_cfg80211_mgmt_tx_cancel_wait,
+-	.set_default_mgmt_key = wlan_hdd_set_default_mgmt_key,
++	.set_default_mgmt_key = jy618_wlan_hdd_set_default_mgmt_key,
+ #if defined (CFG80211_BIGTK_CONFIGURATION_SUPPORT) || \
+ 	    (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0))
+-	.set_default_beacon_key = wlan_hdd_cfg80211_set_default_beacon_key,
++	.set_default_beacon_key = jy618_wlan_hdd_cfg80211_set_default_beacon_key,
+ #endif
+ 	.set_txq_params = wlan_hdd_set_txq_params,
+-	.dump_station = wlan_hdd_cfg80211_dump_station,
+-	.get_station = wlan_hdd_cfg80211_get_station,
++	.dump_station = jy618_wlan_hdd_cfg80211_dump_station,
++	.get_station = jy618_wlan_hdd_cfg80211_get_station,
+ 	.set_power_mgmt = wlan_hdd_cfg80211_set_power_mgmt,
+-	.del_station = wlan_hdd_cfg80211_del_station,
+-	.add_station = wlan_hdd_cfg80211_add_station,
++	.del_station = jy618_wlan_hdd_cfg80211_del_station,
++	.add_station = jy618_wlan_hdd_cfg80211_add_station,
+ 	.set_pmksa = wlan_hdd_cfg80211_set_pmksa,
+ 	.del_pmksa = wlan_hdd_cfg80211_del_pmksa,
+ 	.flush_pmksa = wlan_hdd_cfg80211_flush_pmksa,
+@@ -24569,7 +24721,7 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+ 	.channel_switch = wlan_hdd_cfg80211_channel_switch,
+ #endif
+ #ifdef FEATURE_MONITOR_MODE_SUPPORT
+-	.set_monitor_channel = wlan_hdd_cfg80211_set_mon_ch,
++	.set_monitor_channel = jy618_wlan_hdd_cfg80211_set_mon_ch,
+ #endif
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) || \
+ 	defined(CFG80211_ABORT_SCAN)
+@@ -24592,8 +24744,8 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+ 	.del_nan_func = wlan_hdd_cfg80211_del_nan_func,
+ 	.nan_change_conf = wlan_hdd_cfg80211_nan_change_conf,
+ #endif
+-	.set_antenna = wlan_hdd_cfg80211_set_chainmask,
+-	.get_antenna = wlan_hdd_cfg80211_get_chainmask,
++	.set_antenna = jy618_wlan_hdd_cfg80211_set_chainmask,
++	.get_antenna = jy618_wlan_hdd_cfg80211_get_chainmask,
+ 	.get_channel = wlan_hdd_cfg80211_get_channel,
+ 	.set_bitrate_mask = wlan_hdd_cfg80211_set_bitrate_mask,
+ 	.tx_control_port = wlan_hdd_cfg80211_tx_control_port,
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c
 index 1a4af18..2d78432 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_cm_connect.c
@@ -299,9 +809,27 @@ index f5fda9e..702bf5b 100644
  		ret = scnprintf(buf + length, buf_avail_len - length,
  				"%u. %s %s and scope is: %s\n",
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c b/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c
-index 7a68849..b3bc8f7 100644
+index 7a68849..e7bfa6f 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c
 +++ b/qcacld-3.0/core/hdd/src/wlan_hdd_hostapd.c
+@@ -2548,7 +2548,7 @@ QDF_STATUS hdd_hostapd_sap_event_cb(struct sap_event *sap_event,
+ 			sta_info->filled |= STATION_INFO_ASSOC_REQ_IES;
+ #endif
+ 			if (notify_new_sta)
+-				cfg80211_new_sta(dev,
++				cfg80211_new_sta(dev->ieee80211_ptr, /* 6.18: takes the wdev */
+ 						 (const u8 *)&event->
+ 						 staMac.bytes[0],
+ 						 sta_info, GFP_KERNEL);
+@@ -2705,7 +2705,7 @@ QDF_STATUS hdd_hostapd_sap_event_cb(struct sap_event *sap_event,
+ 		 */
+ 		if ((adapter->device_mode != QDF_P2P_GO_MODE) ||
+ 		     (!cds_is_driver_recovering())) {
+-			cfg80211_del_sta(dev,
++			cfg80211_del_sta(dev->ieee80211_ptr, /* 6.18: takes the wdev */
+ 					 (const u8 *)&sap_event->sapevt.
+ 					 sapStationDisassocCompleteEvent.staMac.
+ 					 bytes[0], GFP_KERNEL);
 @@ -4141,7 +4141,7 @@ struct hdd_adapter *hdd_wlan_create_ap_dev(struct hdd_context *hdd_ctx,
  		(int)policy_mgr_get_concurrency_mode(hdd_ctx->psoc));
  
@@ -333,7 +861,7 @@ index 141adbf..2e9fccc 100644
  		  (fw_version & 0xf0000000) >> 28,
  		  (fw_version & 0xf000000) >> 24,
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
-index ff6a724..5e53373 100644
+index ff6a724..b40c2c1 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
 +++ b/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
 @@ -6254,7 +6254,7 @@ hdd_alloc_station_adapter(struct hdd_context *hdd_ctx, tSirMacAddr mac_addr,
@@ -345,6 +873,15 @@ index ff6a724..5e53373 100644
  
  	qdf_net_update_net_device_dev_addr(dev, mac_addr, sizeof(tSirMacAddr));
  	qdf_mem_copy(adapter->mac_addr.bytes, mac_addr, sizeof(tSirMacAddr));
+@@ -9022,7 +9022,7 @@ static void hdd_delete_sta(struct hdd_adapter *adapter)
+ 
+ 	hdd_debug("[SSR] send restart supplicant");
+ 	/* event supplicant to restart */
+-	cfg80211_del_sta(adapter->dev,
++	cfg80211_del_sta(adapter->dev->ieee80211_ptr, /* 6.18: takes the wdev */
+ 			 (const u8 *)&bcast_mac.bytes[0],
+ 			 GFP_KERNEL);
+ }
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c b/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c
 index 82bd622..316f243 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_oemdata.c
@@ -372,9 +909,18 @@ index 07e95ae..8725a7c 100644
  	if (dest_buf[source_buf_size - 1] == '\n')
  		dest_buf[source_buf_size - 1] = '\0';
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
-index 63f6473..34f759d 100644
+index 63f6473..4fca5d8 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
 +++ b/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -2825,7 +2825,7 @@ static void wlan_hdd_update_txq_timestamp(struct net_device *dev)
+ 		 */
+ 		if (!hdd_netdev_queue_is_locked(txq)) {
+ 			if (__netif_tx_trylock(txq)) {
+-				txq_trans_update(txq);
++				txq_trans_update(dev, txq); /* 6.18: takes the netdev */
+ 				__netif_tx_unlock(txq);
+ 			}
+ 		}
 @@ -3346,7 +3346,7 @@ void hdd_send_rps_ind(struct hdd_adapter *adapter)
  			  i, rps_data.cpu_map_list[i]);
  	}

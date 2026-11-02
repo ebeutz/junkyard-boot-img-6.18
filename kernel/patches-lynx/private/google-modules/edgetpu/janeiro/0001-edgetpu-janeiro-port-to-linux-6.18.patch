@@ -2,15 +2,18 @@ From: junkyard
 Subject: [PATCH] edgetpu/janeiro: port to Linux 6.18 (lynx)
 
 Port private/google-modules/edgetpu/janeiro to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
-Mechanical API migrations, no intended behaviour change:
+API migrations. Mostly mechanical; entries that change behaviour say so:
 
   - platform_driver.remove returns void (6.11)
   - MODULE_IMPORT_NS() takes a string literal (6.13)
   - iommu_domain_alloc(bus) replaced by iommu_paging_domain_alloc(dev) (6.11)
   - iommu_attach_device_pasid() takes an attach handle (6.11)
   - eventfd_signal() takes only the context (6.8)
+  - struct fd: fd_file() accessor (6.12); no_llseek removed (6.12)
+  - IOMMU fault reporting moved to the pixel_iommu registry samsung_iommu.ko exports
+  - hrtimer_setup(); explicit <linux/vmalloc.h>
 
-Files: drivers/edgetpu/edgetpu-dmabuf.c, drivers/edgetpu/edgetpu-domain-pool.c, drivers/edgetpu/edgetpu-mobile-platform.c, drivers/edgetpu/janeiro-platform.c
+Files: drivers/edgetpu/edgetpu-device-group.c, drivers/edgetpu/edgetpu-dmabuf.c, drivers/edgetpu/edgetpu-domain-pool.c, drivers/edgetpu/edgetpu-external.c, drivers/edgetpu/edgetpu-fs.c, drivers/edgetpu/edgetpu-google-iommu.c, drivers/edgetpu/edgetpu-mobile-platform.c, drivers/edgetpu/edgetpu-telemetry.c, drivers/edgetpu/janeiro-platform.c, drivers/edgetpu/mobile-firmware.c
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
@@ -86,6 +89,121 @@ index d8b0e49..bdb2faf 100644
  	if (ret) {
  		ida_free(&pool->pasid_pool, pasid);
  		return ret;
+diff --git a/drivers/edgetpu/edgetpu-external.c b/drivers/edgetpu/edgetpu-external.c
+index c983d3c..127f23b 100644
+--- a/drivers/edgetpu/edgetpu-external.c
++++ b/drivers/edgetpu/edgetpu-external.c
+@@ -61,7 +61,7 @@ static int edgetpu_external_mailbox_alloc(struct device *edgetpu_dev,
+ 	struct edgetpu_external_mailbox_req req;
+ 	int ret = 0;
+ 	struct fd f = fdget(client_info->tpu_fd);
+-	struct file *file = f.file;
++	struct file *file = fd_file(f);
+ 
+ 	if (!file)
+ 		return -EBADF;
+@@ -126,7 +126,7 @@ static int edgetpu_external_mailbox_free(struct device *edgetpu_dev,
+ 	struct edgetpu_client *client;
+ 	int ret = 0;
+ 	struct fd f = fdget(client_info->tpu_fd);
+-	struct file *file = f.file;
++	struct file *file = fd_file(f);
+ 
+ 	if (!file)
+ 		return -EBADF;
+diff --git a/drivers/edgetpu/edgetpu-fs.c b/drivers/edgetpu/edgetpu-fs.c
+index 2528d12..9cbb342 100644
+--- a/drivers/edgetpu/edgetpu-fs.c
++++ b/drivers/edgetpu/edgetpu-fs.c
+@@ -223,7 +223,7 @@ static int edgetpu_ioctl_join_group(struct edgetpu_client *client,
+ 				    u64 leader_fd)
+ {
+ 	struct fd f = fdget(leader_fd);
+-	struct file *file = f.file;
++	struct file *file = fd_file(f);
+ 	struct edgetpu_client *leader;
+ 	int ret;
+ 	struct edgetpu_device_group *group;
+@@ -1154,7 +1154,6 @@ static const struct attribute_group edgetpu_attr_group = {
+ 
+ const struct file_operations edgetpu_fops = {
+ 	.owner = THIS_MODULE,
+-	.llseek = no_llseek,
+ 	.mmap = edgetpu_fs_mmap,
+ 	.open = edgetpu_fs_open,
+ 	.release = edgetpu_fs_release,
+diff --git a/drivers/edgetpu/edgetpu-google-iommu.c b/drivers/edgetpu/edgetpu-google-iommu.c
+index 9e8f900..d31f650 100644
+--- a/drivers/edgetpu/edgetpu-google-iommu.c
++++ b/drivers/edgetpu/edgetpu-google-iommu.c
+@@ -14,6 +14,8 @@
+ #include <linux/slab.h>
+ #include <linux/types.h>
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++
+ #include "edgetpu-config.h"
+ #include "edgetpu-domain-pool.h"
+ #include "edgetpu-internal.h"
+@@ -105,27 +107,21 @@ get_domain_by_context_id(struct edgetpu_dev *etdev,
+ 	return domain;
+ }
+ 
+-static int edgetpu_iommu_dev_fault_handler(struct iommu_fault *fault,
+-					   void *token)
++/*
++ * 6.8 removed iommu_register_device_fault_handler(); gs201's SysMMU driver
++ * (samsung_iommu.ko) reports unrecoverable faults through the pixel_iommu
++ * registry instead (see pixel-iommu-fault.h). Page requests are not reported
++ * that way, so only the unrecoverable branch survives.
++ */
++static int edgetpu_iommu_dev_fault_handler(struct device *fault_dev, unsigned long iova,
++					   u32 pasid, int fault_flags, void *token)
+ {
+ 	struct edgetpu_dev *etdev = (struct edgetpu_dev *)token;
+ 
+-	if (fault->type == IOMMU_FAULT_DMA_UNRECOV) {
+-		etdev_warn(etdev, "Unrecoverable IOMMU fault!\n");
+-		etdev_warn(etdev, "Reason = %08X\n", fault->event.reason);
+-		etdev_warn(etdev, "flags = %08X\n", fault->event.flags);
+-		etdev_warn(etdev, "pasid = %08X\n", fault->event.pasid);
+-		etdev_warn(etdev, "perms = %08X\n", fault->event.perm);
+-		etdev_warn(etdev, "addr = %llX\n", fault->event.addr);
+-		etdev_warn(etdev, "fetch_addr = %llX\n", fault->event.fetch_addr);
+-	} else if (fault->type == IOMMU_FAULT_PAGE_REQ) {
+-		etdev_dbg(etdev, "IOMMU page request fault!\n");
+-		etdev_dbg(etdev, "flags = %08X\n", fault->prm.flags);
+-		etdev_dbg(etdev, "pasid = %08X\n", fault->prm.pasid);
+-		etdev_dbg(etdev, "grpid = %08X\n", fault->prm.grpid);
+-		etdev_dbg(etdev, "perms = %08X\n", fault->prm.perm);
+-		etdev_dbg(etdev, "addr = %llX\n", fault->prm.addr);
+-	}
++	etdev_warn(etdev, "Unrecoverable IOMMU fault!\n");
++	etdev_warn(etdev, "flags = %08X\n", fault_flags);
++	etdev_warn(etdev, "pasid = %08X\n", pasid);
++	etdev_warn(etdev, "addr = %lX\n", iova);
+ 	// Tell the IOMMU driver to carry on
+ 	return -EAGAIN;
+ }
+@@ -133,14 +129,15 @@ static int edgetpu_iommu_dev_fault_handler(struct iommu_fault *fault,
+ static int edgetpu_register_iommu_device_fault_handler(struct edgetpu_dev *etdev)
+ {
+ 	etdev_dbg(etdev, "Registering IOMMU device fault handler\n");
+-	return iommu_register_device_fault_handler(etdev->dev, edgetpu_iommu_dev_fault_handler,
+-						   etdev);
++	return pixel_iommu_register_fault_handler(etdev->dev, edgetpu_iommu_dev_fault_handler,
++						  etdev);
+ }
+ 
+ static int edgetpu_unregister_iommu_device_fault_handler(struct edgetpu_dev *etdev)
+ {
+ 	etdev_dbg(etdev, "Unregistering IOMMU device fault handler\n");
+-	return iommu_unregister_device_fault_handler(etdev->dev);
++	pixel_iommu_unregister_fault_handler(etdev->dev);
++	return 0;
+ }
+ 
+ /* A callback for idr_for_each to release the domains */
 diff --git a/drivers/edgetpu/edgetpu-mobile-platform.c b/drivers/edgetpu/edgetpu-mobile-platform.c
 index 979c109..29eadbc 100644
 --- a/drivers/edgetpu/edgetpu-mobile-platform.c
@@ -135,3 +253,15 @@ index a618a18..0095391 100644
  }
  
  #if IS_ENABLED(CONFIG_PM_SLEEP)
+diff --git a/drivers/edgetpu/mobile-firmware.c b/drivers/edgetpu/mobile-firmware.c
+index c2d8477..76ef672 100644
+--- a/drivers/edgetpu/mobile-firmware.c
++++ b/drivers/edgetpu/mobile-firmware.c
+@@ -8,6 +8,7 @@
+ #include <linux/device.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/firmware.h>
++#include <linux/vmalloc.h>
+ #include <linux/gsa/gsa_tpu.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>

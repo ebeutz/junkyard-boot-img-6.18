@@ -13,8 +13,10 @@ Mechanical API migrations, no intended behaviour change:
   - DRM: fb_create() takes the format info, get_format_info(u32, u64) (6.17)
   - DRM: drm_dbg_printer(), struct_mutex and drm_driver.date removed
   - drm_info()/drm_warn() now require a real struct drm_device
+  - panel: drm_bridge attach takes the encoder; atomic_* callbacks take drm_atomic_state (6.16)
+  - panel: include <linux/debugfs.h> explicitly
 
-Files: dp_audio/dp_dma.c, exynos_drm_debug.c, exynos_drm_decon.c, exynos_drm_dp.c, exynos_drm_dpp.c, exynos_drm_drv.c, exynos_drm_dsim.c, exynos_drm_fb.c, exynos_drm_gem.c, exynos_drm_tui.c, exynos_drm_writeback.c
+Files: dp_audio/dp_dma.c, exynos_drm_debug.c, exynos_drm_decon.c, exynos_drm_dp.c, exynos_drm_dpp.c, exynos_drm_drv.c, exynos_drm_dsim.c, exynos_drm_fb.c, exynos_drm_gem.c, exynos_drm_tui.c, exynos_drm_writeback.c, panel/panel-samsung-drv.c
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
@@ -444,3 +446,59 @@ index b2d2a9e..f202f07 100644
  }
  
  struct platform_driver writeback_driver = {
+diff --git a/panel/panel-samsung-drv.c b/panel/panel-samsung-drv.c
+index e08a4c5..18ac2c2 100644
+--- a/panel/panel-samsung-drv.c
++++ b/panel/panel-samsung-drv.c
+@@ -9,6 +9,7 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/debugfs.h>
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -4114,6 +4115,7 @@ static void exynos_panel_node_attach(struct exynos_drm_connector *exynos_connect
+ }
+ 
+ static int exynos_panel_bridge_attach(struct drm_bridge *bridge,
++				      struct drm_encoder *encoder,
+ 				      enum drm_bridge_attach_flags flags)
+ {
+ 	struct drm_device *dev = bridge->dev;
+@@ -4158,7 +4160,7 @@ static void exynos_panel_bridge_detach(struct drm_bridge *bridge)
+ }
+ 
+ static void exynos_panel_bridge_enable(struct drm_bridge *bridge,
+-				       struct drm_bridge_state *old_bridge_state)
++				       struct drm_atomic_state *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 	struct dsim_device *dsim = host_to_dsi(to_mipi_dsi_device(ctx->dev)->host);
+@@ -4396,7 +4398,7 @@ static int exynos_panel_bridge_atomic_check(struct drm_bridge *bridge,
+ }
+ 
+ static void exynos_panel_bridge_pre_enable(struct drm_bridge *bridge,
+-					   struct drm_bridge_state *old_bridge_state)
++					   struct drm_atomic_state *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 
+@@ -4411,7 +4413,7 @@ static void exynos_panel_bridge_pre_enable(struct drm_bridge *bridge,
+ }
+ 
+ static void exynos_panel_bridge_disable(struct drm_bridge *bridge,
+-					struct drm_bridge_state *old_bridge_state)
++					struct drm_atomic_state *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 	const struct drm_connector_state *conn_state = ctx->exynos_connector.base.state;
+@@ -4475,7 +4477,7 @@ static void exynos_panel_bridge_disable(struct drm_bridge *bridge,
+ }
+ 
+ static void exynos_panel_bridge_post_disable(struct drm_bridge *bridge,
+-					     struct drm_bridge_state *old_bridge_state)
++					     struct drm_atomic_state *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 

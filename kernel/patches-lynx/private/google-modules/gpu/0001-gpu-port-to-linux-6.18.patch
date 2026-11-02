@@ -2,7 +2,7 @@ From: junkyard
 Subject: [PATCH] gpu: port to Linux 6.18 (lynx)
 
 Port private/google-modules/gpu to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
-Mechanical API migrations, no intended behaviour change:
+API migrations. Mostly mechanical; entries that change behaviour say so:
 
   - platform_driver.remove returns void (6.11)
   - del_timer*() renamed timer_delete*() (6.15)
@@ -10,8 +10,11 @@ Mechanical API migrations, no intended behaviour change:
   - drop in-tree-only include paths that -Wmissing-include-dirs now rejects
   - mali: driver-owned movable pages removed (6.17): page migration forced off,
     __SetPageMovable/__ClearPageMovable stubbed (ACK already defaulted it off)
+  - hrtimer_init() + .function replaced by hrtimer_setup() (6.15)
+  - dma_fence_ops.fence_value_str removed
+  - sscd: driver_override applied at registration (6.18, gs_platform_compat.h)
 
-17 files.
+27 files.
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
@@ -186,6 +189,49 @@ index 0b63ac6..0e2b27e 100644
      -I$(src)/tests/include
  
  # Add include path for related GPU modules
+diff --git a/mali_kbase/backend/gpu/mali_kbase_irq_linux.c b/mali_kbase/backend/gpu/mali_kbase_irq_linux.c
+index 2a9030e..df5cb2c 100644
+--- a/mali_kbase/backend/gpu/mali_kbase_irq_linux.c
++++ b/mali_kbase/backend/gpu/mali_kbase_irq_linux.c
+@@ -424,9 +424,7 @@ static int validate_interrupt(struct kbase_device *const kbdev, u32 tag)
+ 			err = -EINVAL;
+ 		} else {
+ 			kbasep_irq_test_data.timeout = 0;
+-			hrtimer_init(&kbasep_irq_test_data.timer, CLOCK_MONOTONIC,
+-				     HRTIMER_MODE_REL);
+-			kbasep_irq_test_data.timer.function = kbasep_test_interrupt_timeout;
++			hrtimer_setup(&kbasep_irq_test_data.timer, kbasep_test_interrupt_timeout, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 			/* trigger interrupt */
+ 			kbase_reg_write32(kbdev, mask_offset, 0x1);
+diff --git a/mali_kbase/backend/gpu/mali_kbase_pm_driver.c b/mali_kbase/backend/gpu/mali_kbase_pm_driver.c
+index f735f45..a39815a 100644
+--- a/mali_kbase/backend/gpu/mali_kbase_pm_driver.c
++++ b/mali_kbase/backend/gpu/mali_kbase_pm_driver.c
+@@ -2665,8 +2665,7 @@ int kbase_pm_state_machine_init(struct kbase_device *kbdev)
+ 
+ 	INIT_WORK(&stt->work, shader_poweroff_timer_stop_callback);
+ 
+-	hrtimer_init(&stt->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	stt->timer.function = shader_tick_timer_callback;
++	hrtimer_setup(&stt->timer, shader_tick_timer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	stt->configured_interval = HR_TIMER_DELAY_NSEC(DEFAULT_PM_GPU_POWEROFF_TICK_NS);
+ 	stt->default_ticks = DEFAULT_PM_POWEROFF_TICK_SHADER;
+ 	stt->configured_ticks = stt->default_ticks;
+diff --git a/mali_kbase/backend/gpu/mali_kbase_pm_metrics.c b/mali_kbase/backend/gpu/mali_kbase_pm_metrics.c
+index 6057a04..cafdff4 100644
+--- a/mali_kbase/backend/gpu/mali_kbase_pm_metrics.c
++++ b/mali_kbase/backend/gpu/mali_kbase_pm_metrics.c
+@@ -143,8 +143,7 @@ int kbasep_pm_metrics_init(struct kbase_device *kbdev)
+ 	spin_lock_init(&kbdev->pm.backend.metrics.lock);
+ 
+ #ifdef CONFIG_MALI_MIDGARD_DVFS
+-	hrtimer_init(&kbdev->pm.backend.metrics.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	kbdev->pm.backend.metrics.timer.function = dvfs_callback;
++	hrtimer_setup(&kbdev->pm.backend.metrics.timer, dvfs_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	kbdev->pm.backend.metrics.initialized = true;
+ 	atomic_set(&kbdev->pm.backend.metrics.timer_state, TIMER_OFF);
+ 	kbase_pm_metrics_start(kbdev);
 diff --git a/mali_kbase/csf/mali_kbase_csf_kcpu.c b/mali_kbase/csf/mali_kbase_csf_kcpu.c
 index e815ff2..c41d9cc 100644
 --- a/mali_kbase/csf/mali_kbase_csf_kcpu.c
@@ -256,6 +302,30 @@ index e815ff2..c41d9cc 100644
  
  				dev_dbg(kbdev->dev,
  					"Fence wait timeout on KCPU queue(%lu), kctx (%d_%d) was %s on suspend",
+diff --git a/mali_kbase/csf/mali_kbase_csf_scheduler.c b/mali_kbase/csf/mali_kbase_csf_scheduler.c
+index faf3c7a..b634c28 100644
+--- a/mali_kbase/csf/mali_kbase_csf_scheduler.c
++++ b/mali_kbase/csf/mali_kbase_csf_scheduler.c
+@@ -8010,8 +8010,7 @@ int kbase_csf_scheduler_init(struct kbase_device *kbdev)
+ #endif /* !CONFIG_MALI_NO_MALI */
+ 
+ 	spin_lock_init(&scheduler->gpu_metrics_lock);
+-	hrtimer_init(&scheduler->gpu_metrics_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+-	scheduler->gpu_metrics_timer.function = gpu_metrics_timer_callback;
++	hrtimer_setup(&scheduler->gpu_metrics_timer, gpu_metrics_timer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+ #endif /* CONFIG_MALI_TRACE_POWER_GPU_WORK_PERIOD */
+ 
+ 	atomic_set(&scheduler->gpu_idle_timer_enabled, false);
+@@ -8050,8 +8049,7 @@ int kbase_csf_scheduler_early_init(struct kbase_device *kbdev)
+ 	KBASE_KTRACE_ADD(kbdev, SCHED_SUSPENDED, NULL, scheduler->state);
+ 	scheduler->csg_scheduling_period_ms = CSF_SCHEDULER_TIME_TICK_MS;
+ 	scheduler_doorbell_init(kbdev);
+-	hrtimer_init(&scheduler->tick_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	scheduler->tick_timer.function = tick_timer_callback;
++	hrtimer_setup(&scheduler->tick_timer, tick_timer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 	atomic_set(&scheduler->pending_sync_update_works, false);
+ 	spin_lock_init(&scheduler->sync_update_work_ctxs_lock);
 diff --git a/mali_kbase/csf/mali_kbase_csf_tl_reader.c b/mali_kbase/csf/mali_kbase_csf_tl_reader.c
 index ac22c57..6e2c95b 100644
 --- a/mali_kbase/csf/mali_kbase_csf_tl_reader.c
@@ -309,14 +379,77 @@ index 2d5285b..caced28 100644
  MODULE_VERSION(MALI_RELEASE_NAME " (UK version " \
  		__stringify(BASE_UK_VERSION_MAJOR) "." \
  		__stringify(BASE_UK_VERSION_MINOR) ")");
+diff --git a/mali_kbase/mali_kbase_fence_ops.c b/mali_kbase/mali_kbase_fence_ops.c
+index faaf4f1..e8e2183 100644
+--- a/mali_kbase/mali_kbase_fence_ops.c
++++ b/mali_kbase/mali_kbase_fence_ops.c
+@@ -45,7 +45,8 @@ static bool kbase_fence_enable_signaling(struct dma_fence *fence)
+ 	return true;
+ }
+ 
+-static void kbase_fence_fence_value_str(struct dma_fence *fence, char *str, int size)
++/* dma_fence_ops.fence_value_str was removed upstream; kept for older kernels */
++static void __maybe_unused kbase_fence_fence_value_str(struct dma_fence *fence, char *str, int size)
+ {
+ 	char *format;
+ 
+@@ -73,7 +74,6 @@ const struct dma_fence_ops kbase_fence_ops = { .wait = dma_fence_default_wait,
+ 					       .get_driver_name = kbase_fence_get_driver_name,
+ 					       .get_timeline_name = kbase_fence_get_timeline_name,
+ 					       .enable_signaling = kbase_fence_enable_signaling,
+-					       .fence_value_str = kbase_fence_fence_value_str,
+ 					       .release = kbase_fence_release };
+ 
+ KBASE_EXPORT_TEST_API(kbase_fence_ops);
+diff --git a/mali_kbase/mali_kbase_kinstr_prfcnt.c b/mali_kbase/mali_kbase_kinstr_prfcnt.c
+index b72b385..4810d9a 100644
+--- a/mali_kbase/mali_kbase_kinstr_prfcnt.c
++++ b/mali_kbase/mali_kbase_kinstr_prfcnt.c
+@@ -1319,8 +1319,7 @@ int kbase_kinstr_prfcnt_init(struct kbase_hwcnt_virtualizer *hvirt,
+ 
+ 	mutex_init(&kinstr_ctx->lock);
+ 	INIT_LIST_HEAD(&kinstr_ctx->clients);
+-	hrtimer_init(&kinstr_ctx->dump_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	kinstr_ctx->dump_timer.function = kbasep_kinstr_prfcnt_dump_timer;
++	hrtimer_setup(&kinstr_ctx->dump_timer, kbasep_kinstr_prfcnt_dump_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	INIT_WORK(&kinstr_ctx->dump_work, kbasep_kinstr_prfcnt_dump_worker);
+ 
+ 	*out_kinstr_ctx = kinstr_ctx;
 diff --git a/mali_kbase/mali_kbase_mem_migrate.c b/mali_kbase/mali_kbase_mem_migrate.c
-index 62b4462..fde1baf 100644
+index 62b4462..6963ae8 100644
 --- a/mali_kbase/mali_kbase_mem_migrate.c
 +++ b/mali_kbase/mali_kbase_mem_migrate.c
-@@ -46,6 +46,22 @@ MODULE_PARM_DESC(kbase_page_migration_enabled,
+@@ -46,6 +46,7 @@ MODULE_PARM_DESC(kbase_page_migration_enabled,
  static const struct movable_operations movable_ops;
  #endif
  
++
+ bool kbase_is_page_migration_enabled(void)
+ {
+ 	return static_branch_unlikely(&page_migration_static_key);
+@@ -762,6 +763,12 @@ void kbase_mem_migrate_init(struct kbase_device *kbdev)
+ 	 * integer for a negative value to see if insmod parameter was
+ 	 * passed in at all (it will override the default negative value).
+ 	 */
++#ifdef KBASE_NO_DRIVER_MOVABLE_PAGES
++	if (kbase_page_migration_enabled > 0)
++		dev_warn(kbdev->dev, "Page migration is not supported on this kernel; ignoring kbase_page_migration_enabled=%d",
++			 kbase_page_migration_enabled);
++	kbase_page_migration_enabled = 0;
++#endif
+ 	if (kbase_page_migration_enabled < 0) {
+ 		if (kbase_is_large_pages_enabled())
+ 			static_branch_inc(&page_migration_static_key);
+diff --git a/mali_kbase/mali_kbase_mem_migrate.h b/mali_kbase/mali_kbase_mem_migrate.h
+index eb4b636..52848f9 100644
+--- a/mali_kbase/mali_kbase_mem_migrate.h
++++ b/mali_kbase/mali_kbase_mem_migrate.h
+@@ -29,6 +29,24 @@ struct kbase_device;
+ struct file;
+ struct page;
+ 
++#include <linux/version.h>
++
 +#if (KERNEL_VERSION(6, 17, 0) <= LINUX_VERSION_CODE)
 +/*
 + * junkyard (lynx): 6.17 dropped driver-owned movable pages. Non-LRU page
@@ -333,22 +466,54 @@ index 62b4462..fde1baf 100644
 +#define KBASE_NO_DRIVER_MOVABLE_PAGES 1
 +#endif
 +
- bool kbase_is_page_migration_enabled(void)
+ /**
+  * DOC: Base kernel page migration implementation.
+  */
+diff --git a/mali_kbase/mali_kbase_vinstr.c b/mali_kbase/mali_kbase_vinstr.c
+index eb6911e..d0e16cd 100644
+--- a/mali_kbase/mali_kbase_vinstr.c
++++ b/mali_kbase/mali_kbase_vinstr.c
+@@ -503,8 +503,7 @@ int kbase_vinstr_init(
+ 
+ 	mutex_init(&vctx->lock);
+ 	INIT_LIST_HEAD(&vctx->clients);
+-	hrtimer_init(&vctx->dump_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	vctx->dump_timer.function = kbasep_vinstr_dump_timer;
++	hrtimer_setup(&vctx->dump_timer, kbasep_vinstr_dump_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	INIT_WORK(&vctx->dump_work, kbasep_vinstr_dump_worker);
+ 
+ 	*out_vctx = vctx;
+diff --git a/mali_kbase/platform/pixel/pixel_gpu_sscd.c b/mali_kbase/platform/pixel/pixel_gpu_sscd.c
+index cb487a1..92e55dc 100644
+--- a/mali_kbase/platform/pixel/pixel_gpu_sscd.c
++++ b/mali_kbase/platform/pixel/pixel_gpu_sscd.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ /* Mali core includes */
++#include <soc/google/gs_platform_compat.h>
+ #include <mali_kbase.h>
+ #include <csf/mali_kbase_csf_trace_buffer.h>
+ #include <csf/mali_kbase_csf_firmware.h>
+@@ -29,8 +30,8 @@ static void sscd_release(struct device *dev)
+ }
+ 
+ static struct sscd_platform_data sscd_pdata;
++/* 6.18: driver_override lives in struct device; applied at registration */
+ const static struct platform_device sscd_dev_init = { .name = "mali",
+-						      .driver_override = SSCD_NAME,
+ 						      .id = -1,
+ 						      .dev = {
+ 							      .platform_data = &sscd_pdata,
+@@ -723,7 +724,7 @@ int gpu_sscd_fw_log_init(struct kbase_device *kbdev, u32 level)
+ int gpu_sscd_init(struct kbase_device *kbdev)
  {
- 	return static_branch_unlikely(&page_migration_static_key);
-@@ -762,6 +778,12 @@ void kbase_mem_migrate_init(struct kbase_device *kbdev)
- 	 * integer for a negative value to see if insmod parameter was
- 	 * passed in at all (it will override the default negative value).
- 	 */
-+#ifdef KBASE_NO_DRIVER_MOVABLE_PAGES
-+	if (kbase_page_migration_enabled > 0)
-+		dev_warn(kbdev->dev, "Page migration is not supported on this kernel; ignoring kbase_page_migration_enabled=%d",
-+			 kbase_page_migration_enabled);
-+	kbase_page_migration_enabled = 0;
-+#endif
- 	if (kbase_page_migration_enabled < 0) {
- 		if (kbase_is_large_pages_enabled())
- 			static_branch_inc(&page_migration_static_key);
+ 	sscd_dev = sscd_dev_init;
+-	return platform_device_register(&sscd_dev);
++	return gs_platform_device_register_override(&sscd_dev, SSCD_NAME);
+ }
+ 
+ /**
 diff --git a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c b/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
 index a6ab91d..6aa18c9 100644
 --- a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
