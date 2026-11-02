@@ -8,12 +8,26 @@ Mechanical API migrations, no intended behaviour change:
   - MODULE_IMPORT_NS() takes a string literal (6.13)
   - iommu_domain_alloc(bus) replaced by iommu_paging_domain_alloc(dev) (6.11)
   - iommu_attach_device_pasid() takes an attach handle (6.11)
+  - eventfd_signal() takes only the context (6.8)
 
 Files: drivers/edgetpu/edgetpu-dmabuf.c, drivers/edgetpu/edgetpu-domain-pool.c, drivers/edgetpu/edgetpu-mobile-platform.c, drivers/edgetpu/janeiro-platform.c
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
 ---
+diff --git a/drivers/edgetpu/edgetpu-device-group.c b/drivers/edgetpu/edgetpu-device-group.c
+index f94145e..c908762 100644
+--- a/drivers/edgetpu/edgetpu-device-group.c
++++ b/drivers/edgetpu/edgetpu-device-group.c
+@@ -476,7 +476,7 @@ void edgetpu_group_notify(struct edgetpu_device_group *group, uint event_id)
+ 		  group->workload_id, event_id);
+ 	read_lock(&group->events.lock);
+ 	if (group->events.eventfds[event_id])
+-		eventfd_signal(group->events.eventfds[event_id], 1);
++		eventfd_signal(group->events.eventfds[event_id]);
+ 	read_unlock(&group->events.lock);
+ }
+ 
 diff --git a/drivers/edgetpu/edgetpu-dmabuf.c b/drivers/edgetpu/edgetpu-dmabuf.c
 index 1ba6e2a..5cd7c38 100644
 --- a/drivers/edgetpu/edgetpu-dmabuf.c
@@ -92,6 +106,19 @@ index 979c109..29eadbc 100644
 -
 -	return 0;
  }
+diff --git a/drivers/edgetpu/edgetpu-telemetry.c b/drivers/edgetpu/edgetpu-telemetry.c
+index 8b48d38..828d7f8 100644
+--- a/drivers/edgetpu/edgetpu-telemetry.c
++++ b/drivers/edgetpu/edgetpu-telemetry.c
+@@ -208,7 +208,7 @@ static void telemetry_worker(struct work_struct *work)
+ 		if (tel->header->head != tel->header->tail) {
+ 			read_lock(&tel->ctx_lock);
+ 			if (tel->ctx)
+-				eventfd_signal(tel->ctx, 1);
++				eventfd_signal(tel->ctx);
+ 			else
+ 				tel->fallback_fn(tel);
+ 			read_unlock(&tel->ctx_lock);
 diff --git a/drivers/edgetpu/janeiro-platform.c b/drivers/edgetpu/janeiro-platform.c
 index a618a18..0095391 100644
 --- a/drivers/edgetpu/janeiro-platform.c

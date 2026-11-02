@@ -79,7 +79,7 @@ index ac50b6e..f383283 100644
  
  	if (decon_dump_ignore(condition))
 diff --git a/exynos_drm_decon.c b/exynos_drm_decon.c
-index 9819ffd..4f8dca8 100644
+index 9819ffd..b11d66a 100644
 --- a/exynos_drm_decon.c
 +++ b/exynos_drm_decon.c
 @@ -48,6 +48,8 @@
@@ -153,15 +153,16 @@ index 9819ffd..4f8dca8 100644
  
  	decon_debug(decon, "%s -\n", __func__);
  }
-@@ -2140,7 +2144,6 @@ static irqreturn_t decon_fs_irq_handler(int irq, void *dev_data)
+@@ -2140,8 +2144,6 @@ static irqreturn_t decon_fs_irq_handler(int irq, void *dev_data)
  static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
  {
  	struct device_node *dpp_np = NULL;
 -	struct property *prop;
- 	const __be32 *cur;
+-	const __be32 *cur;
  	u32 val;
  	int ret = 0, i, count;
-@@ -2404,7 +2407,7 @@ static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
+ 	int dpp_id;
+@@ -2404,7 +2406,7 @@ static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
  	if (dpp_np)
  		of_node_put(dpp_np);
  
@@ -170,7 +171,7 @@ index 9819ffd..4f8dca8 100644
  		decon->con_type |= val;
  
  	return 0;
-@@ -2743,7 +2746,7 @@ err:
+@@ -2743,7 +2745,7 @@ err:
  	return ret;
  }
  
@@ -179,7 +180,7 @@ index 9819ffd..4f8dca8 100644
  {
  	struct decon_device *decon = platform_get_drvdata(pdev);
  
-@@ -2756,8 +2759,6 @@ static int decon_remove(struct platform_device *pdev)
+@@ -2756,8 +2758,6 @@ static int decon_remove(struct platform_device *pdev)
  
  	__decon_unmap_regs(decon);
  	iounmap(decon->regs.regs);

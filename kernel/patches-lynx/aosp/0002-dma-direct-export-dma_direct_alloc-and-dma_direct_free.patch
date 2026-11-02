@@ -11,10 +11,25 @@ export); ACK 6.18 does not, and the lynx dist fails in modpost:
   ERROR: modpost: "dma_direct_alloc" [cnss2/cnss2.ko] undefined!
   ERROR: modpost: "dma_direct_free" [mhi/core/mhi.ko] undefined!
 
-Export both, GPL-only, rather than switch the driver to dma_alloc_attrs():
+Export both, GPL-only, and add them to the pixel KMI symbol list (the
+lynx build trims GKI exports to the symbol lists, so an export alone is
+stripped again), rather than switch the driver to dma_alloc_attrs():
 that would change which address space the WLAN firmware is handed, which is
 not something to change blind. lynx-only (kernel/patches-lynx/).
 ---
+diff --git a/gki/aarch64/symbols/pixel b/gki/aarch64/symbols/pixel
+index a4da9c9b9..4db1fd8e4 100644
+--- a/gki/aarch64/symbols/pixel
++++ b/gki/aarch64/symbols/pixel
+@@ -613,6 +613,8 @@
+   dma_buf_vunmap_unlocked
+   dma_contiguous_default_area
+   dma_declare_coherent_memory_regions
++  dma_direct_alloc
++  dma_direct_free
+   dmaengine_unmap_put
+   dma_fence_add_callback
+   dma_fence_allocate_private_stub
 diff --git a/kernel/dma/direct.c b/kernel/dma/direct.c
 index 2307d9fdc..5198db845 100644
 --- a/kernel/dma/direct.c

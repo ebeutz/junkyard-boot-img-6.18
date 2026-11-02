@@ -8,6 +8,8 @@ Mechanical API migrations, no intended behaviour change:
   - del_timer*() renamed timer_delete*() (6.15)
   - MODULE_IMPORT_NS() takes a string literal (6.13)
   - drop in-tree-only include paths that -Wmissing-include-dirs now rejects
+  - mali: driver-owned movable pages removed (6.17): page migration forced off,
+    __SetPageMovable/__ClearPageMovable stubbed (ACK already defaulted it off)
 
 17 files.
 
@@ -307,6 +309,46 @@ index 2d5285b..caced28 100644
  MODULE_VERSION(MALI_RELEASE_NAME " (UK version " \
  		__stringify(BASE_UK_VERSION_MAJOR) "." \
  		__stringify(BASE_UK_VERSION_MINOR) ")");
+diff --git a/mali_kbase/mali_kbase_mem_migrate.c b/mali_kbase/mali_kbase_mem_migrate.c
+index 62b4462..fde1baf 100644
+--- a/mali_kbase/mali_kbase_mem_migrate.c
++++ b/mali_kbase/mali_kbase_mem_migrate.c
+@@ -46,6 +46,22 @@ MODULE_PARM_DESC(kbase_page_migration_enabled,
+ static const struct movable_operations movable_ops;
+ #endif
+ 
++#if (KERNEL_VERSION(6, 17, 0) <= LINUX_VERSION_CODE)
++/*
++ * junkyard (lynx): 6.17 dropped driver-owned movable pages. Non-LRU page
++ * migration is now keyed on a page *type* registered with set_movable_ops(),
++ * which only accepts the core's own types (zsmalloc, balloon), and
++ * __SetPageMovable()/__ClearPageMovable() are gone. kbase cannot opt its pages
++ * in any more, so migration is forced off in kbase_mem_migrate_init() and the
++ * two helpers become no-ops for the paths that remain compiled in. ACK already
++ * defaulted kbase_page_migration_enabled to 0, so this is the existing Android
++ * behaviour made unconditional.
++ */
++#define __SetPageMovable(p, ops) do { (void)(p); (void)(ops); } while (0)
++#define __ClearPageMovable(p) do { (void)(p); } while (0)
++#define KBASE_NO_DRIVER_MOVABLE_PAGES 1
++#endif
++
+ bool kbase_is_page_migration_enabled(void)
+ {
+ 	return static_branch_unlikely(&page_migration_static_key);
+@@ -762,6 +778,12 @@ void kbase_mem_migrate_init(struct kbase_device *kbdev)
+ 	 * integer for a negative value to see if insmod parameter was
+ 	 * passed in at all (it will override the default negative value).
+ 	 */
++#ifdef KBASE_NO_DRIVER_MOVABLE_PAGES
++	if (kbase_page_migration_enabled > 0)
++		dev_warn(kbdev->dev, "Page migration is not supported on this kernel; ignoring kbase_page_migration_enabled=%d",
++			 kbase_page_migration_enabled);
++	kbase_page_migration_enabled = 0;
++#endif
+ 	if (kbase_page_migration_enabled < 0) {
+ 		if (kbase_is_large_pages_enabled())
+ 			static_branch_inc(&page_migration_static_key);
 diff --git a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c b/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
 index a6ab91d..6aa18c9 100644
 --- a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
