@@ -215,7 +215,7 @@ This repo is the **substrate / dev platform**; related work lives in sibling rep
 
 ## Build-host prerequisites
 
-Beyond the obvious `just`, `repo`, `qemu-user-static`: `make`, `e2fsprogs` (for `mkfs.ext4`), `rsync`, `debootstrap`, `systemd-container` (for `systemd-nspawn`), `curl`, `unzip`, `xxd`. `erofs-utils` and `android-sdk-libsparse-utils` are optional and only kick in if a future felix OTA ships the vendor partition in those formats. `nmap` is needed only by [flash-nmap.sh](flash-nmap.sh) (both it and `openssh` are in the flake dev shell); `flash-nmap.sh --hosts-from FILE` skips the scan and needs neither.
+Beyond the obvious `just`, `repo`, `qemu-user-static`: `make`, `e2fsprogs` (for `mkfs.ext4`), `kmod` (`.install_kernel` runs the host's `modinfo` to resolve the dracut force-drivers list; without it the stage dies with `xargs: modinfo: No such file or directory`), `rsync`, `debootstrap`, `systemd-container` (for `systemd-nspawn`), `curl`, `unzip`, `xxd`. `erofs-utils` and `android-sdk-libsparse-utils` are optional and only kick in if a future felix OTA ships the vendor partition in those formats. `nmap` is needed only by [flash-nmap.sh](flash-nmap.sh) (both it and `openssh` are in the flake dev shell); `flash-nmap.sh --hosts-from FILE` skips the scan and needs neither.
 
 **⚠ The toolchains are split across two environments, and neither can do a whole build.** The rootfs stages (`mount_rootfs`, `systemd-nspawn`, the overlay rsync) need root, which is what `tools/dockershell` provides — it runs as uid 1000 *with passwordless sudo*, not as root, so the recipes call `sudo` internally. The Rust cross-builds (`.build_pixel_bootctl`, `.build_pixel_ota`) need cargo, which the container does **not** have. So:
 
