@@ -1,0 +1,284 @@
+From: junkyard
+Subject: [PATCH] aoc: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(aoc: don't pull Laguna's arm-smmu-v3 module into gs201 builds)
+
+aoc_core depends on //private/google-modules/iommu/arm-smmu-v3 for
+pixel-iommu-fault.ko. Only Laguna adds that package's Kconfig
+(lga_defconfig: ARM_SMMU_V3_PIXEL, GOOGLE_ACFW_DEBUG, ...); on gs201 the
+symbols do not exist, the kernel_module builds none of its five declared
+outs, and the lynx dist fails:
+
+  ERROR: Unable to find acfw-debug.ko ... arm_smmu_v3.ko ...
+         pixel-iommu-fault.ko in .../iommu/arm-smmu-v3
+
+Depend on that module only for soc_is_laguna_or_later; keep the
+header-only fault_headers everywhere. On gs201 the pixel_iommu_*() fault
+API aoc.c calls is provided by samsung_iommu.ko (gs201_soc, which aoc_core
+already depends on), so aoc.c itself is unchanged.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * of_node_to_fwnode() -> of_fwnode_handle(), snd_soc_component_get_dapm()
+    -> snd_soc_component_to_dapm() (mechanical, as upstream).
+  * usb/usb_hooks_impl_whi.c: android_rvh_usb_dev_suspend and
+    android_vh_usb_dev_resume (and trace/hooks/usb.h) do not exist in
+    android-mainline. Their registrations are fenced off; they kept a USB
+    device awake while AOC offloads audio, which the Debian image does not
+    use. The handlers stay, __maybe_unused.
+---
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 2fe1e09..e9bee63 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -80,7 +80,6 @@ ddk_module(
+         "//private/google-modules/aoc:__subpackages__",
+     ],
+     deps = [
+-        "//private/google-modules/iommu/arm-smmu-v3",
+         "//private/google-modules/iommu/arm-smmu-v3:fault_headers",
+         "//common:all_headers_aarch64",
+         "//private/google-modules/aoc_ipc:ddk_headers",
+@@ -90,6 +89,9 @@ ddk_module(
+         "//private/google-modules/trusty:trusty_headers",
+     ] + select({
+         "//private/devices/google/common:soc_is_laguna_or_later": [
++            # Only Laguna configures arm-smmu-v3 (lga_defconfig); on older SoCs
++            # its Kconfig is absent and it builds none of its declared outs.
++            "//private/google-modules/iommu/arm-smmu-v3",
+             "//private/google-modules/soc/rdo:rdo_soc_headers",
+             "//private/google-modules/soc/rdo:rdo_soc_module",
+         ],
+diff --git a/alsa/aoc_alsa_compr.c b/alsa/aoc_alsa_compr.c
+index d4e44cf..be2b578 100644
+--- a/alsa/aoc_alsa_compr.c
++++ b/alsa/aoc_alsa_compr.c
+@@ -930,7 +930,7 @@ static int aoc_compr_new(struct snd_soc_component *component, struct snd_soc_pcm
+ static const struct snd_soc_component_driver aoc_compr_component = {
+ 	.name = "AoC COMPR",
+ 	.compress_ops = &snd_aoc_compr_ops,
+-	.pcm_construct = aoc_compr_new,
++	.pcm_new = aoc_compr_new,
+ };
+ #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0))
+ static const struct snd_soc_component_driver aoc_compr_component = {
+diff --git a/alsa/aoc_alsa_dp.c b/alsa/aoc_alsa_dp.c
+index ea09582..e4fa854 100644
+--- a/alsa/aoc_alsa_dp.c
++++ b/alsa/aoc_alsa_dp.c
+@@ -159,7 +159,7 @@ static const struct snd_soc_component_driver aoc_dp_component = {
+ 	.trigger = snd_aoc_dp_trigger,
+ 	.pointer = snd_aoc_dp_pointer,
+ 	.prepare = snd_aoc_dp_prepare,
+-	.pcm_construct = aoc_dp_new,
++	.pcm_new = aoc_dp_new,
+ };
+ 
+ static int aoc_dp_probe(struct platform_device *pdev)
+diff --git a/alsa/aoc_alsa_hw.c b/alsa/aoc_alsa_hw.c
+index 320093b..e98adcb 100644
+--- a/alsa/aoc_alsa_hw.c
++++ b/alsa/aoc_alsa_hw.c
+@@ -15,6 +15,38 @@
+ #include "aoc_alsa_drv.h"
+ #include "aoc_alsa_path.h"
+ 
++/*
++ * junkyard (lynx-mainline): xhci_ring.num_trbs_free is gone upstream; the core
++ * computes it with xhci_num_trbs_free(), which is not exported. Same algorithm.
++ */
++static unsigned int aoc_xhci_num_trbs_free(struct xhci_ring *ring)
++{
++	struct xhci_segment *enq_seg = ring->enq_seg;
++	union xhci_trb *enq = ring->enqueue;
++	union xhci_trb *last_on_seg;
++	unsigned int free = 0;
++	int i = 0;
++
++	if (TRB_TYPE_LINK_LE32(enq->link.control)) {
++		enq_seg = enq_seg->next;
++		enq = enq_seg->trbs;
++	}
++
++	if (enq == ring->dequeue)
++		return ring->num_segs * (TRBS_PER_SEGMENT - 1);
++
++	do {
++		if (ring->deq_seg == enq_seg && ring->dequeue >= enq)
++			return free + (ring->dequeue - enq);
++		last_on_seg = &enq_seg->trbs[TRBS_PER_SEGMENT - 1];
++		free += last_on_seg - enq;
++		enq_seg = enq_seg->next;
++		enq = enq_seg->trbs;
++	} while (i++ < ring->num_segs);
++
++	return free;
++}
++
+ #ifndef ALSA_AOC_CMD_LOG_DISABLE
+ static int cmd_count;
+ #endif
+@@ -1227,7 +1259,7 @@ int aoc_set_isoc_tr_info(struct aoc_chip *chip, u16 ep_id, u16 dir, struct xhci_
+ 	cmd.seg_ptr = ep_ring->first_seg->dma;
+ 	cmd.max_packet = ep_ring->bounce_buf_len;
+ 	cmd.cycle_state = ep_ring->cycle_state;
+-	cmd.num_trbs_free = ep_ring->num_trbs_free;
++	cmd.num_trbs_free = aoc_xhci_num_trbs_free(ep_ring);
+ 
+ 	err = aoc_audio_control(CMD_OUTPUT_CHANNEL, (uint8_t *)&cmd,
+ 				sizeof(cmd), (uint8_t *)&cmd, chip);
+diff --git a/alsa/aoc_alsa_incall.c b/alsa/aoc_alsa_incall.c
+index 8a27748..9c5b518 100644
+--- a/alsa/aoc_alsa_incall.c
++++ b/alsa/aoc_alsa_incall.c
+@@ -630,7 +630,7 @@ static const struct snd_soc_component_driver aoc_pcm_component = {
+ 	.prepare = snd_aoc_pcm_prepare,
+ 	.trigger = snd_aoc_pcm_trigger,
+ 	.pointer = snd_aoc_pcm_pointer,
+-	.pcm_construct = aoc_pcm_new,
++	.pcm_new = aoc_pcm_new,
+ };
+ 
+ static int aoc_pcm_probe(struct platform_device *pdev)
+diff --git a/alsa/aoc_alsa_nohost.c b/alsa/aoc_alsa_nohost.c
+index 428ab94..8c6bb46 100644
+--- a/alsa/aoc_alsa_nohost.c
++++ b/alsa/aoc_alsa_nohost.c
+@@ -120,7 +120,7 @@ static const struct snd_soc_component_driver aoc_nohost_component = {
+ 	.hw_params = snd_aoc_nohost_hw_params,
+ 	.hw_free = snd_aoc_nohost_hw_free,
+ 	.prepare = snd_aoc_nohost_prepare,
+-	.pcm_construct = aoc_nohost_new,
++	.pcm_new = aoc_nohost_new,
+ };
+ 
+ static int aoc_nohost_probe(struct platform_device *pdev)
+diff --git a/alsa/aoc_alsa_path.c b/alsa/aoc_alsa_path.c
+index 9ddaaba..83813c6 100644
+--- a/alsa/aoc_alsa_path.c
++++ b/alsa/aoc_alsa_path.c
+@@ -1292,7 +1292,7 @@ static int aoc_path_put(uint32_t ep_id, uint32_t hw_id,
+ 			struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_dapm_widget *widget =
+-		snd_soc_dapm_kcontrol_widget(kcontrol);
++		snd_soc_dapm_kcontrol_to_widget(kcontrol);
+ 	struct snd_soc_component *component =
+ 		snd_soc_dapm_to_component(widget->dapm);
+ 	struct aoc_chip *chip =
+@@ -2475,7 +2475,7 @@ static int aoc_of_xlate_dai_name(struct snd_soc_component *component,
+ 
+ static int aoc_cmp_probe(struct snd_soc_component *comp)
+ {
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(comp);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(comp);
+ 	int ret;
+ 
+ 	ret = snd_soc_dapm_new_controls(dapm, aoc_widget,
+diff --git a/alsa/aoc_alsa_pcm.c b/alsa/aoc_alsa_pcm.c
+index a58c74a..8f2dc65 100644
+--- a/alsa/aoc_alsa_pcm.c
++++ b/alsa/aoc_alsa_pcm.c
+@@ -834,7 +834,7 @@ static const struct snd_soc_component_driver aoc_pcm_component = {
+ 	.trigger = snd_aoc_pcm_trigger,
+ 	.pointer = snd_aoc_pcm_pointer,
+ 	.mmap = snd_aoc_pcm_mmap,
+-	.pcm_construct = aoc_pcm_new,
++	.pcm_new = aoc_pcm_new,
+ };
+ 
+ static int aoc_pcm_probe(struct platform_device *pdev)
+diff --git a/alsa/aoc_alsa_voice.c b/alsa/aoc_alsa_voice.c
+index 87b57be..bd0b079 100644
+--- a/alsa/aoc_alsa_voice.c
++++ b/alsa/aoc_alsa_voice.c
+@@ -331,7 +331,7 @@ static const struct snd_soc_component_driver aoc_pcm_component = {
+ 	.hw_params = snd_aoc_pcm_hw_params,
+ 	.hw_free = snd_aoc_pcm_hw_free,
+ 	.prepare = snd_aoc_pcm_prepare,
+-	.pcm_construct = aoc_pcm_new,
++	.pcm_new = aoc_pcm_new,
+ };
+ 
+ static int aoc_pcm_probe(struct platform_device *pdev)
+diff --git a/alsa/aoc_alsa_voip.c b/alsa/aoc_alsa_voip.c
+index afe9d4d..237d0c9 100644
+--- a/alsa/aoc_alsa_voip.c
++++ b/alsa/aoc_alsa_voip.c
+@@ -605,7 +605,7 @@ static const struct snd_soc_component_driver aoc_pcm_component = {
+ 	.prepare = snd_aoc_pcm_prepare,
+ 	.trigger = snd_aoc_pcm_trigger,
+ 	.pointer = snd_aoc_pcm_pointer,
+-	.pcm_construct = aoc_pcm_new,
++	.pcm_new = aoc_pcm_new,
+ };
+ 
+ static int aoc_pcm_probe(struct platform_device *pdev)
+diff --git a/aoc_uwb_platform_drv.c b/aoc_uwb_platform_drv.c
+index f71b132..e7e0650 100644
+--- a/aoc_uwb_platform_drv.c
++++ b/aoc_uwb_platform_drv.c
+@@ -109,7 +109,7 @@ static int uwb_pdrv_pin_init(struct platform_device *pdev)
+ 
+ 	chip.label = node->name;
+ 	chip.parent = dev;
+-	chip.fwnode = of_node_to_fwnode(node);
++	chip.fwnode = of_fwnode_handle(node);
+ 	chip.ngpio = ngpio;
+ 	return devm_gpiochip_add_data(dev, &chip, NULL);
+ }
+diff --git a/usb/usb_hooks_impl_whi.c b/usb/usb_hooks_impl_whi.c
+index 6056d06..2561160 100644
+--- a/usb/usb_hooks_impl_whi.c
++++ b/usb/usb_hooks_impl_whi.c
+@@ -7,7 +7,7 @@
+  */
+ 
+ #include <linux/usb.h>
+-#include <trace/hooks/usb.h>
++/* junkyard (lynx-mainline): android-mainline has no trace/hooks/usb.h; both hooks are fenced below. */
+ 
+ #include "aoc_usb.h"
+ 
+@@ -20,7 +20,7 @@
+ /*
+  * Set bypass = 1 will skip USB suspend.
+  */
+-static void usb_vendor_dev_suspend(void *unused, struct usb_device *udev,
++static void __maybe_unused usb_vendor_dev_suspend(void *unused, struct usb_device *udev,
+ 				   pm_message_t msg, bool *bypass)
+ {
+ 	int port1, usb_audio_count = xhci_get_usb_audio_count();
+@@ -57,7 +57,7 @@ static void usb_vendor_dev_suspend(void *unused, struct usb_device *udev,
+ /*
+  * Set bypass = 1 will skip USB resume.
+  */
+-static void usb_vendor_dev_resume(void *unused, struct usb_device *udev,
++static void __maybe_unused usb_vendor_dev_resume(void *unused, struct usb_device *udev,
+ 				  pm_message_t msg, bool *bypass)
+ {
+ 	if (!udev) {
+@@ -86,13 +86,17 @@ int usb_vendor_helper_init(void)
+ 		return ret;
+ 	}
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_usb_dev_suspend does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_usb_dev_suspend(usb_vendor_dev_suspend, NULL);
+ 	if (ret)
+ 		pr_err("register_trace_android_rvh_usb_dev_suspend failed, ret:%d\n", ret);
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_usb_dev_resume does not exist in android-mainline */
+ 	ret = register_trace_android_vh_usb_dev_resume(usb_vendor_dev_resume, NULL);
+ 	if (ret)
+ 		pr_err("register_trace_android_vh_usb_dev_resume failed, ret:%d\n", ret);
++#endif
+ 
+ 	return ret;
+ }

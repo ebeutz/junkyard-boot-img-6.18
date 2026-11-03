@@ -6,35 +6,26 @@ built with -DCONFIG_WCN_USE_DMA_DIRECT and allocates its firmware memory
 segments and the MHI BHIe vector table with dma_direct_alloc() /
 dma_direct_free(), bypassing any IOMMU on the PCIe link so the firmware sees
 physical addresses. The Android 6.1 GKI exported both (an ANDROID: vendor
-export); ACK 6.18 does not, and the lynx dist fails in modpost:
+export); neither ACK 6.18 nor android-mainline does, and the lynx dist fails
+in modpost:
 
   ERROR: modpost: "dma_direct_alloc" [cnss2/cnss2.ko] undefined!
   ERROR: modpost: "dma_direct_free" [mhi/core/mhi.ko] undefined!
 
-Export both, GPL-only, and add them to the pixel KMI symbol list (the
-lynx build trims GKI exports to the symbol lists, so an export alone is
-stripped again), rather than switch the driver to dma_alloc_attrs():
+Export both, GPL-only, rather than switch the driver to dma_alloc_attrs():
 that would change which address space the WLAN firmware is handed, which is
 not something to change blind. lynx-only (kernel/patches-lynx/).
+
+lynx-mainline: rebased onto android-mainline. The 6.18 version also added
+both names to gki/aarch64/symbols/pixel, because that build trimmed GKI
+exports to the KMI lists; android-mainline has no KMI and no symbol lists,
+so that hunk is gone.
 ---
-diff --git a/gki/aarch64/symbols/pixel b/gki/aarch64/symbols/pixel
-index a4da9c9b9..4db1fd8e4 100644
---- a/gki/aarch64/symbols/pixel
-+++ b/gki/aarch64/symbols/pixel
-@@ -613,6 +613,8 @@
-   dma_buf_vunmap_unlocked
-   dma_contiguous_default_area
-   dma_declare_coherent_memory_regions
-+  dma_direct_alloc
-+  dma_direct_free
-   dmaengine_unmap_put
-   dma_fence_add_callback
-   dma_fence_allocate_private_stub
 diff --git a/kernel/dma/direct.c b/kernel/dma/direct.c
-index 2307d9fdc..5198db845 100644
+index bab7193cf2b8..fd74b1405865 100644
 --- a/kernel/dma/direct.c
 +++ b/kernel/dma/direct.c
-@@ -308,6 +308,7 @@ void *dma_direct_alloc(struct device *dev, size_t size,
+@@ -357,6 +357,7 @@ void *dma_direct_alloc(struct device *dev, size_t size,
  out_leak_pages:
  	return NULL;
  }
@@ -42,9 +33,9 @@ index 2307d9fdc..5198db845 100644
  
  void dma_direct_free(struct device *dev, size_t size,
  		void *cpu_addr, dma_addr_t dma_addr, unsigned long attrs)
-@@ -351,6 +352,7 @@ void dma_direct_free(struct device *dev, size_t size,
- 
- 	__dma_direct_free_pages(dev, dma_direct_to_page(dev, dma_addr), size);
+@@ -430,6 +431,7 @@ void dma_direct_free(struct device *dev, size_t size,
+ 	else
+ 		dma_free_contiguous(dev, dma_direct_to_page(dev, dma_addr), size);
  }
 +EXPORT_SYMBOL_GPL(dma_direct_free);
  

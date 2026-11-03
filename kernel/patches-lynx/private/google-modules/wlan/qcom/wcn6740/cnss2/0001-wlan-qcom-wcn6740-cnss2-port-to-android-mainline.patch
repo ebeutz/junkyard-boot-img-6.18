@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] wlan/qcom/wcn6740/cnss2: port to Linux 6.18 (lynx)
+Subject: [PATCH] wlan/qcom/wcn6740/cnss2: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(wlan/qcom/wcn6740/cnss2: port to Linux 6.18 (lynx))
 
 Port private/google-modules/wlan/qcom/wcn6740/cnss2 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 Mechanical API migrations, no intended behaviour change:
@@ -15,6 +21,12 @@ Files: Kbuild, cnss2/bus.c, cnss2/genl.c, cnss2/main.c, cnss2/pci.c, cnss2/pci_p
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * in_irq() -> in_hardirq() (the alias is gone).
 ---
 diff --git a/Kbuild b/Kbuild
 index 33b5824..8ff4f94 100644
@@ -41,6 +53,19 @@ index 58fd891..023df1d 100644
  
  	if (!plat_priv)
  		return;
+diff --git a/cnss2/debug.h b/cnss2/debug.h
+index 98413e1..f5300dd 100644
+--- a/cnss2/debug.h
++++ b/cnss2/debug.h
+@@ -34,7 +34,7 @@ extern void *cnss_ipc_log_long_context;
+ 		 cnss_debug_ipc_log_print((void *)NULL, _x)
+ #endif
+ 
+-#define proc_name (in_irq() ? "irq" : \
++#define proc_name (in_hardirq() ? "irq" : \
+ 		   (in_softirq() ? "soft_irq" : current->comm))
+ 
+ #define cnss_pr_err(_fmt, ...) \
 diff --git a/cnss2/genl.c b/cnss2/genl.c
 index 2819a1b..d353296 100644
 --- a/cnss2/genl.c
@@ -331,7 +356,7 @@ index f899a12..d1dd229 100644
  			else if (!strnstr(plat_vreg_param[j].vreg, vreg,
  					  strlen(plat_vreg_param[j].vreg)))
 diff --git a/cnss2/qmi.c b/cnss2/qmi.c
-index dba4215..5d9d920 100644
+index dba4215..b0e3dc0 100644
 --- a/cnss2/qmi.c
 +++ b/cnss2/qmi.c
 @@ -494,13 +494,13 @@ int cnss_wlfw_tgt_cap_send_sync(struct cnss_plat_data *plat_priv)
@@ -386,8 +411,44 @@ index dba4215..5d9d920 100644
  					QMI_WLFW_MAX_STR_LEN_V01 + 1);
  		}
  
+@@ -3028,7 +3028,7 @@ static int cnss_wlfw_connect_to_server(struct cnss_plat_data *plat_priv,
+ 	sq.sq_node = event_data->node;
+ 	sq.sq_port = event_data->port;
+ 
+-	ret = kernel_connect(qmi_wlfw->sock, (struct sockaddr *)&sq,
++	ret = kernel_connect(qmi_wlfw->sock, (struct sockaddr_unsized *)&sq,
+ 			     sizeof(sq), 0);
+ 	if (ret < 0) {
+ 		cnss_pr_err("Failed to connect to QMI WLFW remote service port\n");
+@@ -3262,7 +3262,7 @@ static int cnss_dms_connect_to_server(struct cnss_plat_data *plat_priv,
+ 	sq.sq_node = node;
+ 	sq.sq_port = port;
+ 
+-	ret = kernel_connect(qmi_dms->sock, (struct sockaddr *)&sq,
++	ret = kernel_connect(qmi_dms->sock, (struct sockaddr_unsized *)&sq,
+ 			     sizeof(sq), 0);
+ 	if (ret < 0) {
+ 		cnss_pr_err("Failed to connect to QMI DMS remote service Node: %d Port: %d\n",
+@@ -3481,7 +3481,7 @@ static int coex_new_server(struct qmi_handle *qmi,
+ 	sq.sq_family = AF_QIPCRTR;
+ 	sq.sq_node = service->node;
+ 	sq.sq_port = service->port;
+-	ret = kernel_connect(qmi->sock, (struct sockaddr *)&sq, sizeof(sq), 0);
++	ret = kernel_connect(qmi->sock, (struct sockaddr_unsized *)&sq, sizeof(sq), 0);
+ 	if (ret < 0) {
+ 		cnss_pr_err("Fail to connect to remote service port\n");
+ 		return ret;
+@@ -3680,7 +3680,7 @@ static int ims_new_server(struct qmi_handle *qmi,
+ 	sq.sq_family = AF_QIPCRTR;
+ 	sq.sq_node = service->node;
+ 	sq.sq_port = service->port;
+-	ret = kernel_connect(qmi->sock, (struct sockaddr *)&sq, sizeof(sq), 0);
++	ret = kernel_connect(qmi->sock, (struct sockaddr_unsized *)&sq, sizeof(sq), 0);
+ 	if (ret < 0) {
+ 		cnss_pr_err("Fail to connect to remote service port\n");
+ 		return ret;
 diff --git a/cnss_utils/cnss_plat_ipc_qmi.c b/cnss_utils/cnss_plat_ipc_qmi.c
-index 2225c2b..3da0ab6 100644
+index 2225c2b..4b688e5 100644
 --- a/cnss_utils/cnss_plat_ipc_qmi.c
 +++ b/cnss_utils/cnss_plat_ipc_qmi.c
 @@ -136,7 +136,7 @@ void cnss_plat_ipc_debug_log_print(void *log_ctx, char *process, const char *fn,
@@ -399,6 +460,15 @@ index 2225c2b..3da0ab6 100644
  				   const char *log_level, char *fmt, ...)
  {
  	struct va_format vaf;
+@@ -156,7 +156,7 @@ void cnss_plat_ipc_debug_log_print(void *log_ctx, char *process, const char *fn,
+ 		cnss_plat_ipc_debug_log_print((void *)NULL, _x)
+ #endif
+ 
+-#define proc_name (in_irq() ? "irq" : \
++#define proc_name (in_hardirq() ? "irq" : \
+ 		(in_softirq() ? "soft_irq" : current->comm))
+ #define cnss_plat_ipc_err(_fmt, ...) \
+ 		cnss_plat_ipc_log_print(proc_name, __func__, \
 diff --git a/mhi/core/init.c b/mhi/core/init.c
 index ee03bba..9bdb61b 100644
 --- a/mhi/core/init.c
@@ -413,7 +483,7 @@ index ee03bba..9bdb61b 100644
  	struct mhi_device *mhi_dev = to_mhi_device(dev);
  	struct mhi_driver *mhi_drv = to_mhi_driver(drv);
 diff --git a/qrtr/af_qrtr.c b/qrtr/af_qrtr.c
-index 21cb211..a5d4fcf 100644
+index 21cb211..fc0b3f5 100644
 --- a/qrtr/af_qrtr.c
 +++ b/qrtr/af_qrtr.c
 @@ -18,7 +18,7 @@
@@ -425,6 +495,37 @@ index 21cb211..a5d4fcf 100644
  #include <linux/version.h>
  #ifdef CONFIG_CNSS_OUT_OF_TREE
  #include "ipc_logging.h"
+@@ -1594,7 +1594,7 @@ static int qrtr_autobind(struct socket *sock)
+ }
+ 
+ /* Bind socket to specified sockaddr. */
+-static int qrtr_bind(struct socket *sock, struct sockaddr *saddr, int len)
++static int qrtr_bind(struct socket *sock, struct sockaddr_unsized *saddr, int len)
+ {
+ 	DECLARE_SOCKADDR(struct sockaddr_qrtr *, addr, saddr);
+ 	struct qrtr_sock *ipc = qrtr_sk(sock->sk);
+@@ -1913,7 +1913,7 @@ out:
+ 	return rc;
+ }
+ 
+-static int qrtr_connect(struct socket *sock, struct sockaddr *saddr,
++static int qrtr_connect(struct socket *sock, struct sockaddr_unsized *saddr,
+ 			int len, int flags)
+ {
+ 	DECLARE_SOCKADDR(struct sockaddr_qrtr *, addr, saddr);
+diff --git a/qrtr/ns.c b/qrtr/ns.c
+index bf62103..5010c3a 100644
+--- a/qrtr/ns.c
++++ b/qrtr/ns.c
+@@ -778,7 +778,7 @@ void qrtr_ns_init(void)
+ 	sq.sq_port = QRTR_PORT_CTRL;
+ 	qrtr_ns.local_node = sq.sq_node;
+ 
+-	ret = kernel_bind(qrtr_ns.sock, (struct sockaddr *)&sq, sizeof(sq));
++	ret = kernel_bind(qrtr_ns.sock, (struct sockaddr_unsized *)&sq, sizeof(sq));
+ 	if (ret < 0) {
+ 		pr_err("failed to bind to socket\n");
+ 		goto err_wq;
 diff --git a/qrtr/qrtr.c b/qrtr/qrtr.c
 index 8716d6f..b95075f 100644
 --- a/qrtr/qrtr.c

@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] edgetpu/janeiro: port to Linux 6.18 (lynx)
+Subject: [PATCH] edgetpu/janeiro: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(edgetpu/janeiro: port to Linux 6.18 (lynx))
 
 Port private/google-modules/edgetpu/janeiro to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 API migrations. Mostly mechanical; entries that change behaviour say so:
@@ -17,6 +23,13 @@ Files: drivers/edgetpu/edgetpu-device-group.c, drivers/edgetpu/edgetpu-dmabuf.c,
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * dma_fence::lock -> dma_fence_spinlock().
+  * thermal_of_cooling_device_register() gained a cdev_id argument (0).
 ---
 diff --git a/drivers/edgetpu/edgetpu-device-group.c b/drivers/edgetpu/edgetpu-device-group.c
 index f94145e..c908762 100644
@@ -32,10 +45,34 @@ index f94145e..c908762 100644
  }
  
 diff --git a/drivers/edgetpu/edgetpu-dmabuf.c b/drivers/edgetpu/edgetpu-dmabuf.c
-index 1ba6e2a..5cd7c38 100644
+index 1ba6e2a..0ccba98 100644
 --- a/drivers/edgetpu/edgetpu-dmabuf.c
 +++ b/drivers/edgetpu/edgetpu-dmabuf.c
-@@ -1088,5 +1088,5 @@ int edgetpu_sync_fence_debugfs_show(struct seq_file *s, void *unused)
+@@ -966,7 +966,7 @@ static int _edgetpu_sync_fence_signal(struct dma_fence *fence, int errno, bool i
+ {
+ 	int ret;
+ 
+-	spin_lock_irq(fence->lock);
++	spin_lock_irq(dma_fence_spinlock(fence));
+ 	/* don't signal fence twice */
+ 	if (unlikely(test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))) {
+ 		ret = ignore_signaled ? 0 : -EINVAL;
+@@ -978,10 +978,12 @@ static int _edgetpu_sync_fence_signal(struct dma_fence *fence, int errno, bool i
+ 		 fence->seqno, errno);
+ 	if (errno)
+ 		dma_fence_set_error(fence, errno);
+-	ret = dma_fence_signal_locked(fence);
++	/* android-mainline: dma_fence_signal_locked() returns void now */
++	dma_fence_signal_locked(fence);
++	ret = 0;
+ 
+ out_unlock:
+-	spin_unlock_irq(fence->lock);
++	spin_unlock_irq(dma_fence_spinlock(fence));
+ 	return ret;
+ }
+ 
+@@ -1088,5 +1090,5 @@ int edgetpu_sync_fence_debugfs_show(struct seq_file *s, void *unused)
  }
  
  #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
@@ -265,3 +302,16 @@ index c2d8477..76ef672 100644
  #include <linux/gsa/gsa_tpu.h>
  #include <linux/slab.h>
  #include <linux/string.h>
+diff --git a/drivers/edgetpu/mobile-thermal.c b/drivers/edgetpu/mobile-thermal.c
+index fa25a02..ecf283a 100644
+--- a/drivers/edgetpu/mobile-thermal.c
++++ b/drivers/edgetpu/mobile-thermal.c
+@@ -371,7 +371,7 @@ static int tpu_thermal_cooling_register(struct edgetpu_thermal *thermal, char *t
+ 		dev_warn(thermal->dev, "failed to find cooling node\n");
+ 	/* Initialize the cooling state as 0, means "no cooling" */
+ 	thermal->cooling_state = 0;
+-	thermal->cdev = thermal_of_cooling_device_register(cooling_node, type, thermal,
++	thermal->cdev = thermal_of_cooling_device_register(cooling_node, 0, type, thermal,
+ 							   &edgetpu_cooling_ops);
+ 	if (IS_ERR(thermal->cdev))
+ 		return PTR_ERR(thermal->cdev);

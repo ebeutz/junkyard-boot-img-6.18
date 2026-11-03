@@ -15,7 +15,9 @@ CONFIG_AUTOFS_FS=y
 CONFIG_NFS_FS=y
 CONFIG_NFS_V3_ACL=y
 CONFIG_NFS_V4=y
-CONFIG_NFS_V4_1=y
+# NFS_V4_1 is in felix_cmdline_defconfig, not here: NFSv4.1 became unconditional
+# part of NFS_V4 (the symbol no longer exists on android-mainline, which fails
+# kleaf's fragment check), while on 6.1 NFS_V4_2 still depends on it.
 CONFIG_NFS_V4_2=y
 CONFIG_NFS_V4_1_MIGRATION=y
 CONFIG_NFS_V4_2_READ_PLUS=y
