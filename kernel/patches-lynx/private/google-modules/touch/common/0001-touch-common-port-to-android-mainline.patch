@@ -1,0 +1,76 @@
+From: junkyard
+Subject: [PATCH] touch/common: port to android-mainline
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * vb2: vb2_ops_wait_prepare/vb2_ops_wait_finish are gone; videobuf2
+    drops and retakes vb2_queue.lock itself, which heatmap already sets.
+  * goog_touch_interface panel bridge: drm_bridge_funcs lost the
+    non-atomic .enable/.disable (-> .atomic_enable/.atomic_disable), and
+    atomic_reset/drm_atomic_helper_bridge_reset became
+    atomic_create_state/drm_atomic_helper_bridge_create_state.
+---
+diff --git a/v1/goog_touch_interface.c b/v1/goog_touch_interface.c
+index 3bb378e..b82f4d8 100644
+--- a/v1/goog_touch_interface.c
++++ b/v1/goog_touch_interface.c
+@@ -5,6 +5,7 @@
+  * Copyright 2022 Google LLC.
+  */
+ 
++#include <drm/drm_atomic_state_helper.h>
+ #include <linux/delay.h>
+ #include <linux/module.h>
+ #include <linux/input/mt.h>
+@@ -2302,7 +2303,8 @@ static void panel_bridge_detach(struct drm_bridge *bridge)
+ 	}
+ }
+ 
+-static void panel_bridge_enable(struct drm_bridge *bridge)
++static void panel_bridge_enable(struct drm_bridge *bridge,
++		struct drm_atomic_commit *state)
+ {
+ 	struct goog_touch_interface *gti =
+ 		container_of(bridge, struct goog_touch_interface, panel_bridge);
+@@ -2315,7 +2317,8 @@ static void panel_bridge_enable(struct drm_bridge *bridge)
+ 	goog_set_display_state(gti, GTI_DISPLAY_STATE_ON);
+ }
+ 
+-static void panel_bridge_disable(struct drm_bridge *bridge)
++static void panel_bridge_disable(struct drm_bridge *bridge,
++		struct drm_atomic_commit *state)
+ {
+ 	struct goog_touch_interface *gti =
+ 		container_of(bridge, struct goog_touch_interface, panel_bridge);
+@@ -2435,14 +2438,15 @@ static int panel_bridge_atomic_check(struct drm_bridge *bridge,
+ }
+ 
+ static const struct drm_bridge_funcs panel_bridge_funcs = {
++	/* android-mainline: non-atomic .enable/.disable are gone */
+ 	.attach = panel_bridge_attach,
+ 	.detach = panel_bridge_detach,
+-	.enable = panel_bridge_enable,
+-	.disable = panel_bridge_disable,
++	.atomic_enable = panel_bridge_enable,
++	.atomic_disable = panel_bridge_disable,
+ 	.mode_set = panel_bridge_mode_set,
+ 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+ 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+-	.atomic_reset = drm_atomic_helper_bridge_reset,
++	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+ 	.atomic_check = panel_bridge_atomic_check,
+ };
+ 
+diff --git a/v1/heatmap.c b/v1/heatmap.c
+index ac24f92..94a4a27 100644
+--- a/v1/heatmap.c
++++ b/v1/heatmap.c
+@@ -208,8 +208,6 @@ static const struct vb2_ops heatmap_queue_ops = {
+ 	.queue_setup        = heatmap_queue_setup,
+ 	.buf_queue          = heatmap_buffer_queue,
+ 	.stop_streaming     = stop_streaming,
+-	.wait_prepare       = vb2_ops_wait_prepare,
+-	.wait_finish        = vb2_ops_wait_finish,
+ };
+ 
+ static const struct vb2_queue heatmap_queue = {

@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] wlan/qcom/wcn6740/wlan: port to Linux 6.18 (lynx)
+Subject: [PATCH] wlan/qcom/wcn6740/wlan: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(wlan/qcom/wcn6740/wlan: port to Linux 6.18 (lynx))
 
 Port private/google-modules/wlan/qcom/wcn6740/wlan to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 API migrations. Mostly mechanical; entries that change behaviour say so:
@@ -24,7 +30,36 @@ API migrations. Mostly mechanical; entries that change behaviour say so:
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * in_irq() -> in_hardirq() (the alias is gone).
+  * hex2bin()/hex_to_bin() live in <linux/hex.h>.
 ---
+diff --git a/qca-wifi-host-cmn/hif/src/hif_runtime_pm.c b/qca-wifi-host-cmn/hif/src/hif_runtime_pm.c
+index d1cb7f1..fe35630 100644
+--- a/qca-wifi-host-cmn/hif/src/hif_runtime_pm.c
++++ b/qca-wifi-host-cmn/hif/src/hif_runtime_pm.c
+@@ -1539,7 +1539,7 @@ int hif_pm_runtime_prevent_suspend(struct hif_opaque_softc *ol_sc,
+ 	if (!context)
+ 		return -EINVAL;
+ 
+-	if (in_irq())
++	if (in_hardirq())
+ 		WARN_ON(1);
+ 
+ 	spin_lock_bh(&rpm_ctx->runtime_lock);
+@@ -1573,7 +1573,7 @@ int hif_pm_runtime_allow_suspend(struct hif_opaque_softc *ol_sc,
+ 	if (!context)
+ 		return -EINVAL;
+ 
+-	if (in_irq())
++	if (in_hardirq())
+ 		WARN_ON(1);
+ 
+ 	spin_lock_bh(&rpm_ctx->runtime_lock);
 diff --git a/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c b/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c
 index 6c1fc8e..65e6c7d 100644
 --- a/qca-wifi-host-cmn/ipa/core/src/wlan_ipa_core.c
@@ -78,10 +113,18 @@ index b8456e6..8721868 100644
  #define QDF_SYSCTL_PROC_DOINTVEC(ctl, write, filp, buffer, lenp, ppos) \
  	__QDF_SYSCTL_PROC_DOINTVEC(ctl, write, filp, buffer, lenp, ppos)
 diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h
-index 811e4b6..3da8697 100644
+index 811e4b6..d6b043c 100644
 --- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h
 +++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_hrtimer.h
-@@ -144,8 +144,12 @@ static inline void  __qdf_hrtimer_init(__qdf_hrtimer_data_t *timer,
+@@ -27,6 +27,7 @@
+ #include <linux/version.h>
+ #include <linux/delay.h>
+ #include <linux/timer.h>
++#include <linux/hrtimer_bases.h>	/* android-mainline: hrtimer_callback_running() moved here */
+ #include <linux/jiffies.h>
+ #include <qdf_types.h>
+ #include <i_qdf_trace.h>
+@@ -144,8 +145,12 @@ static inline void  __qdf_hrtimer_init(__qdf_hrtimer_data_t *timer,
  	timer->ctx = ctx;
  
  	if (timer->ctx == QDF_CONTEXT_HARDWARE) {
@@ -94,6 +137,41 @@ index 811e4b6..3da8697 100644
  	} else if (timer->ctx == QDF_CONTEXT_TASKLET) {
  		QDF_BUG(0);
  	}
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_lock.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_lock.h
+index ecc7114..df8cfa1 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_lock.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_lock.h
+@@ -263,7 +263,7 @@ static inline int __qdf_spin_is_locked(__qdf_spinlock_t *lock)
+  */
+ static inline int __qdf_spin_trylock_bh(__qdf_spinlock_t *lock)
+ {
+-	if (likely(irqs_disabled() || in_irq() || in_softirq()))
++	if (likely(irqs_disabled() || in_hardirq() || in_softirq()))
+ 		return spin_trylock(&lock->spinlock);
+ 
+ 	if (spin_trylock_bh(&lock->spinlock)) {
+@@ -293,7 +293,7 @@ static inline int __qdf_spin_trylock(__qdf_spinlock_t *lock)
+  */
+ static inline void __qdf_spin_lock_bh(__qdf_spinlock_t *lock)
+ {
+-	if (likely(irqs_disabled() || in_irq() || in_softirq())) {
++	if (likely(irqs_disabled() || in_hardirq() || in_softirq())) {
+ 		spin_lock(&lock->spinlock);
+ 	} else {
+ 		spin_lock_bh(&lock->spinlock);
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_nbuf.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_nbuf.h
+index 7dab0fc..0598d63 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_nbuf.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_nbuf.h
+@@ -823,7 +823,7 @@ __qdf_nbuf_t __qdf_nbuf_alloc_no_recycler(size_t size, int reserve, int align,
+  * called from interrupt context and then do it or else in
+  * normal case use GFP_KERNEL
+  *
+- * example     use "in_irq() || irqs_disabled()"
++ * example     use "in_hardirq() || irqs_disabled()"
+  *
+  * Return: cloned skb
+  */
 diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h
 index 4725740..594b592 100644
 --- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_net_if.h
@@ -168,6 +246,55 @@ index 1bbf212..0ddade7 100644
  }
  
  #endif /* _I_QDF_TIMER_H */
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_util.h b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_util.h
+index 9bcde5b..367126a 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/i_qdf_util.h
++++ b/qca-wifi-host-cmn/qdf/linux/src/i_qdf_util.h
+@@ -25,6 +25,7 @@
+ #ifndef _I_QDF_UTIL_H
+ #define _I_QDF_UTIL_H
+ 
++#include <linux/hex.h>
+ #include <linux/compiler.h>
+ #include <linux/kernel.h>
+ #include <linux/types.h>
+diff --git a/qca-wifi-host-cmn/qdf/linux/src/qdf_crypto.c b/qca-wifi-host-cmn/qdf/linux/src/qdf_crypto.c
+index 53b0b23..ec58a2b 100644
+--- a/qca-wifi-host-cmn/qdf/linux/src/qdf_crypto.c
++++ b/qca-wifi-host-cmn/qdf/linux/src/qdf_crypto.c
+@@ -174,7 +174,7 @@ static inline void leftshift_onebit(const uint8_t *input, uint8_t *output)
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
+ static void
+-generate_subkey(struct crypto_aes_ctx *aes_ctx, uint8_t *k1, uint8_t *k2)
++generate_subkey(const struct aes_enckey *aes_ctx, uint8_t *k1, uint8_t *k2)
+ {
+ 	uint8_t l[AES_BLOCK_SIZE], tmp[AES_BLOCK_SIZE];
+ 	const uint8_t const_rb[AES_BLOCK_SIZE] = {
+@@ -258,15 +258,20 @@ int qdf_crypto_aes_128_cmac(const uint8_t *key, const uint8_t *data,
+ 	uint8_t k1[AES_KEYSIZE_128], k2[AES_KEYSIZE_128];
+ 	int cmp_blk;
+ 	int i, num_block = (len + 15) / AES_BLOCK_SIZE;
+-	struct crypto_aes_ctx aes_ctx;
++	/*
++	 * junkyard (lynx-mainline): aes_encrypt() takes an encryption key
++	 * (struct aes_enckey, from aes_prepareenckey()) instead of crypto_aes_ctx;
++	 * CMAC only ever encrypts.
++	 */
++	struct aes_enckey aes_ctx;
+ 	int ret;
+ 
+ 	/*
+ 	 * Calculate MIC and then copy
+ 	 */
+-	ret = aes_expandkey(&aes_ctx, key, AES_KEYSIZE_128);
++	ret = aes_prepareenckey(&aes_ctx, key, AES_KEYSIZE_128);
+ 	if (ret) {
+-		qdf_err("aes_expandkey failed (%d)", ret);
++		qdf_err("aes_prepareenckey failed (%d)", ret);
+ 		return ret;
+ 	}
+ 
 diff --git a/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c b/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c
 index 6926702..58e10bb 100644
 --- a/qca-wifi-host-cmn/qdf/linux/src/qdf_mc_timer.c
@@ -308,6 +435,19 @@ index ff19de2..9ab4dcd 100644
  			wake_lock_name,
  			wlan_diag_event.name_len+1);
  
+diff --git a/qca-wifi-host-cmn/utils/logging/src/wlan_logging_sock_svc.c b/qca-wifi-host-cmn/utils/logging/src/wlan_logging_sock_svc.c
+index 0f33d3a..f451a21 100644
+--- a/qca-wifi-host-cmn/utils/logging/src/wlan_logging_sock_svc.c
++++ b/qca-wifi-host-cmn/utils/logging/src/wlan_logging_sock_svc.c
+@@ -296,7 +296,7 @@ static int wlan_queue_logmsg_for_app(void)
+ 
+ static const char *current_process_name(void)
+ {
+-	if (in_irq())
++	if (in_hardirq())
+ 		return "irq";
+ 
+ 	if (in_softirq())
 diff --git a/qca-wifi-host-cmn/utils/pktlog/linux_ac.c b/qca-wifi-host-cmn/utils/pktlog/linux_ac.c
 index bc052e6..07164f5 100644
 --- a/qca-wifi-host-cmn/utils/pktlog/linux_ac.c
@@ -507,8 +647,20 @@ index a2cb76b..65cd9f2 100644
  	}
  }
  #else
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg.c
+index c2244a8..3923706 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg.c
+@@ -25,6 +25,7 @@
+ 
+ /* Include Files */
+ 
++#include <linux/hex.h>
+ #include <linux/firmware.h>
+ #include <linux/string.h>
+ #include <wlan_hdd_includes.h>
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
-index 62cf368..55a7677 100644
+index 62cf368..5091688 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
 +++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
 @@ -7003,7 +7003,7 @@ __wlan_hdd_cfg80211_get_wifi_info(struct wiphy *wiphy,
@@ -520,7 +672,28 @@ index 62cf368..55a7677 100644
  			sizeof(driver_version));
  		skb_len += strlen(driver_version) + 1;
  		count++;
-@@ -24500,40 +24500,192 @@ bool wlan_hdd_cfg80211_rx_control_port(struct net_device *dev,
+@@ -24399,7 +24399,19 @@ static int _wlan_hdd_cfg80211_tx_control_port(struct wiphy *wiphy,
+ 	return errno;
+ }
+ 
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0) || \
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0))
++/*
++ * junkyard (lynx-mainline): android-mainline's cfg80211 passes the TX-status
++ * cookie by value (0 = no status wanted). It was unused here either way.
++ */
++static int wlan_hdd_cfg80211_tx_control_port(struct wiphy *wiphy,
++					     struct net_device *dev,
++					     const u8 *buf,
++					     size_t len,
++					     const u8 *dest, const __be16 proto,
++					     const bool unencrypted, int link_id,
++					     u64 cookie)
++#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0) || \
+ 	defined(CFG80211_TX_CONTROL_PORT_LINK_SUPPORT))
+ static int wlan_hdd_cfg80211_tx_control_port(struct wiphy *wiphy,
+ 					     struct net_device *dev,
+@@ -24500,40 +24512,192 @@ bool wlan_hdd_cfg80211_rx_control_port(struct net_device *dev,
   * @key_mgmt_set_pmk = Set pmk key management
   * @update_connect_params = Update connect params
   */
@@ -728,7 +901,7 @@ index 62cf368..55a7677 100644
  	.set_pmksa = wlan_hdd_cfg80211_set_pmksa,
  	.del_pmksa = wlan_hdd_cfg80211_del_pmksa,
  	.flush_pmksa = wlan_hdd_cfg80211_flush_pmksa,
-@@ -24569,7 +24721,7 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+@@ -24569,7 +24733,7 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
  	.channel_switch = wlan_hdd_cfg80211_channel_switch,
  #endif
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -737,7 +910,7 @@ index 62cf368..55a7677 100644
  #endif
  #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) || \
  	defined(CFG80211_ABORT_SCAN)
-@@ -24592,8 +24744,8 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+@@ -24592,8 +24756,8 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
  	.del_nan_func = wlan_hdd_cfg80211_del_nan_func,
  	.nan_change_conf = wlan_hdd_cfg80211_nan_change_conf,
  #endif
@@ -839,6 +1012,18 @@ index 7a68849..e7bfa6f 100644
  
  	hdd_set_ap_ops(dev);
  
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c b/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c
+index 7cbf683..19bf901 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c
+@@ -35,6 +35,7 @@
+ #include "scheduler_api.h"
+ #include "wlan_reg_ucfg_api.h"
+ #include "wlan_hdd_p2p.h"
++#include <linux/hex.h>
+ #include <linux/ctype.h>
+ #include "wma.h"
+ #include "wlan_hdd_napi.h"
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c b/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c
 index 141adbf..2e9fccc 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_lpass.c

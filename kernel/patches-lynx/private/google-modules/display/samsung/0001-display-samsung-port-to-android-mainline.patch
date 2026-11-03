@@ -1,0 +1,1549 @@
+From: junkyard
+Subject: [PATCH] display/samsung: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(display/samsung: port to Linux 6.18 (lynx))
+
+Port private/google-modules/display/samsung to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - platform_driver.remove returns void (6.11)
+  - strlcpy() removed, use strscpy() (6.8)
+  - of_property_for_each_u32() takes 3 arguments (6.11)
+  - MODULE_IMPORT_NS() takes a string literal (6.13)
+  - <asm/unaligned.h> moved to <linux/unaligned.h> (6.12)
+  - iommu_register_device_fault_handler() removed (6.8): use the pixel_iommu fault registry that samsung_iommu.ko exports
+  - DRM: fb_create() takes the format info, get_format_info(u32, u64) (6.17)
+  - DRM: drm_dbg_printer(), struct_mutex and drm_driver.date removed
+  - drm_info()/drm_warn() now require a real struct drm_device
+  - panel: drm_bridge attach takes the encoder; atomic_* callbacks take drm_atomic_state (6.16)
+  - panel: include <linux/debugfs.h> explicitly
+
+Files: dp_audio/dp_dma.c, exynos_drm_debug.c, exynos_drm_decon.c, exynos_drm_dp.c, exynos_drm_dpp.c, exynos_drm_drv.c, exynos_drm_dsim.c, exynos_drm_fb.c, exynos_drm_gem.c, exynos_drm_tui.c, exynos_drm_writeback.c, panel/panel-samsung-drv.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * struct drm_atomic_state -> struct drm_atomic_commit (upstream
+    5164f7e7ff8e, applied with the same sed).
+  * atomic_reset/drm_atomic_helper_bridge_reset -> atomic_create_state/
+    drm_atomic_helper_bridge_create_state.
+  * dma_fence::lock is accessed through dma_fence_spinlock() /
+    dma_fence_{lock_irqsave,unlock_irqrestore}() now.
+  * panel/panel-samsung-drv.c: drm_panel_init() is static; same
+    jy_drm_panel_init() as display/common's gs_panel (see there).
+    FB_BLANK_* needs <linux/fb.h>.
+  * dp_audio/dp_dma.c: RESERVEDMEM_OF_DECLARE() takes a reserved_mem_ops
+    table; node_init gets the fdt node.
+  * mechanical of_node_to_fwnode()/irq_domain_add_*() conversions.
+---
+diff --git a/dp_audio/dp_dma.c b/dp_audio/dp_dma.c
+index 9b51c0c..7709472 100644
+--- a/dp_audio/dp_dma.c
++++ b/dp_audio/dp_dma.c
+@@ -180,14 +180,19 @@ out:
+ 	return vaddr;
+ }
+ 
+-static int __init dp_ado_rmem_setup(struct reserved_mem *rmem)
++static int __init dp_ado_rmem_setup(unsigned long node, struct reserved_mem *rmem)
+ {
+ 	pr_info("%s: base=%pa, size=%pa\n", __func__, &rmem->base, &rmem->size);
+ 	dp_ado_rmem = rmem;
+ 	return 0;
+ }
+ 
+-RESERVEDMEM_OF_DECLARE(dp_ado_rmem, "exynos,dp_ado_rmem", dp_ado_rmem_setup);
++/* android-mainline: RESERVEDMEM_OF_DECLARE() takes a reserved_mem_ops table. */
++static const struct reserved_mem_ops dp_ado_rmem_rmem_ops = {
++	.node_init	= dp_ado_rmem_setup,
++};
++
++RESERVEDMEM_OF_DECLARE(dp_ado_rmem, "exynos,dp_ado_rmem", &dp_ado_rmem_rmem_ops);
+ 
+ #if !IS_ENABLED(CONFIG_SWITCH) && !IS_ENABLED(CONFIG_EXTCON)
+ #error "need to select SWITCH or EXTCON"
+@@ -853,7 +858,7 @@ static int dma_new(struct snd_soc_component *component, struct snd_soc_pcm_runti
+ static int dp_ado_hw_params_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+ 	struct device *dev = cmpnt->dev;
+ 	struct dp_audio_pdata *pdata = dev_get_drvdata(dev);
+ 	struct soc_mixer_control *mc =
+@@ -910,7 +915,7 @@ static int dma_ioctl(struct snd_soc_component *component,
+ static const struct snd_soc_component_driver dp_dma_cmpnt_drv = {
+ 	.controls		= dp_ado_controls,
+ 	.num_controls		= ARRAY_SIZE(dp_ado_controls),
+-	.pcm_construct		= dma_new,
++	.pcm_new		= dma_new,
+ 	.pcm_destruct		= dma_free_dma_buffers,
+ 	.open			= dma_open,
+ 	.close			= dma_close,
+@@ -988,9 +993,8 @@ static int samsung_dp_dma_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static int samsung_dp_dma_remove(struct platform_device *pdev)
++static void samsung_dp_dma_remove(struct platform_device *pdev)
+ {
+-	return 0;
+ }
+ 
+ static const struct of_device_id samsung_dp_dma_match[] = {
+@@ -1140,12 +1144,11 @@ static int samsung_display_adma_probe(struct platform_device *pdev)
+ 	return of_platform_populate(np, NULL, NULL, dev);
+ }
+ 
+-static int samsung_display_adma_remove(struct platform_device *pdev)
++static void samsung_display_adma_remove(struct platform_device *pdev)
+ {
+ 	vunmap(dp_ado_reserved_mem);
+ 	dp_ado_reserved_mem = NULL;
+ 	snd_soc_unregister_component(&pdev->dev);
+-	return 0;
+ }
+ 
+ static const struct of_device_id samsung_display_adma_match[] = {
+diff --git a/exynos_drm_connector.h b/exynos_drm_connector.h
+index 1914036..5a3a3dc 100644
+--- a/exynos_drm_connector.h
++++ b/exynos_drm_connector.h
+@@ -276,7 +276,7 @@ exynos_drm_connector_get_properties(struct exynos_drm_connector *exynos_conector
+ 
+ /**
+  * crtc_get_phys_connector_state() - Finds connector state associated with crtc
+- * @state: drm_atomic_state to check for connector states
++ * @state: drm_atomic_commit to check for connector states
+  * @crtc_state: crtc_state to check connectors against
+  *
+  * A given crtc_state may be connected to a mixture of physical connectors and
+@@ -287,7 +287,7 @@ exynos_drm_connector_get_properties(struct exynos_drm_connector *exynos_conector
+  *         such connector is present
+  */
+ static inline struct drm_connector_state *
+-crtc_get_phys_connector_state(const struct drm_atomic_state *state,
++crtc_get_phys_connector_state(const struct drm_atomic_commit *state,
+ 			      const struct drm_crtc_state *crtc_state)
+ {
+ 	const struct drm_connector *conn;
+diff --git a/exynos_drm_crtc.c b/exynos_drm_crtc.c
+index aa75674..d02e3ec 100644
+--- a/exynos_drm_crtc.c
++++ b/exynos_drm_crtc.c
+@@ -40,7 +40,7 @@ enum crtc_active_state {
+ };
+ 
+ static void exynos_drm_crtc_atomic_enable(struct drm_crtc *crtc,
+-					  struct drm_atomic_state *state)
++					  struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc_state *old_state = drm_atomic_get_old_crtc_state(state, crtc);
+ 	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+@@ -59,7 +59,7 @@ static void exynos_drm_crtc_atomic_enable(struct drm_crtc *crtc,
+ }
+ 
+ static void exynos_drm_crtc_atomic_disable(struct drm_crtc *crtc,
+-					   struct drm_atomic_state *state)
++					   struct drm_atomic_commit *state)
+ {
+ 	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+ 	const enum crtc_active_state active_state =
+@@ -154,7 +154,7 @@ static void exynos_crtc_update_lut(struct drm_crtc *crtc,
+ }
+ 
+ static int exynos_crtc_atomic_check(struct drm_crtc *crtc,
+-				     struct drm_atomic_state *state)
++				     struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+ 	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+@@ -270,7 +270,7 @@ static int exynos_crtc_atomic_check(struct drm_crtc *crtc,
+ }
+ 
+ static void exynos_crtc_atomic_begin(struct drm_crtc *crtc,
+-				     struct drm_atomic_state *state)
++				     struct drm_atomic_commit *state)
+ {
+ 	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+ 
+@@ -279,7 +279,7 @@ static void exynos_crtc_atomic_begin(struct drm_crtc *crtc,
+ }
+ 
+ static void exynos_crtc_atomic_flush(struct drm_crtc *crtc,
+-				     struct drm_atomic_state *state)
++				     struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc_state *old_crtc_state = drm_atomic_get_old_crtc_state(state, crtc);
+ 	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+@@ -477,18 +477,18 @@ exynos_drm_crtc_duplicate_state(struct drm_crtc *crtc)
+ 	return &copy->base;
+ }
+ 
+-struct drm_atomic_state
++struct drm_atomic_commit
+ *exynos_duplicate_active_crtc_state(struct drm_crtc *crtc,
+ 				struct drm_modeset_acquire_ctx *ctx)
+ {
+ 	struct drm_device *dev = crtc->dev;
+-	struct drm_atomic_state *state;
++	struct drm_atomic_commit *state;
+ 	struct drm_crtc_state *crtc_state;
+ 	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
+ 	struct decon_device *decon = exynos_crtc->ctx;
+ 	int err;
+ 
+-	state = drm_atomic_state_alloc(dev);
++	state = drm_atomic_commit_alloc(dev);
+ 	if (!state)
+ 		return ERR_PTR(-ENOMEM);
+ 
+@@ -502,7 +502,7 @@ struct drm_atomic_state
+ 
+ 	if (!crtc_state->active) {
+ 		if (!atomic_read(&decon->recovery.recovering)) {
+-			drm_atomic_state_put(state);
++			drm_atomic_commit_put(state);
+ 			return NULL;
+ 		}
+ 		pr_warn("crtc[%s]: skipping duplication of inactive crtc state\n", crtc->name);
+@@ -523,14 +523,14 @@ struct drm_atomic_state
+ 
+ free_state:
+ 	if (err < 0) {
+-		drm_atomic_state_put(state);
++		drm_atomic_commit_put(state);
+ 		state = ERR_PTR(err);
+ 	}
+ 
+ 	return state;
+ }
+ 
+-struct drm_atomic_state
++struct drm_atomic_commit
+ *exynos_crtc_suspend(struct drm_crtc *crtc,
+ 			struct drm_modeset_acquire_ctx *ctx)
+ {
+@@ -539,16 +539,16 @@ struct drm_atomic_state
+ 	struct drm_connector_state *conn_state;
+ 	struct drm_plane *plane;
+ 	struct drm_plane_state *plane_state;
+-	struct drm_atomic_state *state, *suspend_state;
++	struct drm_atomic_commit *state, *suspend_state;
+ 	int ret, i;
+ 
+ 	suspend_state = exynos_duplicate_active_crtc_state(crtc, ctx);
+ 	if (IS_ERR_OR_NULL(suspend_state))
+ 		return suspend_state;
+ 
+-	state = drm_atomic_state_alloc(crtc->dev);
++	state = drm_atomic_commit_alloc(crtc->dev);
+ 	if (!state) {
+-		drm_atomic_state_put(suspend_state);
++		drm_atomic_commit_put(suspend_state);
+ 		return ERR_PTR(-ENOMEM);
+ 	}
+ 	state->acquire_ctx = ctx;
+@@ -590,22 +590,22 @@ retry:
+ 	ret = drm_atomic_commit(state);
+ out:
+ 	if (ret == -EDEADLK) {
+-		drm_atomic_state_clear(state);
+-		drm_atomic_state_clear(suspend_state);
++		drm_atomic_commit_clear(state);
++		drm_atomic_commit_clear(suspend_state);
+ 		ret = drm_modeset_backoff(ctx);
+ 		if (!ret)
+ 			goto retry;
+ 	} else if (ret) {
+-		drm_atomic_state_put(suspend_state);
++		drm_atomic_commit_put(suspend_state);
+ 		suspend_state = ERR_PTR(ret);
+ 	}
+ 
+-	drm_atomic_state_put(state);
++	drm_atomic_commit_put(state);
+ 
+ 	return suspend_state;
+ }
+ 
+-int exynos_crtc_resume(struct drm_atomic_state *state,
++int exynos_crtc_resume(struct drm_atomic_commit *state,
+ 				struct drm_modeset_acquire_ctx *ctx)
+ {
+ 	return drm_atomic_helper_commit_duplicated_state(state, ctx);
+@@ -1274,7 +1274,7 @@ void exynos_drm_crtc_te_handler(struct drm_crtc *crtc)
+ 		exynos_crtc->ops->te_handler(exynos_crtc);
+ }
+ 
+-void exynos_crtc_wait_for_flip_done(struct drm_atomic_state *old_state)
++void exynos_crtc_wait_for_flip_done(struct drm_atomic_commit *old_state)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
+@@ -1319,7 +1319,7 @@ bool exynos_crtc_needs_disable(struct drm_crtc_state *old_state,
+ }
+ 
+ void exynos_crtc_set_mode(struct drm_device *dev,
+-			struct drm_atomic_state *old_state)
++			struct drm_atomic_commit *old_state)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *new_crtc_state;
+diff --git a/exynos_drm_crtc.h b/exynos_drm_crtc.h
+index d2c75ce..06aa28a 100644
+--- a/exynos_drm_crtc.h
++++ b/exynos_drm_crtc.h
+@@ -58,20 +58,20 @@ void exynos_drm_crtc_te_handler(struct drm_crtc *crtc);
+ 
+ void exynos_crtc_handle_event(struct exynos_drm_crtc *exynos_crtc);
+ 
+-void exynos_crtc_wait_for_flip_done(struct drm_atomic_state *old_state);
++void exynos_crtc_wait_for_flip_done(struct drm_atomic_commit *old_state);
+ 
+ bool exynos_crtc_needs_disable(struct drm_crtc_state *old_state,
+ 			struct drm_crtc_state *new_state);
+ 
+ void exynos_crtc_set_mode(struct drm_device *dev,
+-			struct drm_atomic_state *old_state);
++			struct drm_atomic_commit *old_state);
+ 
+-struct drm_atomic_state
++struct drm_atomic_commit
+ *exynos_duplicate_active_crtc_state(struct drm_crtc *crtc,
+ 				struct drm_modeset_acquire_ctx *ctx);
+-struct drm_atomic_state
++struct drm_atomic_commit
+ *exynos_crtc_suspend(struct drm_crtc *crtc,
+ 		struct drm_modeset_acquire_ctx *ctx);
+-int exynos_crtc_resume(struct drm_atomic_state *state,
++int exynos_crtc_resume(struct drm_atomic_commit *state,
+ 				struct drm_modeset_acquire_ctx *ctx);
+ #endif
+diff --git a/exynos_drm_debug.c b/exynos_drm_debug.c
+index ac50b6e..f383283 100644
+--- a/exynos_drm_debug.c
++++ b/exynos_drm_debug.c
+@@ -10,6 +10,7 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/vmalloc.h>
+ #include <linux/kernel.h>
+ #include <linux/console.h>
+ #include <linux/debugfs.h>
+@@ -1647,7 +1648,7 @@ bool is_console_enabled(void)
+ static void buf_dump_all(const struct decon_device *decon)
+ {
+ 	struct drm_printer p = is_console_enabled() ?
+-		drm_debug_printer("[drm]") : drm_info_printer(decon->dev);
++		drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(decon->dev);
+ 	int i;
+ 
+ 	for (i = 0; i < decon->dpp_cnt; ++i)
+@@ -2167,7 +2168,7 @@ void decon_dump_event_condition(const struct decon_device *decon,
+ 		enum dpu_event_condition condition)
+ {
+ 	struct drm_printer p = is_console_enabled() ?
+-		drm_debug_printer("[drm]") : drm_info_printer(decon->dev);
++		drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(decon->dev);
+ 	u32 print_log_size;
+ 
+ 	if (decon_dump_ignore(condition))
+diff --git a/exynos_drm_decon.c b/exynos_drm_decon.c
+index 9819ffd..841015f 100644
+--- a/exynos_drm_decon.c
++++ b/exynos_drm_decon.c
+@@ -48,6 +48,8 @@
+ #include "exynos_drm_crtc.h"
+ #include "exynos_drm_decon.h"
+ #include "exynos_drm_dpp.h"
++#include <arm-smmu-v3/pixel-iommu-fault.h>
++
+ #include "exynos_drm_drv.h"
+ #include "exynos_drm_dsim.h"
+ #include "exynos_drm_fb.h"
+@@ -120,7 +122,7 @@ void decon_dump_locked(const struct decon_device *decon, struct drm_printer *p)
+ 
+ 	if (!p) {
+ 		printer = is_console_enabled() ?
+-			drm_debug_printer("[drm]") : drm_info_printer(decon->dev);
++			drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(decon->dev);
+ 		pointer = &printer;
+ 	} else {
+ 		pointer = p;
+@@ -367,7 +369,7 @@ static int decon_get_crtc_out_type(const struct drm_crtc_state *crtc_state)
+ static bool has_writeback_job(struct drm_crtc_state *new_crtc_state)
+ {
+ 	int i;
+-	struct drm_atomic_state *state = new_crtc_state->state;
++	struct drm_atomic_commit *state = new_crtc_state->state;
+ 	struct drm_connector_state *conn_state;
+ 	struct drm_connector *conn;
+ 
+@@ -554,7 +556,7 @@ static bool decon_is_seamless_possible(const struct decon_device *decon,
+ static int decon_check_modeset(struct exynos_drm_crtc *exynos_crtc,
+ 			       struct drm_crtc_state *crtc_state)
+ {
+-	struct drm_atomic_state *state = crtc_state->state;
++	struct drm_atomic_commit *state = crtc_state->state;
+ 	const struct decon_device *decon = exynos_crtc->ctx;
+ 	struct exynos_drm_crtc_state *exynos_crtc_state;
+ 	struct drm_crtc *crtc = &exynos_crtc->base;
+@@ -625,7 +627,7 @@ static int _decon_handover_check(struct exynos_drm_crtc *exynos_crtc,
+ 	bool found_handover_dpp = false;
+ 
+ 	if (exynos_crtc_state->planes_updated) {
+-		drm_info(decon, "%s: planes updated on commit, skipping handover\n", __func__);
++		dev_info(decon->dev, "%s: planes updated on commit, skipping handover\n", __func__);
+ 		return 0;
+ 	}
+ 
+@@ -660,12 +662,12 @@ static int _decon_handover_check(struct exynos_drm_crtc *exynos_crtc,
+ 	decon_debug(decon, "%s: final win_mask=0x%lx\n", __func__, win_mask);
+ 
+ 	if (!win_mask) {
+-		drm_warn(decon, "%s: handover memory defined, but no windows attached\n", __func__);
++		dev_warn(decon->dev, "%s: handover memory defined, but no windows attached\n", __func__);
+ 		return -ENOENT;
+ 	}
+ 
+ 	if (!found_handover_dpp) {
+-		drm_warn(decon, "%s: handover memory defined, but cannot find handover dpp\n",
++		dev_warn(decon->dev, "%s: handover memory defined, but cannot find handover dpp\n",
+ 				__func__);
+ 		return -EBUSY;
+ 	}
+@@ -746,7 +748,7 @@ static void decon_calc_hist_roi(int w, int h, int d, int r, int *x, int *y, int
+ 	*side_len = 2 * half_side_len;
+ }
+ 
+-static int decon_update_lhbm_hist_roi(struct decon_device *decon, struct drm_atomic_state *state)
++static int decon_update_lhbm_hist_roi(struct decon_device *decon, struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc_state *new_crtc_state;
+ 	struct gs_drm_connector_state *old_gs_connector_state, *new_gs_connector_state;
+@@ -805,7 +807,7 @@ static int decon_update_lhbm_hist_roi(struct decon_device *decon, struct drm_ato
+ }
+ #endif
+ 
+-static void decon_atomic_begin(struct exynos_drm_crtc *crtc, struct drm_atomic_state *state)
++static void decon_atomic_begin(struct exynos_drm_crtc *crtc, struct drm_atomic_commit *state)
+ {
+ 	struct decon_device *decon = crtc->ctx;
+ 
+@@ -1387,7 +1389,7 @@ static void decon_seamless_mode_bts_update(struct decon_device *decon,
+ #define DEFAULT_VBLANK_USEC	100
+ 
+ static unsigned int decon_get_vblank_usec(const struct drm_crtc_state *crtc_state,
+-					const struct drm_atomic_state *old_state)
++					const struct drm_atomic_commit *old_state)
+ {
+ 	const struct drm_connector_state *conn_state =
+ 		crtc_get_phys_connector_state(old_state, crtc_state);
+@@ -1413,7 +1415,7 @@ static unsigned int decon_get_vblank_usec(const struct drm_crtc_state *crtc_stat
+ 
+ void decon_mode_bts_pre_update(struct decon_device *decon,
+ 				const struct drm_crtc_state *crtc_state,
+-				const struct drm_atomic_state *old_state)
++				const struct drm_atomic_commit *old_state)
+ {
+ 	const struct drm_connector_state *conn_state =
+ 		crtc_get_phys_connector_state(old_state, crtc_state);
+@@ -1471,7 +1473,7 @@ static void decon_seamless_mode_set(struct exynos_drm_crtc *exynos_crtc,
+ 	struct drm_crtc *crtc = &exynos_crtc->base;
+ 	struct decon_device *decon = exynos_crtc->ctx;
+ 	struct drm_crtc_state *crtc_state = crtc->state;
+-	struct drm_atomic_state *old_state = old_crtc_state->state;
++	struct drm_atomic_commit *old_state = old_crtc_state->state;
+ 	struct drm_connector *conn;
+ 	struct drm_connector_state *conn_state;
+ 	struct drm_display_mode *mode, *adjusted_mode;
+@@ -1620,7 +1622,7 @@ static void decon_enable(struct exynos_drm_crtc *exynos_crtc, struct drm_crtc_st
+ 	decon_info(decon, "%s +\n", __func__);
+ 
+ 	if (crtc_state->mode_changed || crtc_state->connectors_changed) {
+-		const struct drm_atomic_state *state = old_crtc_state->state;
++		const struct drm_atomic_commit *state = old_crtc_state->state;
+ 		const struct drm_connector_state *conn_state =
+ 			crtc_get_phys_connector_state(state, crtc_state);
+ 
+@@ -1890,7 +1892,9 @@ static const struct exynos_drm_crtc_ops decon_crtc_ops = {
+ 	.wait_for_flip_done = decon_wait_for_flip_done,
+ };
+ 
+-static int dpu_sysmmu_fault_handler(struct iommu_fault *fault, void *data)
++/* 6.8 removed iommu_register_device_fault_handler(); see pixel-iommu-fault.h */
++static int dpu_sysmmu_fault_handler(struct device *fault_dev, unsigned long iova,
++				    u32 pasid, int fault_flags, void *data)
+ {
+ 	struct decon_device *decon = data;
+ 
+@@ -1978,7 +1982,7 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
+ 
+ 	priv->iommu_client = dev;
+ 
+-	iommu_register_device_fault_handler(dev, dpu_sysmmu_fault_handler, decon);
++	pixel_iommu_register_fault_handler(dev, dpu_sysmmu_fault_handler, decon);
+ 
+ #if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+ 	decon->itmon_nb.notifier_call = dpu_itmon_notifier;
+@@ -2027,7 +2031,7 @@ static void decon_unbind(struct device *dev, struct device *master,
+ #if IS_ENABLED(CONFIG_EXYNOS_ITMON)
+ 	itmon_notifier_chain_unregister(&decon->itmon_nb);
+ #endif
+-	iommu_unregister_device_fault_handler(dev);
++	pixel_iommu_unregister_fault_handler(dev);
+ 
+ 	decon_debug(decon, "%s -\n", __func__);
+ }
+@@ -2140,8 +2144,6 @@ static irqreturn_t decon_fs_irq_handler(int irq, void *dev_data)
+ static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
+ {
+ 	struct device_node *dpp_np = NULL;
+-	struct property *prop;
+-	const __be32 *cur;
+ 	u32 val;
+ 	int ret = 0, i, count;
+ 	int dpp_id;
+@@ -2404,7 +2406,7 @@ static int decon_parse_dt(struct decon_device *decon, struct device_node *np)
+ 	if (dpp_np)
+ 		of_node_put(dpp_np);
+ 
+-	of_property_for_each_u32(np, "connector", prop, cur, val)
++	of_property_for_each_u32(np, "connector", val)
+ 		decon->con_type |= val;
+ 
+ 	return 0;
+@@ -2743,7 +2745,7 @@ err:
+ 	return ret;
+ }
+ 
+-static int decon_remove(struct platform_device *pdev)
++static void decon_remove(struct platform_device *pdev)
+ {
+ 	struct decon_device *decon = platform_get_drvdata(pdev);
+ 
+@@ -2756,8 +2758,6 @@ static int decon_remove(struct platform_device *pdev)
+ 
+ 	__decon_unmap_regs(decon);
+ 	iounmap(decon->regs.regs);
+-
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM
+@@ -2818,7 +2818,7 @@ static int decon_runtime_resume(struct device *dev)
+ static int decon_atomic_suspend(struct decon_device *decon)
+ {
+ 	struct drm_modeset_acquire_ctx ctx;
+-	struct drm_atomic_state *suspend_state;
++	struct drm_atomic_commit *suspend_state;
+ 	int ret = 0;
+ 
+ 	if (!decon) {
+@@ -2849,7 +2849,7 @@ static int decon_atomic_resume(struct decon_device *decon)
+ 	drm_modeset_acquire_init(&ctx, 0);
+ 	if (!IS_ERR_OR_NULL(decon->suspend_state)) {
+ 		ret = exynos_crtc_resume(decon->suspend_state, &ctx);
+-		drm_atomic_state_put(decon->suspend_state);
++		drm_atomic_commit_put(decon->suspend_state);
+ 	}
+ 	decon->suspend_state = NULL;
+ 	drm_modeset_drop_locks(&ctx);
+diff --git a/exynos_drm_decon.h b/exynos_drm_decon.h
+index 57072ce..b4b21f6 100644
+--- a/exynos_drm_decon.h
++++ b/exynos_drm_decon.h
+@@ -504,7 +504,7 @@ struct decon_device {
+ 	struct device			*dev;
+ 	struct drm_device		*drm_dev;
+ 	struct exynos_drm_crtc		*crtc;
+-	struct drm_atomic_state		*suspend_state;
++	struct drm_atomic_commit		*suspend_state;
+ 	/* dpp information saved in dpp channel number order */
+ 	struct dpp_device		*dpp[MAX_WIN_PER_DECON];
+ 	struct dpp_device		*rcd;
+@@ -594,13 +594,13 @@ void decon_force_vblank_event(struct decon_device *decon);
+ #if IS_ENABLED(CONFIG_EXYNOS_BTS)
+ void decon_mode_bts_pre_update(struct decon_device *decon,
+ 				const struct drm_crtc_state *crtc_state,
+-				const struct drm_atomic_state *state);
++				const struct drm_atomic_commit *state);
+ void decon_mode_bts_op_rate_update(struct decon_device *decon,
+ 				const u32 op_rate);
+ #else
+ static inline void decon_mode_bts_pre_update(struct decon_device *decon,
+ 				const struct drm_crtc_state *crtc_state,
+-				const struct drm_atomic_state *state) { }
++				const struct drm_atomic_commit *state) { }
+ static inline void decon_mode_bts_op_rate_update(struct decon_device *decon,
+ 				const u32 op_rate) { }
+ #endif
+diff --git a/exynos_drm_dp.c b/exynos_drm_dp.c
+index 7af1f2c..3beb88a 100644
+--- a/exynos_drm_dp.c
++++ b/exynos_drm_dp.c
+@@ -2770,7 +2770,7 @@ static enum drm_mode_status dp_conn_mode_valid(struct drm_connector *connector,
+ 	return MODE_OK;
+ }
+ 
+-static int dp_conn_atomic_check(struct drm_connector *c, struct drm_atomic_state *state)
++static int dp_conn_atomic_check(struct drm_connector *c, struct drm_atomic_commit *state)
+ {
+ 	struct dp_device *dp = connector_to_dp(c);
+ 
+@@ -3515,7 +3515,7 @@ err:
+ 	return ret;
+ }
+ 
+-static int dp_remove(struct platform_device *pdev)
++static void dp_remove(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct dp_device *dp = platform_get_drvdata(pdev);
+@@ -3536,7 +3536,6 @@ static int dp_remove(struct platform_device *pdev)
+ 	destroy_workqueue(dp->dp_wq);
+ 
+ 	dp_info(dp, "DP Driver has been removed\n");
+-	return 0;
+ }
+ 
+ static const struct of_device_id dp_of_match[] = {
+diff --git a/exynos_drm_dpp.c b/exynos_drm_dpp.c
+index 51d339b..97b8859 100644
+--- a/exynos_drm_dpp.c
++++ b/exynos_drm_dpp.c
+@@ -1481,7 +1481,7 @@ fail:
+ 	return ret;
+ }
+ 
+-static int dpp_remove(struct platform_device *pdev)
++static void dpp_remove(struct platform_device *pdev)
+ {
+ 	struct dpp_device *dpp = platform_get_drvdata(pdev);
+ 
+@@ -1497,8 +1497,6 @@ static int dpp_remove(struct platform_device *pdev)
+ 	if (test_bit(DPP_ATTR_HDR_COMM, &dpp->attr))
+ 		iounmap(dpp->regs.hdr_comm_base_regs);
+ 	iounmap(dpp->regs.dma_base_regs);
+-
+-	return 0;
+ }
+ 
+ struct platform_driver dpp_driver = {
+diff --git a/exynos_drm_dqe.c b/exynos_drm_dqe.c
+index 5eb51e1..686831b 100644
+--- a/exynos_drm_dqe.c
++++ b/exynos_drm_dqe.c
+@@ -1382,14 +1382,14 @@ static ssize_t force_update_store(struct device *dev,
+ 	struct decon_device *decon = dqe->decon;
+ 	struct drm_crtc *crtc = &decon->crtc->base;
+ 	struct drm_device *drm_dev = decon->drm_dev;
+-	struct drm_atomic_state *state;
++	struct drm_atomic_commit *state;
+ 	struct drm_crtc_state *crtc_state;
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	int ret = 0;
+ 
+ 	dqe->force_atc_config.dirty = true;
+ 
+-	state = drm_atomic_state_alloc(drm_dev);
++	state = drm_atomic_commit_alloc(drm_dev);
+ 	if (!state)
+ 		return -ENOMEM;
+ 	drm_modeset_acquire_init(&ctx, 0);
+@@ -1404,12 +1404,12 @@ retry:
+ 	ret = drm_atomic_commit(state);
+ out:
+ 	if (ret == -EDEADLK) {
+-		drm_atomic_state_clear(state);
++		drm_atomic_commit_clear(state);
+ 		ret = drm_modeset_backoff(&ctx);
+ 		if (!ret)
+ 			goto retry;
+ 	}
+-	drm_atomic_state_put(state);
++	drm_atomic_commit_put(state);
+ 	drm_modeset_drop_locks(&ctx);
+ 	drm_modeset_acquire_fini(&ctx);
+ 
+diff --git a/exynos_drm_drv.c b/exynos_drm_drv.c
+index 0c21183..cf579d1 100644
+--- a/exynos_drm_drv.c
++++ b/exynos_drm_drv.c
+@@ -137,7 +137,7 @@ int exynos_drm_drv_get_lhbm_gray_level(struct exynos_drm_connector *conn)
+ }
+ EXPORT_SYMBOL_GPL(exynos_drm_drv_get_lhbm_gray_level);
+ 
+-static struct exynos_drm_priv_state *exynos_drm_get_priv_state(struct drm_atomic_state *state)
++static struct exynos_drm_priv_state *exynos_drm_get_priv_state(struct drm_atomic_commit *state)
+ {
+ 	struct exynos_drm_private *priv = drm_to_exynos_dev(state->dev);
+ 
+@@ -182,7 +182,7 @@ static unsigned int exynos_drm_crtc_get_win_cnt(struct drm_crtc_state *crtc_stat
+ 	return num_planes ? : 1;
+ }
+ 
+-static int exynos_atomic_check_windows(struct drm_device *dev, struct drm_atomic_state *state)
++static int exynos_atomic_check_windows(struct drm_device *dev, struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
+@@ -300,7 +300,7 @@ static int exynos_atomic_check_windows(struct drm_device *dev, struct drm_atomic
+ 	return 0;
+ }
+ 
+-static void exynos_atomic_prepare_partial_update(struct drm_atomic_state *state)
++static void exynos_atomic_prepare_partial_update(struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
+@@ -353,7 +353,7 @@ static void exynos_atomic_prepare_partial_update(struct drm_atomic_state *state)
+ 	}
+ }
+ 
+-static void exynos_check_updated_planes(struct drm_device *dev, struct drm_atomic_state *state)
++static void exynos_check_updated_planes(struct drm_device *dev, struct drm_atomic_commit *state)
+ {
+ 	struct drm_plane *plane;
+ 	struct drm_plane_state *plane_state;
+@@ -375,7 +375,7 @@ static void exynos_check_updated_planes(struct drm_device *dev, struct drm_atomi
+ 	}
+ }
+ 
+-static int exynos_add_relevant_connectors(struct drm_atomic_state *state)
++static int exynos_add_relevant_connectors(struct drm_atomic_commit *state)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *crtc_state;
+@@ -436,7 +436,7 @@ static int exynos_add_relevant_connectors(struct drm_atomic_state *state)
+ }
+ 
+ int exynos_atomic_check(struct drm_device *dev,
+-			struct drm_atomic_state *state)
++			struct drm_atomic_commit *state)
+ {
+ 	const struct exynos_drm_private *private = drm_to_exynos_dev(dev);
+ 	int ret;
+@@ -497,7 +497,27 @@ static void exynos_atomic_destroy_priv_state(struct drm_private_obj *obj,
+ 	kfree(priv_state);
+ }
+ 
++/*
++ * junkyard (lynx-mainline): drm_atomic_private_obj_init() now allocates the
++ * initial state through ->atomic_create_state() instead of taking one. This is
++ * the state exynos_drm_bind() used to kzalloc and pass in.
++ */
++static struct drm_private_state *exynos_atomic_create_priv_state(struct drm_private_obj *obj)
++{
++	struct exynos_drm_priv_state *priv_state;
++
++	priv_state = kzalloc(sizeof(*priv_state), GFP_KERNEL);
++	if (!priv_state)
++		return ERR_PTR(-ENOMEM);
++
++	priv_state->available_win_mask = BIT(MAX_WIN_PER_DECON) - 1;
++	__drm_atomic_helper_private_obj_create_state(obj, &priv_state->base);
++
++	return &priv_state->base;
++}
++
+ static const struct drm_private_state_funcs exynos_priv_state_funcs = {
++	.atomic_create_state = exynos_atomic_create_priv_state,
+ 	.atomic_duplicate_state = exynos_atomic_duplicate_priv_state,
+ 	.atomic_destroy_state = exynos_atomic_destroy_priv_state,
+ };
+@@ -514,7 +534,7 @@ static void print_drm_plane_state_info(struct drm_printer *p,
+ }
+ 
+ static int exynos_atomic_helper_wait_for_fences(struct drm_device *dev,
+-				      struct drm_atomic_state *state,
++				      struct drm_atomic_commit *state,
+ 				      bool pre_swap)
+ {
+ 	struct drm_plane *plane;
+@@ -556,7 +576,7 @@ static int exynos_atomic_helper_wait_for_fences(struct drm_device *dev,
+ 			}
+ 			print_drm_plane_state_info(&p, new_plane_state);
+ 
+-			spin_lock_irq(fence->lock);
++			spin_lock_irq(dma_fence_spinlock(fence));
+ 			drm_printf(&p, "fence: %s-%s %llu-%llu status:%s\n",
+ 				fence->ops ? fence->ops->get_driver_name(fence) : "none",
+ 				fence->ops ? fence->ops->get_timeline_name(fence) : "none",
+@@ -569,7 +589,7 @@ static int exynos_atomic_helper_wait_for_fences(struct drm_device *dev,
+ 			}
+ 			if (fence->error)
+ 				drm_printf(&p, "fence: err=%d\n", fence->error);
+-			spin_unlock_irq(fence->lock);
++			spin_unlock_irq(dma_fence_spinlock(fence));
+ 
+ 			tmo = 0;
+ 			err = -ETIMEDOUT;
+@@ -585,7 +605,7 @@ static int exynos_atomic_helper_wait_for_fences(struct drm_device *dev,
+ 	return err;
+ }
+ 
+-static void commit_tail(struct drm_atomic_state *old_state)
++static void commit_tail(struct drm_atomic_commit *old_state)
+ {
+ 	int i;
+ 	const struct drm_mode_config_helper_funcs *funcs;
+@@ -626,14 +646,14 @@ static void commit_tail(struct drm_atomic_state *old_state)
+ 
+ 	drm_atomic_helper_commit_cleanup_done(old_state);
+ 
+-	drm_atomic_state_put(old_state);
++	drm_atomic_commit_put(old_state);
+ }
+ 
+ static void commit_kthread_work(struct kthread_work *work)
+ {
+ 	struct exynos_drm_crtc_state *old_exynos_crtc_state =
+ 		container_of(work, struct exynos_drm_crtc_state, commit_work);
+-	struct drm_atomic_state *old_state = old_exynos_crtc_state->base.state;
++	struct drm_atomic_commit *old_state = old_exynos_crtc_state->base.state;
+ 
+ 	BUG_ON(!old_state);
+ 	commit_tail(old_state);
+@@ -641,13 +661,13 @@ static void commit_kthread_work(struct kthread_work *work)
+ 
+ static void commit_work(struct work_struct *work)
+ {
+-	struct drm_atomic_state *old_state =
+-		container_of(work, struct drm_atomic_state, commit_work);
++	struct drm_atomic_commit *old_state =
++		container_of(work, struct drm_atomic_commit, commit_work);
+ 
+ 	commit_tail(old_state);
+ }
+ 
+-static void exynos_atomic_queue_work(struct drm_atomic_state *old_state)
++static void exynos_atomic_queue_work(struct drm_atomic_commit *old_state)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *old_crtc_state;
+@@ -679,7 +699,7 @@ static void exynos_atomic_queue_work(struct drm_atomic_state *old_state)
+ 	queue_work(system_highpri_wq, &old_state->commit_work);
+ }
+ 
+-int exynos_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state, bool nonblock)
++int exynos_atomic_commit(struct drm_device *dev, struct drm_atomic_commit *state, bool nonblock)
+ {
+ 	struct drm_crtc *crtc;
+ 	struct drm_crtc_state *old_crtc_state;
+@@ -746,7 +766,7 @@ int exynos_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
+ 	 * make sure work items don't artificially stall on each another.
+ 	 */
+ 
+-	drm_atomic_state_get(state);
++	drm_atomic_commit_get(state);
+ 	if (!nonblock)
+ 		commit_tail(state);
+ 	else
+@@ -773,7 +793,7 @@ int exynos_atomic_enter_tui(void)
+ 	int i, ret = 0;
+ 	struct decon_device *decon = get_decon_drvdata(0);
+ 	struct drm_device *dev = decon->drm_dev;
+-	struct drm_atomic_state *state;
++	struct drm_atomic_commit *state;
+ 	struct drm_mode_config *mode_config = &dev->mode_config;
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	struct drm_plane_state *plane_state;
+@@ -810,7 +830,7 @@ int exynos_atomic_enter_tui(void)
+ 
+ 	mode_config->suspend_state = state;
+ 
+-	state = drm_atomic_state_alloc(dev);
++	state = drm_atomic_commit_alloc(dev);
+ 	if (!state) {
+ 		ret = -ENOMEM;
+ 		goto err_state_alloc;
+@@ -893,11 +913,11 @@ int exynos_atomic_enter_tui(void)
+ 	}
+ 
+ err:
+-	drm_atomic_state_put(state);
++	drm_atomic_commit_put(state);
+ 
+ err_state_alloc:
+ 	if (ret) {
+-		drm_atomic_state_put(mode_config->suspend_state);
++		drm_atomic_commit_put(mode_config->suspend_state);
+ 		mode_config->suspend_state = NULL;
+ 	}
+ err_dup:
+@@ -923,7 +943,7 @@ int exynos_atomic_exit_tui(void)
+ 	int ret;
+ 	struct decon_device *decon = get_decon_drvdata(0);
+ 	struct drm_device *dev = decon->drm_dev;
+-	struct drm_atomic_state *state;
++	struct drm_atomic_commit *state;
+ 	struct drm_mode_config *mode_config = &dev->mode_config;
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	struct exynos_drm_private *private = drm_to_exynos_dev(dev);
+@@ -966,7 +986,7 @@ int exynos_atomic_exit_tui(void)
+ 
+ 	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
+ 	if (!ret)
+-		drm_atomic_state_put(state);
++		drm_atomic_commit_put(state);
+ 	mutex_unlock(&private->dp_tui_lock);
+ 
+ 	pr_debug("%s -\n", __func__);
+@@ -1029,7 +1049,6 @@ static struct drm_driver exynos_drm_driver = {
+ 	.fops			   = &exynos_drm_driver_fops,
+ 	.name			   = DRIVER_NAME,
+ 	.desc			   = DRIVER_DESC,
+-	.date			   = DRIVER_DATE,
+ 	.major			   = DRIVER_MAJOR,
+ 	.minor			   = DRIVER_MINOR,
+ };
+@@ -1116,7 +1135,6 @@ static int exynos_drm_bind(struct device *dev)
+ 	struct exynos_drm_private *private;
+ 	struct drm_encoder *encoder;
+ 	struct drm_device *drm;
+-	struct exynos_drm_priv_state *priv_state;
+ 	u32 wb_mask = 0;
+ 	u32 encoder_mask = 0;
+ 	int ret;
+@@ -1147,14 +1165,9 @@ static int exynos_drm_bind(struct device *dev)
+ 	/* create properties ahead of binding to make them available to all drivers */
+ 	exynos_drm_connector_create_properties(drm);
+ 
+-	priv_state = kzalloc(sizeof(*priv_state), GFP_KERNEL);
+-	if (!priv_state)
+-		return -ENOMEM;
+-
+-	priv_state->available_win_mask = BIT(MAX_WIN_PER_DECON) - 1;
+-
+-	drm_atomic_private_obj_init(drm, &private->obj, &priv_state->base,
+-				    &exynos_priv_state_funcs);
++	ret = drm_atomic_private_obj_init(drm, &private->obj, &exynos_priv_state_funcs);
++	if (ret)
++		return ret;
+ 
+ 	/* Try to bind all sub drivers. */
+ 	ret = component_bind_all(dev, drm);
+@@ -1268,10 +1281,9 @@ static int exynos_drm_platform_probe(struct platform_device *pdev)
+ 					       match);
+ }
+ 
+-static int exynos_drm_platform_remove(struct platform_device *pdev)
++static void exynos_drm_platform_remove(struct platform_device *pdev)
+ {
+ 	component_master_del(&pdev->dev, &exynos_drm_ops);
+-	return 0;
+ }
+ 
+ static void exynos_drm_platform_shutdown(struct platform_device *pdev)
+@@ -1400,5 +1412,5 @@ MODULE_AUTHOR("Inki Dae <inki.dae@samsung.com>");
+ MODULE_AUTHOR("Joonyoung Shim <jy0922.shim@samsung.com>");
+ MODULE_AUTHOR("Seung-Woo Kim <sw0312.kim@samsung.com>");
+ MODULE_DESCRIPTION("Samsung SoC DRM Driver");
+-MODULE_IMPORT_NS(DMA_BUF);
++MODULE_IMPORT_NS("DMA_BUF");
+ MODULE_LICENSE("GPL");
+diff --git a/exynos_drm_drv.h b/exynos_drm_drv.h
+index cffa900..47d9885 100644
+--- a/exynos_drm_drv.h
++++ b/exynos_drm_drv.h
+@@ -232,7 +232,7 @@ struct exynos_drm_crtc_ops {
+ 		const struct drm_display_mode *adjusted_mode);
+ 	int (*atomic_check)(struct exynos_drm_crtc *crtc,
+ 			    struct drm_crtc_state *state);
+-	void (*atomic_begin)(struct exynos_drm_crtc *crtc, struct drm_atomic_state *state);
++	void (*atomic_begin)(struct exynos_drm_crtc *crtc, struct drm_atomic_commit *state);
+ 	void (*update_plane)(struct exynos_drm_crtc *crtc,
+ 			     struct exynos_drm_plane *plane);
+ 	void (*disable_plane)(struct exynos_drm_crtc *crtc,
+@@ -393,7 +393,7 @@ to_exynos_priv_state(const struct drm_private_state *state)
+  */
+ struct exynos_drm_private {
+ 	struct drm_device drm;
+-	struct drm_atomic_state *suspend_state;
++	struct drm_atomic_commit *suspend_state;
+ 	struct device *iommu_client;
+ 	void *mapping;
+ 	bool tui_enabled;
+@@ -429,9 +429,9 @@ static inline int exynos_dpi_bind(struct drm_device *dev,
+ }
+ #endif
+ 
+-int exynos_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
++int exynos_atomic_commit(struct drm_device *dev, struct drm_atomic_commit *state,
+ 			 bool nonblock);
+-int exynos_atomic_check(struct drm_device *dev, struct drm_atomic_state *state);
++int exynos_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state);
+ int exynos_atomic_enter_tui(void);
+ int exynos_atomic_exit_tui(void);
+ 
+diff --git a/exynos_drm_dsim.c b/exynos_drm_dsim.c
+index 35244d6..78c7283 100644
+--- a/exynos_drm_dsim.c
++++ b/exynos_drm_dsim.c
+@@ -13,7 +13,8 @@
+ 
+ #define pr_fmt(fmt)  "%s: " fmt, __func__
+ 
+-#include <asm/unaligned.h>
++#include <linux/hex.h>
++#include <linux/unaligned.h>
+ 
+ #include <drm/drm_of.h>
+ #include <drm/drm_crtc_helper.h>
+@@ -141,7 +142,7 @@ inline void dsim_trace_msleep(u32 delay_ms)
+ EXPORT_SYMBOL_GPL(dsim_trace_msleep);
+ 
+ static struct drm_crtc *drm_encoder_get_new_crtc(struct drm_encoder *encoder,
+-						 struct drm_atomic_state *state)
++						 struct drm_atomic_commit *state)
+ {
+ 	struct drm_connector *connector;
+ 	const struct drm_connector_state *conn_state;
+@@ -158,7 +159,7 @@ static struct drm_crtc *drm_encoder_get_new_crtc(struct drm_encoder *encoder,
+ }
+ 
+ static struct drm_crtc *drm_encoder_get_old_crtc(struct drm_encoder *encoder,
+-						 struct drm_atomic_state *state)
++						 struct drm_atomic_commit *state)
+ {
+ 	struct drm_connector *connector;
+ 	const struct drm_connector_state *conn_state;
+@@ -181,7 +182,7 @@ void dsim_dump(struct dsim_device *dsim, struct drm_printer *p)
+ 
+ 	if (!p) {
+ 		printer = is_console_enabled() ?
+-			drm_debug_printer("[drm]") : drm_info_printer(dsim->dev);
++			drm_dbg_printer(NULL, DRM_UT_DRIVER, "[drm]") : drm_info_printer(dsim->dev);
+ 			pointer = &printer;
+ 	} else {
+ 		pointer = p;
+@@ -360,7 +361,7 @@ static void _dsim_enable(struct dsim_device *dsim)
+ 	}
+ }
+ 
+-static void dsim_encoder_enable(struct drm_encoder *encoder, struct drm_atomic_state *state)
++static void dsim_encoder_enable(struct drm_encoder *encoder, struct drm_atomic_commit *state)
+ {
+ 	struct dsim_device *dsim = encoder_to_dsim(encoder);
+ 	struct drm_crtc *crtc = drm_encoder_get_new_crtc(encoder, state);
+@@ -547,7 +548,7 @@ static void _dsim_disable(struct dsim_device *dsim)
+ 	dsim_debug(dsim, "-\n");
+ }
+ 
+-static void dsim_encoder_disable(struct drm_encoder *encoder, struct drm_atomic_state *state)
++static void dsim_encoder_disable(struct drm_encoder *encoder, struct drm_atomic_commit *state)
+ {
+ 	struct dsim_device *dsim = encoder_to_dsim(encoder);
+ 	struct drm_crtc *crtc = drm_encoder_get_old_crtc(encoder, state);
+@@ -1687,7 +1688,7 @@ static int dsim_add_mipi_dsi_device(struct dsim_device *dsim,
+ 				scnprintf(info.type, sizeof(info.type),
+ 					"%d:%s", idx, name);
+ 			else
+-				strlcpy(info.type, name, sizeof(info.type));
++				strscpy(info.type, name, sizeof(info.type));
+ 			info.node = of_node_get(node);
+ 		}
+ 	}
+@@ -3059,7 +3060,7 @@ static ssize_t hs_clock_store(struct device *dev,
+ 		goto out;
+ 	}
+ 
+-	strlcpy(params, buf, sizeof(params));
++	strscpy(params, buf, sizeof(params));
+ 	hs_clk_str = strsep(&p, " ");
+ 	apply_now_str = strsep(&p, " ");
+ 
+@@ -3274,7 +3275,7 @@ err:
+ 	return ret;
+ }
+ 
+-static int dsim_remove(struct platform_device *pdev)
++static void dsim_remove(struct platform_device *pdev)
+ {
+ 	struct dsim_device *dsim = platform_get_drvdata(pdev);
+ 
+@@ -3300,7 +3301,6 @@ static int dsim_remove(struct platform_device *pdev)
+ 		dsim->log = NULL;
+ 	}
+ #endif
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM
+diff --git a/exynos_drm_fb.c b/exynos_drm_fb.c
+index be52265..cc0aa77 100644
+--- a/exynos_drm_fb.c
++++ b/exynos_drm_fb.c
+@@ -53,6 +53,7 @@ static const struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
+ 
+ static struct drm_framebuffer *
+ exynos_drm_framebuffer_init(struct drm_device *dev,
++			    const struct drm_format_info *info,
+ 			    const struct drm_mode_fb_cmd2 *mode_cmd,
+ 			    struct drm_gem_object **obj,
+ 			    int count)
+@@ -68,7 +69,7 @@ exynos_drm_framebuffer_init(struct drm_device *dev,
+ 	for (i = 0; i < count; i++)
+ 		fb->obj[i] = obj[i];
+ 
+-	drm_helper_mode_fill_fb_struct(dev, fb, mode_cmd);
++	drm_helper_mode_fill_fb_struct(dev, fb, info, mode_cmd);
+ 
+ 	ret = drm_framebuffer_init(dev, fb, &exynos_drm_fb_funcs);
+ 	if (ret < 0) {
+@@ -126,9 +127,9 @@ static size_t get_plane_size(const struct drm_mode_fb_cmd2 *mode_cmd, u32 idx,
+ 
+ static struct drm_framebuffer *
+ exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
++		      const struct drm_format_info *info,	/* 6.18: resolved by the core */
+ 		      const struct drm_mode_fb_cmd2 *mode_cmd)
+ {
+-	const struct drm_format_info *info = drm_get_format_info(dev, mode_cmd);
+ 	struct drm_gem_object *obj[MAX_FB_BUFFER] = { 0 };
+ 	struct drm_framebuffer *fb;
+ 	size_t size;
+@@ -180,7 +181,7 @@ exynos_user_fb_create(struct drm_device *dev, struct drm_file *file_priv,
+ 	DRM_DEBUG("offset(%d), handle(%d), size(%lu)\n", mode_cmd->offsets[0],
+ 			mode_cmd->handles[0], size);
+ 
+-	fb = exynos_drm_framebuffer_init(dev, mode_cmd, obj, i);
++	fb = exynos_drm_framebuffer_init(dev, info, mode_cmd, obj, i);
+ 	if (IS_ERR(fb)) {
+ 		ret = PTR_ERR(fb);
+ 		goto err;
+@@ -197,12 +198,12 @@ err:
+ }
+ 
+ static const struct drm_format_info *
+-exynos_get_format_info(const struct drm_mode_fb_cmd2 *cmd)
++exynos_get_format_info(u32 pixel_format, u64 modifier)	/* 6.18: was (mode_cmd) */
+ {
+ 	const struct drm_format_info *info = NULL;
+ 
+-	if (cmd->modifier[0] == DRM_FORMAT_MOD_SAMSUNG_COLORMAP) {
+-		info = drm_format_info(cmd->pixel_format);
++	if (modifier == DRM_FORMAT_MOD_SAMSUNG_COLORMAP) {
++		info = drm_format_info(pixel_format);
+ 		if (info->format == DRM_FORMAT_BGRA8888)
+ 			return info;
+ 
+@@ -339,7 +340,7 @@ static void wb_conn_state_to_win_config(struct dpu_bts_win_config *win_config,
+ }
+ 
+ static void exynos_atomic_bts_pre_update(struct drm_device *dev,
+-					 struct drm_atomic_state *old_state)
++					 struct drm_atomic_commit *old_state)
+ {
+ 	struct decon_device *decon;
+ 	struct drm_crtc *crtc;
+@@ -466,7 +467,7 @@ static void exynos_atomic_bts_pre_update(struct drm_device *dev,
+ }
+ 
+ static void exynos_atomic_bts_post_update(struct drm_device *dev,
+-					  struct drm_atomic_state *old_state)
++					  struct drm_atomic_commit *old_state)
+ {
+ 	struct decon_device *decon;
+ 	struct drm_crtc *crtc;
+@@ -583,7 +584,7 @@ static void exynos_rmem_free(struct decon_device *decon)
+ }
+ 
+ static void
+-exynos_disable_outputs(struct drm_device *dev, struct drm_atomic_state *old_state,
++exynos_disable_outputs(struct drm_device *dev, struct drm_atomic_commit *old_state,
+ 			unsigned int *disabling_crtc_mask)
+ {
+ 	struct decon_device *decon;
+@@ -771,7 +772,7 @@ exynos_disable_outputs(struct drm_device *dev, struct drm_atomic_state *old_stat
+  * PM since planes updates then only happen when the CRTC is actually enabled.
+  */
+ static void exynos_drm_atomic_helper_commit_modeset_disables(struct drm_device *dev,
+-			struct drm_atomic_state *old_state, unsigned int *disabling_crtc_mask)
++			struct drm_atomic_commit *old_state, unsigned int *disabling_crtc_mask)
+ {
+ 	exynos_disable_outputs(dev, old_state, disabling_crtc_mask);
+ 
+@@ -781,7 +782,7 @@ static void exynos_drm_atomic_helper_commit_modeset_disables(struct drm_device *
+ 	exynos_crtc_set_mode(dev, old_state);
+ }
+ 
+-static void exynos_atomic_commit_tail(struct drm_atomic_state *old_state)
++static void exynos_atomic_commit_tail(struct drm_atomic_commit *old_state)
+ {
+ 	int i;
+ 	struct drm_device *dev = old_state->dev;
+diff --git a/exynos_drm_gem.c b/exynos_drm_gem.c
+index 8b45f59..061415c 100644
+--- a/exynos_drm_gem.c
++++ b/exynos_drm_gem.c
+@@ -290,8 +290,10 @@ static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
+ 	struct drm_gem_object *obj;
+ 	int ret = 0;
+ 
+-	mutex_lock(&dev->struct_mutex);
+-
++	/*
++	 * 6.x removed drm_device.struct_mutex; handle lookup and mmap-offset
++	 * creation are internally synchronised (as in upstream drivers).
++	 */
+ 	obj = drm_gem_object_lookup(filep, handle);
+ 	if (!obj) {
+ 		pr_err("Failed to lookup gem object from handle %u.\n",
+@@ -311,8 +313,6 @@ static int exynos_drm_gem_offset(struct drm_device *dev, struct drm_file *filep,
+ out:
+ 	drm_gem_object_put(obj);
+ unlock:
+-	mutex_unlock(&dev->struct_mutex);
+-
+ 	return ret;
+ }
+ 
+diff --git a/exynos_drm_hibernation.c b/exynos_drm_hibernation.c
+index eb6744e..e1232ca 100644
+--- a/exynos_drm_hibernation.c
++++ b/exynos_drm_hibernation.c
+@@ -97,7 +97,7 @@ static int exynos_crtc_self_refresh_update(struct drm_crtc *crtc, bool enable, b
+ {
+ 	struct drm_device *dev = crtc->dev;
+ 	struct drm_modeset_acquire_ctx ctx;
+-	struct drm_atomic_state *state;
++	struct drm_atomic_commit *state;
+ 	struct drm_connector *conn;
+ 	struct drm_connector_state *conn_state;
+ 	struct drm_crtc_state *crtc_state;
+@@ -106,7 +106,7 @@ static int exynos_crtc_self_refresh_update(struct drm_crtc *crtc, bool enable, b
+ 
+ 	drm_modeset_acquire_init(&ctx, 0);
+ 
+-	state = drm_atomic_state_alloc(dev);
++	state = drm_atomic_commit_alloc(dev);
+ 	if (!state) {
+ 		ret = -ENOMEM;
+ 		goto out_drop_locks;
+@@ -161,13 +161,13 @@ retry:
+ 
+ out:
+ 	if (ret == -EDEADLK) {
+-		drm_atomic_state_clear(state);
++		drm_atomic_commit_clear(state);
+ 		ret = drm_modeset_backoff(&ctx);
+ 		if (!ret)
+ 			goto retry;
+ 	}
+ 
+-	drm_atomic_state_put(state);
++	drm_atomic_commit_put(state);
+ 
+ out_drop_locks:
+ 	drm_modeset_drop_locks(&ctx);
+diff --git a/exynos_drm_plane.c b/exynos_drm_plane.c
+index b34b299..019e50f 100644
+--- a/exynos_drm_plane.c
++++ b/exynos_drm_plane.c
+@@ -397,7 +397,7 @@ exynos_plane_update_hdr_params(struct exynos_drm_plane_state *exynos_state)
+ #endif
+ 
+ static int exynos_plane_atomic_check(struct drm_plane *plane,
+-				     struct drm_atomic_state *atomic_state)
++				     struct drm_atomic_commit *atomic_state)
+ {
+ 	struct drm_plane_state *state = drm_atomic_get_new_plane_state(atomic_state, plane);
+ 	struct exynos_drm_plane *exynos_plane = to_exynos_plane(plane);
+@@ -465,7 +465,7 @@ static void exynos_plane_disable(struct drm_plane *plane, struct drm_crtc *crtc)
+ }
+ 
+ static void exynos_plane_atomic_update(struct drm_plane *plane,
+-				       struct drm_atomic_state *atomic_state)
++				       struct drm_atomic_commit *atomic_state)
+ {
+ 	struct drm_plane_state *state = plane->state;
+ 	struct exynos_drm_crtc *exynos_crtc;
+@@ -483,7 +483,7 @@ static void exynos_plane_atomic_update(struct drm_plane *plane,
+ }
+ 
+ static void exynos_plane_atomic_disable(struct drm_plane *plane,
+-					struct drm_atomic_state *state)
++					struct drm_atomic_commit *state)
+ {
+ 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
+ 
+diff --git a/exynos_drm_recovery.c b/exynos_drm_recovery.c
+index 6963b92..94c2004 100644
+--- a/exynos_drm_recovery.c
++++ b/exynos_drm_recovery.c
+@@ -32,7 +32,7 @@ static void exynos_recovery_handler(struct work_struct *work)
+ 					struct exynos_recovery, work);
+ 	struct decon_device *decon = container_of(recovery, struct decon_device,
+ 					recovery);
+-	struct drm_atomic_state *rcv_state;
++	struct drm_atomic_commit *rcv_state;
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	struct drm_crtc *crtc = &decon->crtc->base;
+ 	int ret;
+@@ -43,7 +43,7 @@ static void exynos_recovery_handler(struct work_struct *work)
+ 	rcv_state = exynos_crtc_suspend(crtc, &ctx);
+ 	if (!IS_ERR_OR_NULL(rcv_state)) {
+ 		ret = exynos_crtc_resume(rcv_state, &ctx);
+-		drm_atomic_state_put(rcv_state);
++		drm_atomic_commit_put(rcv_state);
+ 	} else {
+ 		ret = -EINVAL;
+ 	}
+diff --git a/exynos_drm_tui.c b/exynos_drm_tui.c
+index a16f760..aa9cd6f 100644
+--- a/exynos_drm_tui.c
++++ b/exynos_drm_tui.c
+@@ -134,13 +134,11 @@ static int exynos_tui_probe(struct platform_device *pdev)
+ 	return ret;
+ }
+ 
+-static int exynos_tui_remove(struct platform_device *pdev)
++static void exynos_tui_remove(struct platform_device *pdev)
+ {
+ 	struct miscdevice *misc_dev = dev_get_drvdata(&pdev->dev);
+ 
+ 	misc_deregister(misc_dev);
+-
+-	return 0;
+ }
+ 
+ struct platform_driver tui_driver = {
+diff --git a/exynos_drm_writeback.c b/exynos_drm_writeback.c
+index b2d2a9e..fadb1d3 100644
+--- a/exynos_drm_writeback.c
++++ b/exynos_drm_writeback.c
+@@ -221,7 +221,7 @@ static int writeback_atomic_check(struct drm_encoder *encoder,
+ }
+ 
+ static void writeback_atomic_commit(struct drm_connector *connector,
+-		struct drm_atomic_state *atomic_state)
++		struct drm_atomic_commit *atomic_state)
+ {
+ 	struct drm_connector_state *state = drm_atomic_get_new_connector_state(atomic_state, connector);
+ 	struct drm_writeback_connector *wb_conn = conn_to_wb_conn(connector);
+@@ -776,7 +776,7 @@ fail:
+ 	return ret;
+ }
+ 
+-static int writeback_remove(struct platform_device *pdev)
++static void writeback_remove(struct platform_device *pdev)
+ {
+ 	struct writeback_device *wb = platform_get_drvdata(pdev);
+ 
+@@ -785,8 +785,6 @@ static int writeback_remove(struct platform_device *pdev)
+ 	if (test_bit(DPP_ATTR_DPP, &wb->attr))
+ 		iounmap(wb->regs.dpp_base_regs);
+ 	iounmap(wb->regs.dma_base_regs);
+-
+-	return 0;
+ }
+ 
+ struct platform_driver writeback_driver = {
+diff --git a/exynos_drm_writeback.h b/exynos_drm_writeback.h
+index ea6d493..a82f8a9 100644
+--- a/exynos_drm_writeback.h
++++ b/exynos_drm_writeback.h
+@@ -95,7 +95,7 @@ static inline bool wb_check_job(const struct drm_connector_state *conn_state)
+ }
+ 
+ int exynos_drm_atomic_check_writeback(struct drm_device *dev,
+-		struct drm_atomic_state *state);
++		struct drm_atomic_commit *state);
+ void wb_dump(struct drm_printer *p, struct writeback_device *wb);
+ 
+ void writeback_exit_hibernation(struct writeback_device *wb);
+diff --git a/panel/panel-samsung-drv.c b/panel/panel-samsung-drv.c
+index e08a4c5..42d4066 100644
+--- a/panel/panel-samsung-drv.c
++++ b/panel/panel-samsung-drv.c
+@@ -9,6 +9,9 @@
+  * published by the Free Software Foundation.
+  */
+ 
++#include <linux/hex.h>
++#include <linux/debugfs.h>
++#include <linux/fb.h>	/* FB_BLANK_*: no longer pulled in by backlight.h */
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -35,6 +38,29 @@
+ #include "../exynos_drm_dqe.h"
+ #include "panel-samsung-drv.h"
+ 
++/*
++ * junkyard (lynx-mainline): drm_panel_init() is static upstream now; panels are
++ * meant to come from devm_drm_panel_alloc(), which kzallocs a refcounted
++ * container. This driver embeds its drm_panel in a struct it allocates itself,
++ * so do what drm_panel_init() did and start the refcount at 1 with no
++ * container: drm_panel_add()/drm_panel_remove() then balance their get/put and
++ * the final put (if any) only kfree()s the NULL container -- the 6.18 lifetime
++ * model, where the embedding struct owns the panel.
++ */
++static void jy_drm_panel_init(struct drm_panel *panel, struct device *dev,
++			      const struct drm_panel_funcs *funcs,
++			      int connector_type)
++{
++	INIT_LIST_HEAD(&panel->list);
++	INIT_LIST_HEAD(&panel->followers);
++	mutex_init(&panel->follower_lock);
++	panel->dev = dev;
++	panel->funcs = funcs;
++	panel->connector_type = connector_type;
++	panel->container = NULL;
++	kref_init(&panel->refcount);
++}
++
+ #define PANEL_ID_REG		0xA1
+ #define PANEL_ID_LEN		7
+ #define PANEL_ID_OFFSET		6
+@@ -2926,7 +2952,7 @@ static int exynos_drm_connector_check_mode(struct exynos_panel *ctx,
+  * connector state (without adjusted mode), or to decide if modeset may be required
+  */
+ static int exynos_drm_connector_atomic_check(struct drm_connector *connector,
+-					     struct drm_atomic_state *state)
++					     struct drm_atomic_commit *state)
+ {
+ 	struct exynos_drm_connector *exynos_connector = to_exynos_connector(connector);
+ 	struct exynos_panel *ctx = exynos_connector_to_panel(exynos_connector);
+@@ -4114,6 +4140,7 @@ static void exynos_panel_node_attach(struct exynos_drm_connector *exynos_connect
+ }
+ 
+ static int exynos_panel_bridge_attach(struct drm_bridge *bridge,
++				      struct drm_encoder *encoder,
+ 				      enum drm_bridge_attach_flags flags)
+ {
+ 	struct drm_device *dev = bridge->dev;
+@@ -4158,7 +4185,7 @@ static void exynos_panel_bridge_detach(struct drm_bridge *bridge)
+ }
+ 
+ static void exynos_panel_bridge_enable(struct drm_bridge *bridge,
+-				       struct drm_bridge_state *old_bridge_state)
++				       struct drm_atomic_commit *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 	struct dsim_device *dsim = host_to_dsi(to_mipi_dsi_device(ctx->dev)->host);
+@@ -4246,7 +4273,7 @@ static int exynos_panel_bridge_atomic_check(struct drm_bridge *bridge,
+ 					    struct drm_connector_state *conn_state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+-	struct drm_atomic_state *state = new_crtc_state->state;
++	struct drm_atomic_commit *state = new_crtc_state->state;
+ 	struct exynos_drm_connector_state *exynos_conn_state =
+ 						to_exynos_connector_state(conn_state);
+ 	const struct drm_display_mode *current_mode = &ctx->current_mode->mode;
+@@ -4396,7 +4423,7 @@ static int exynos_panel_bridge_atomic_check(struct drm_bridge *bridge,
+ }
+ 
+ static void exynos_panel_bridge_pre_enable(struct drm_bridge *bridge,
+-					   struct drm_bridge_state *old_bridge_state)
++					   struct drm_atomic_commit *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 
+@@ -4411,7 +4438,7 @@ static void exynos_panel_bridge_pre_enable(struct drm_bridge *bridge,
+ }
+ 
+ static void exynos_panel_bridge_disable(struct drm_bridge *bridge,
+-					struct drm_bridge_state *old_bridge_state)
++					struct drm_atomic_commit *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 	const struct drm_connector_state *conn_state = ctx->exynos_connector.base.state;
+@@ -4475,7 +4502,7 @@ static void exynos_panel_bridge_disable(struct drm_bridge *bridge,
+ }
+ 
+ static void exynos_panel_bridge_post_disable(struct drm_bridge *bridge,
+-					     struct drm_bridge_state *old_bridge_state)
++					     struct drm_atomic_commit *state)
+ {
+ 	struct exynos_panel *ctx = bridge_to_exynos_panel(bridge);
+ 
+@@ -5309,7 +5336,7 @@ static const struct drm_bridge_funcs exynos_panel_bridge_funcs = {
+ 	.atomic_post_disable = exynos_panel_bridge_post_disable,
+ 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+ 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+-	.atomic_reset = drm_atomic_helper_bridge_reset,
++	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+ 	.mode_set = exynos_panel_bridge_mode_set,
+ };
+ 
+@@ -5799,7 +5826,7 @@ int exynos_panel_common_init(struct mipi_dsi_device *dsi,
+ 	mutex_init(&ctx->bl_state_lock);
+ 	mutex_init(&ctx->lp_state_lock);
+ 
+-	drm_panel_init(&ctx->panel, dev, ctx->desc->panel_func, DRM_MODE_CONNECTOR_DSI);
++	jy_drm_panel_init(&ctx->panel, dev, ctx->desc->panel_func, DRM_MODE_CONNECTOR_DSI);
+ 
+ 	ret = exynos_panel_of_backlight(ctx);
+ 	if (ret) {
+diff --git a/panel/panel-samsung-drv.h b/panel/panel-samsung-drv.h
+index 5bc05db..46b659d 100644
+--- a/panel/panel-samsung-drv.h
++++ b/panel/panel-samsung-drv.h
+@@ -12,6 +12,7 @@
+ #ifndef _PANEL_SAMSUNG_DRV_
+ #define _PANEL_SAMSUNG_DRV_
+ 
++#include <linux/hex.h>
+ #include <linux/printk.h>
+ #include <linux/bits.h>
+ #include <linux/device.h>
+@@ -473,7 +474,7 @@ struct exynos_panel_funcs {
+ 	 *
+ 	 * Should return 0 on success (no problems with atomic commit) otherwise negative errno
+ 	 */
+-	int (*atomic_check)(struct exynos_panel *exynos_panel, struct drm_atomic_state *state);
++	int (*atomic_check)(struct exynos_panel *exynos_panel, struct drm_atomic_commit *state);
+ 
+ 	/**
+ 	 * @commit_done
+diff --git a/panel/panel-samsung-s6e3hc3-c10.c b/panel/panel-samsung-s6e3hc3-c10.c
+index f03c3b3..fac1a0e 100644
+--- a/panel/panel-samsung-s6e3hc3-c10.c
++++ b/panel/panel-samsung-s6e3hc3-c10.c
+@@ -612,7 +612,7 @@ static bool s6e3hc3_c10_set_self_refresh(struct exynos_panel *ctx, bool enable)
+ 	return true;
+ }
+ 
+-static int s6e3hc3_c10_atomic_check(struct exynos_panel *ctx, struct drm_atomic_state *state)
++static int s6e3hc3_c10_atomic_check(struct exynos_panel *ctx, struct drm_atomic_commit *state)
+ {
+ 	struct drm_connector *conn = &ctx->exynos_connector.base;
+ 	struct drm_connector_state *new_conn_state = drm_atomic_get_new_connector_state(state, conn);
+diff --git a/panel/panel-samsung-s6e3hc3.c b/panel/panel-samsung-s6e3hc3.c
+index ebf076e..6d09dc1 100644
+--- a/panel/panel-samsung-s6e3hc3.c
++++ b/panel/panel-samsung-s6e3hc3.c
+@@ -600,7 +600,7 @@ static bool s6e3hc3_set_self_refresh(struct exynos_panel *ctx, bool enable)
+ 	return true;
+ }
+ 
+-static int s6e3hc3_atomic_check(struct exynos_panel *ctx, struct drm_atomic_state *state)
++static int s6e3hc3_atomic_check(struct exynos_panel *ctx, struct drm_atomic_commit *state)
+ {
+ 	struct drm_connector *conn = &ctx->exynos_connector.base;
+ 	struct drm_connector_state *new_conn_state = drm_atomic_get_new_connector_state(state, conn);
+diff --git a/panel/panel-samsung-s6e3hc4.c b/panel/panel-samsung-s6e3hc4.c
+index 9126dd9..8cbba27 100644
+--- a/panel/panel-samsung-s6e3hc4.c
++++ b/panel/panel-samsung-s6e3hc4.c
+@@ -673,7 +673,7 @@ static bool s6e3hc4_set_self_refresh(struct exynos_panel *ctx, bool enable)
+ 	return true;
+ }
+ 
+-static int s6e3hc4_atomic_check(struct exynos_panel *ctx, struct drm_atomic_state *state)
++static int s6e3hc4_atomic_check(struct exynos_panel *ctx, struct drm_atomic_commit *state)
+ {
+ 	struct drm_connector *conn = &ctx->exynos_connector.base;
+ 	struct drm_connector_state *new_conn_state = drm_atomic_get_new_connector_state(state, conn);

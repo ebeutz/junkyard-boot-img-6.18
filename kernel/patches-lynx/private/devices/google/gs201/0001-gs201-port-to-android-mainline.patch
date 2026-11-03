@@ -1,0 +1,258 @@
+From: junkyard
+Subject: [PATCH] gs201: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(gs201: drop pKVM-only S2MPU support from the lynx build)
+
+The gs201 pKVM S2MPU driver (pkvm-s2mpu.ko) and the GSA pKVM glue built on it
+are written against the Android 6.1 pKVM hypervisor-module ABI
+(<kvm/iommu.h>, pkvm_iommu_* registration). ACK 6.18 replaced that ABI and
+ships no <kvm/iommu.h>, so the module cannot be built as-is.
+
+These images boot kvm-arm.mode=nvhe (see lynx_cmdline_defconfig), not
+protected mode, so the S2MPU is never handed to a pKVM hypervisor and the
+driver would not be used anyway. Turn both options off in gs201_defconfig
+and drop pkvm-s2mpu.ko from the module list and the vendor ramdisk.
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree.
+
+== 6.18 -> android-mainline ==
+
+  * constants.bzl: mac80211.ko/cfg80211.ko are GKI modules on
+    android-mainline (common/bazel/modules_private.bzl), so the device kernel
+    no longer lists them (two sources for one dist path fails analysis).
+    at24 moved drivers/misc/eeprom/ -> drivers/nvmem/ (also in
+    vendor_ramdisk.modules.gs201).
+  * gs201_defconfig / BUILD.bazel / vendor_ramdisk.modules.gs201: modules
+    built on ACK-only vendor infrastructure are turned off and dropped from
+    the module lists: vh_sched (+ sched_tp, vh_preemptirq_long), vh_fs,
+    vh_cgroup, vh_thermal, pixel_em, pixel_metrics, smra,
+    iovad-vendor-hooks, ufs-pixel-fips140, and zram_gs with its zcomp_cpu /
+    zcomp_eh backends (GKI's upstream zram.ko is still there). They need the
+    task_struct vendor area / android_task_vendor_data(), binder_internal.h,
+    the cgroup/fs/mm/thermal/iommu android_{vh,rvh}_* hooks, iova_domain's
+    vendor data, android_rvh_ufs_complete_init, __GFP_CMA and the zram
+    Android ioctls -- none of which android-mainline has. They are
+    Android-performance, -statistics or -compliance features; nothing else
+    lynx builds depends on their exports (checked at modpost).
+---
+diff --git a/BUILD.bazel b/BUILD.bazel
+index e4880b3..e58fcc2 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -41,7 +41,6 @@ kernel_module(
+         "drivers/input/keydebug.ko",
+         "drivers/input/misc/vl53l1/stmvl53l1.ko",
+         "drivers/iommu/exynos-pcie-iommu.ko",
+-        "drivers/iommu/iovad-vendor-hooks.ko",
+         "drivers/iommu/samsung-iommu-group.ko",
+         "drivers/iommu/samsung-secure-iova.ko",
+         "drivers/iommu/samsung_iommu.ko",
+@@ -116,30 +115,28 @@ kernel_module(
+         "drivers/soc/google/modemctl/google_modemctl.ko",
+         "drivers/soc/google/pixel_stat/mm/pixel_stat_mm.ko",
+         "drivers/soc/google/pixel_stat/pixel_stat_sysfs.ko",
+-        "drivers/soc/google/pkvm-s2mpu/pkvm-s2mpu/pkvm-s2mpu.ko",
+         "drivers/soc/google/pt/slc_acpm.ko",
+         "drivers/soc/google/pt/slc_dummy.ko",
+         "drivers/soc/google/pt/slc_pmon.ko",
+         "drivers/soc/google/pt/slc_pt.ko",
+-        "drivers/soc/google/smra/smra.ko",
+         "drivers/soc/google/sysrq-hook.ko",
+-        "drivers/soc/google/vh/kernel/cgroup/vh_cgroup.ko",
+-        "drivers/soc/google/vh/kernel/fs/vh_fs.ko",
+-        "drivers/soc/google/vh/kernel/metrics/pixel_metrics.ko",
++        # junkyard (lynx-mainline): vh_sched (+ sched_tp, vh_preemptirq_long),
++        # vh_cgroup, vh_fs, vh_thermal, pixel_em, pixel_metrics, smra and
++        # drivers/iommu/iovad-vendor-hooks.ko are not built. They hang off ACK-only vendor
++        # infrastructure android-mainline does not have: the task_struct vendor
++        # area / android_task_vendor_data(), binder_internal.h, the cgroup/fs/mm/thermal/iommu/fault
++        # android_{vh,rvh}_* hooks and iova_domain's android_vendor_data1.
++        # pixel_em/pixel_metrics only consume vh_sched's exports. Nothing else
++        # lynx builds uses their exports. See gs201_defconfig and
++        # kernel/patches/README.md ("lynx-mainline").
+         "drivers/soc/google/vh/kernel/mm/vh_mm.ko",
+-        "drivers/soc/google/vh/kernel/pixel_em/pixel_em.ko",
+-        "drivers/soc/google/vh/kernel/sched/sched_tp.ko",
+-        "drivers/soc/google/vh/kernel/sched/vh_preemptirq_long.ko",
+-        "drivers/soc/google/vh/kernel/sched/vh_sched.ko",
+         "drivers/soc/google/vh/kernel/systrace.ko",
+-        "drivers/soc/google/vh/kernel/thermal/vh_thermal.ko",
+         "drivers/spi/spi-s3c64xx.ko",
+         "drivers/thermal/google/s2mpg13_spmic_thermal.ko",
+         "drivers/thermal/samsung/gpu_cooling.ko",
+         "drivers/thermal/samsung/gs_thermal.ko",
+         "drivers/tty/serial/exynos_tty.ko",
+         "drivers/ufs/ufs-exynos-gs.ko",
+-        "drivers/ufs/ufs-pixel-fips140.ko",
+         "drivers/usb/dwc3/dwc3-exynos-usb.ko",
+         "drivers/usb/dwc3/google-role-sw.ko",
+         "drivers/usb/gadget/function/usb_f_dm.ko",
+@@ -208,9 +205,10 @@ device_build(
+         "//private/google-modules/misc/sscoredump",
+         "//private/google-modules/power/mitigation:bcl",
+         "//private/google-modules/power/reset",
+-        "//private/google-modules/soc/gs/drivers/block/zram:zcomp_cpu",
+-        "//private/google-modules/soc/gs/drivers/block/zram:zcomp_eh",
+-        "//private/google-modules/soc/gs/drivers/block/zram:zram_gs",
++        # junkyard (lynx-mainline): zram_gs (Pixel's zram fork) and its zcomp_cpu /
++        # zcomp_eh backends are not built: zram_gs needs ACK-only __GFP_CMA, the
++        # ZRAM_ANDROID_IOC_* uapi and swap internals android-mainline does not
++        # export. GKI's upstream zram.ko (CONFIG_ZRAM=m) is still shipped.
+         "//private/google-modules/soc/gs/drivers/misc/sscoredump",
+         "//private/google-modules/soc/gs/drivers/soc/google/eh",
+         "//private/google-modules/soc/gs/drivers/soc/google/gsa",
+diff --git a/constants.bzl b/constants.bzl
+index 3724394..c6c491e 100644
+--- a/constants.bzl
++++ b/constants.bzl
+@@ -15,13 +15,17 @@ GS201_MODULE_OUTS = [
+     # keep sorted
+     "drivers/gpu/drm/display/drm_display_helper.ko",
+     "drivers/i2c/i2c-dev.ko",
+-    "drivers/misc/eeprom/at24.ko",
++    # junkyard (lynx-mainline): at24 moved drivers/misc/eeprom/ -> drivers/nvmem/.
++    "drivers/nvmem/at24.ko",
+     "drivers/perf/arm_dsu_pmu.ko",
+     "drivers/scsi/sg.ko",
+     "drivers/spi/spidev.ko",
+     "drivers/watchdog/softdog.ko",
+-    "net/mac80211/mac80211.ko",
+-    "net/wireless/cfg80211.ko",
++    # junkyard (lynx-mainline): net/mac80211/mac80211.ko and
++    # net/wireless/cfg80211.ko are GKI modules on android-mainline
++    # (common/bazel/modules_private.bzl), so //common:kernel_aarch64 builds them
++    # and the dist ships them via kernel_gki_modules. Listing them here as well
++    # makes two sources for one dist path and fails the dist_files analysis.
+ ]
+ 
+ GS201_DEVICE_MODULE_OUTS = [
+diff --git a/gs201_defconfig b/gs201_defconfig
+index 357e823..77ec316 100644
+--- a/gs201_defconfig
++++ b/gs201_defconfig
+@@ -55,7 +55,7 @@ CONFIG_KEYBOARD_S2MPG12=m
+ # private/google-modules/soc/gs/drivers/iommu/Kconfig
+ CONFIG_SAMSUNG_IOMMU=m
+ CONFIG_EXYNOS_PCIE_IOMMU=m
+-CONFIG_IOVAD_VENDOR_HOOKS=m
++# CONFIG_IOVAD_VENDOR_HOOKS is not set
+ 
+ # private/google-modules/soc/gs/drivers/media/platform/Kconfig
+ CONFIG_VIDEO_EXYNOS_MFC=m
+@@ -154,28 +154,36 @@ CONFIG_PIXEL_BOOT_METRICS=m
+ CONFIG_PIXEL_SUSPEND_DIAG=m
+ CONFIG_GS_SJTAG=m
+ CONFIG_ETM2DRAM=m
+-CONFIG_SMRA=m
++# CONFIG_SMRA is not set
+ CONFIG_VH_SYSTRACE=m
+-CONFIG_PIXEL_EM=m
+-CONFIG_PIXEL_METRICS=m
+-CONFIG_VH_FS=m
++# junkyard (lynx-mainline): PIXEL_EM, PIXEL_METRICS, SMRA, VH_CGROUP, VH_FS, VH_SCHED, VH_THERMAL,
++# VH_PREEMPTIRQ_TRACEPOINTS and IOVAD_VENDOR_HOOKS are off -- see the note in
++# BUILD.bazel.
++# CONFIG_PIXEL_EM is not set
++# CONFIG_PIXEL_METRICS is not set
++# CONFIG_VH_FS is not set
+ CONFIG_VH_MM=m
+-CONFIG_VH_CGROUP=m
+-CONFIG_VH_THERMAL=m
+-CONFIG_VH_SCHED=m
++# CONFIG_VH_CGROUP is not set
++# CONFIG_VH_THERMAL is not set
++# CONFIG_VH_SCHED is not set
+ CONFIG_VH_SCHED_MAX_CPU_NR=8
+-CONFIG_VH_PREEMPTIRQ_TRACEPOINTS=m
++# CONFIG_VH_PREEMPTIRQ_TRACEPOINTS is not set
+ CONFIG_TICK_DRIVEN_LATGOV=y
+ CONFIG_HARDLOCKUP_DEBUG=m
+ CONFIG_HARDLOCKUP_WATCHDOG=m
+ CONFIG_DBGCORE_DUMP=m
+ CONFIG_SYSRQ_HOOK=m
+-CONFIG_PKVM_S2MPU=m
++# junkyard (lynx): pKVM's IOMMU framework (kvm/iommu.h) is gone from ACK 6.18, and
++# these images boot kvm-arm.mode=nvhe, where pkvm-s2mpu never does anything.
++# CONFIG_PKVM_S2MPU is not set
+ CONFIG_KERNEL_TOP=m
+ 
+ # private/google-modules/soc/gs/drivers/soc/google/gsa/Kconfig
+ CONFIG_GSA=m
+-CONFIG_GSA_PKVM=m
++# junkyard (lynx): depends on PKVM_S2MPU (off above). GSA then uses its non-pKVM
++# path (plain runtime PM around transfers); in this tree S2MPU registration is
++# disabled outright anyway (pkvm_s2mpu.c: "if (1 || ...) return -ENODEV").
++# CONFIG_GSA_PKVM is not set
+ CONFIG_GSA_GSC=m
+ # FIXME: Not needed. It's here to prevent kleaf build error.
+ CONFIG_TZ_PROT=m
+@@ -196,7 +204,9 @@ CONFIG_SERIAL_EXYNOS=m
+ # private/google-modules/soc/gs/drivers/ufs/Kconfig
+ CONFIG_SCSI_UFS_EXYNOS_GS=m
+ CONFIG_SCSI_UFS_CRYPTO_SW_KEYS_MODE=y
+-CONFIG_SCSI_UFS_PIXEL_FIPS140=m
++# junkyard (lynx-mainline): off -- its self test needs android_rvh_ufs_complete_init,
++# which android-mainline lacks; see ufs-exynos-crypto.c.
++# CONFIG_SCSI_UFS_PIXEL_FIPS140 is not set
+ 
+ # private/google-modules/soc/gs/drivers/usb/Kconfig
+ CONFIG_GOOGLE_USB_ROLE_SW=m
+diff --git a/vendor_ramdisk.modules.gs201 b/vendor_ramdisk.modules.gs201
+index b57e01a..a5d56b4 100644
+--- a/vendor_ramdisk.modules.gs201
++++ b/vendor_ramdisk.modules.gs201
+@@ -1,6 +1,6 @@
+ kernel/mm/zsmalloc.ko
+ kernel/drivers/gpu/drm/display/drm_display_helper.ko
+-kernel/drivers/misc/eeprom/at24.ko
++kernel/drivers/nvmem/at24.ko
+ kernel/drivers/scsi/sg.ko
+ kernel/drivers/spi/spidev.ko
+ kernel/drivers/i2c/i2c-dev.ko
+@@ -30,16 +30,8 @@ extra/private/google-modules/soc/gs/drivers/soc/google/debug/pixel-boot-metrics.
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/pixel-suspend-diag.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/sjtag-driver.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/etm2dram.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/sched/vh_sched.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/sched/sched_tp.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/sched/vh_preemptirq_long.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/systrace.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/fs/vh_fs.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/mm/vh_mm.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/cgroup/vh_cgroup.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/pixel_em/pixel_em.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/thermal/vh_thermal.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/vh/kernel/metrics/pixel_metrics.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/gs-chipid.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/cal-if/cmupmucal.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/exynos-pmu-if.ko
+@@ -74,7 +66,6 @@ extra/private/google-modules/soc/gs/drivers/soc/google/pixel_stat/pixel_stat_sys
+ extra/private/google-modules/soc/gs/drivers/soc/google/pixel_stat/mm/pixel_stat_mm.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/dbgcore-dump.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/exynos-seclog.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/pkvm-s2mpu/pkvm-s2mpu/pkvm-s2mpu.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/kernel-top.ko
+ extra/private/google-modules/soc/gs/drivers/regulator/pmic_class.ko
+ extra/private/google-modules/soc/gs/drivers/regulator/s2mpg12-regulator.ko
+@@ -94,7 +85,6 @@ extra/private/google-modules/soc/gs/drivers/mfd/s2mpg12-mfd.ko
+ extra/private/google-modules/soc/gs/drivers/mfd/s2mpg13-mfd.ko
+ extra/private/google-modules/soc/gs/drivers/dma-buf/heaps/samsung/samsung_dma_heap.ko
+ extra/private/google-modules/soc/gs/drivers/ufs/ufs-exynos-gs.ko
+-extra/private/google-modules/soc/gs/drivers/ufs/ufs-pixel-fips140.ko
+ extra/private/google-modules/soc/gs/drivers/spi/spi-s3c64xx.ko
+ extra/private/google-modules/soc/gs/drivers/usb/dwc3/dwc3-exynos-usb.ko
+ extra/private/google-modules/soc/gs/drivers/usb/dwc3/google-role-sw.ko
+@@ -132,9 +122,6 @@ extra/private/google-modules/soc/gs/drivers/performance/gs_perf_mon/gs_perf_mon.
+ extra/private/google-modules/soc/gs/drivers/performance/lat_governors/gs_governor_memlat.ko
+ extra/private/google-modules/soc/gs/drivers/performance/lat_governors/gs_governor_utils.ko
+ extra/private/google-modules/soc/gs/drivers/bts/bts.ko
+-extra/private/google-modules/soc/gs/drivers/block/zram/zram_gs.ko
+-extra/private/google-modules/soc/gs/drivers/block/zram/zcomp_cpu.ko
+-extra/private/google-modules/soc/gs/drivers/block/zram/zcomp_eh.ko
+ extra/private/google-modules/amplifiers/audiometrics/audiometrics.ko
+ extra/private/google-modules/aoc/mailbox-wc.ko
+ extra/private/google-modules/aoc/aoc_core.ko

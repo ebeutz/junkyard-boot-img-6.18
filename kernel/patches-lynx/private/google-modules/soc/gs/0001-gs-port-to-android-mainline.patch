@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] gs: port the gs101/gs201-era SoC drivers to Linux 6.18
+Subject: [PATCH] gs: port gs201 drivers to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(gs: port the gs101/gs201-era SoC drivers to Linux 6.18)
 
 Port private/google-modules/soc/gs to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 Mechanical API migrations, no intended behaviour change:
@@ -37,6 +43,72 @@ Mechanical API migrations, no intended behaviour change:
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 ->
+android-mainline (7.3). Only what lynx's gs201_soc / ext_modules build was
+changed (plus a few non-gs201 siblings of the same files, for consistency).
+
+Mechanical API migration (each mirrors the upstream conversion):
+  * syscore: register_syscore_ops() -> register_syscore(struct syscore);
+    callbacks take void *data (bts, pinctrl-samsung, exynos-pm, s3c2410_wdt).
+  * clk: clk_ops.round_rate removed. composite.c hangs a determine_rate
+    adapter (JY_CLK_DETERMINE_FROM_ROUND) off each existing round_rate.
+  * dma_map_ops.map_page/unmap_page (+ map_resource) -> map_phys/unmap_phys
+    (pcie-exynos-rc, dwc-whi).
+  * iommu_domain_ops.attach_dev gained the old domain (samsung-iommu{,-v9}).
+  * dwc PCIe: PCIE_ATU_TYPE_CFG0 -> PCIE_TLP_TYPE_CFG0_RDWR (aliased);
+    dw_pcie_rp.use_linkup_irq removed -- see below.
+  * pm_runtime_put() returns void (sbb-mux, dwc3-exynos, gsa_mbox).
+  * in_irq() -> in_hardirq(); vmalloc_nr_pages() -> NR_VMALLOC; alarm
+    timer API (alarm_start_timer(), void callbacks); hrtimer_setup();
+    of_node_to_fwnode() -> of_fwnode_handle(); <linux/hex.h>;
+    drivers/devfreq/governor.h -> <linux/devfreq-governor.h>;
+    {devm_,}thermal_of_cooling_device_register() cdev_id (0) and the devm
+    variant's dropped np; cpufreq_policy.{min,max}_freq_req embedded;
+    RESERVEDMEM_OF_DECLARE() ops table; HCC_MAX_PSA() -> GET_MAX_PSA_SIZE();
+    __platform_driver_register() mod_name; dma_fence lock accessors;
+    vb2 wait_prepare/wait_finish removed (MFC/SMFC set vb2_queue.lock to the
+    mutex those callbacks dropped).
+  * UFS: ufshcd_lrb is the SCSI command's private data now and the
+    android_vh_ufs_{fill_prdt,prepare,send,compl}_command hooks pass the
+    scsi_cmnd. ufs-pixel's stats/trace helpers take the command
+    (ufshcd_is_scsi_cmd() replaces "lrbp->cmd != NULL"); the fill_prdt
+    handlers derive lrbp with scsi_cmd_priv(). ACK's
+    ufshcd_bkops_ctrl_threshold() is emulated via hba->urgent_bkops_lvl +
+    ufshcd_bkops_ctrl().
+  * backlight Kbuild: EXTRA_CFLAGS (no longer honoured by kbuild) -> ccflags-y.
+
+Behavioural decisions (also see gs201_defconfig / BUILD.bazel in the
+devices/google/gs201 patch, which turns the dropped modules off):
+  * Pixel vendor-hook ("vh") modules built on ACK-only infrastructure are
+    not built (vh_sched & co, vh_fs, vh_cgroup, vh_thermal, pixel_em,
+    pixel_metrics, smra, iovad-vendor-hooks, ufs-pixel-fips140, zram_gs +
+    zcomp_*). This patch keeps their consumers compiling: vh_thermal's
+    genl filter in gs_tmu_v3 was already IS_ENABLED()-guarded; the UFS
+    FIPS self-test path is compiled only with SCSI_UFS_PIXEL_FIPS140.
+  * vh_mm and pixel_stat_mm ARE built (they own /sys/kernel/vendor_mm and
+    exports the dma-buf heap, mali and zram use); their registrations of
+    hooks android-mainline lacks are fenced with "#if 0  junkyard ..." and
+    the handlers marked __maybe_unused. pixel_stat_mm's CMA/direct-reclaim
+    latency stats keep their per-task timestamp in two slots of
+    task_struct.android_vendor_data1[] (pixel_stat_task.h) instead of
+    vh_sched's vendor_task_struct. try_to_trigger_lmkd_kill() returns
+    -EOPNOTSUPP: its tracepoint (and lmkd) do not exist here.
+  * UFS inline-crypto: with FIPS140 off, the standard fill_prdt is
+    registered (FIPS's self-test hook, android_rvh_ufs_complete_init, does
+    not exist upstream).
+  * PCIe RC: with use_linkup_irq gone, dw_pcie_host_init() always waits for
+    link. A get_ltssm op reporting Detect.Quiet while the link is down turns
+    that into the non-fatal -ENODEV ("Device not found") after ~1s, instead
+    of touching a powered-down controller.
+  * dma-buf chunk heap: ACK's gfp-taking __cma_alloc() -> cma_alloc(); the
+    __GFP_NORETRY "fail fast" first attempt becomes a normal one.
+  * xhci-exynos: the android_{rvh,vh}_usb_dev_{suspend,resume} calls were
+    already under CONFIG_USB_VENDOR_HOOKS; the header include is now too.
+
+Builds, links and passes modpost. Not run on hardware.
 ---
 diff --git a/Kbuild b/Kbuild
 index e8faae6..c2b8d16 100644
@@ -54,11 +126,91 @@ index e8faae6..c2b8d16 100644
  obj-y += drivers/phy/
  
  obj-y += drivers/pinctrl/
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 13019ab..0dce913 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -798,7 +798,8 @@ static ssize_t backing_dev_store(struct device *dev,
+ 	if (sz > 0 && file_name[sz - 1] == '\n')
+ 		file_name[sz - 1] = 0x00;
+ 
+-	backing_dev = filp_open_block(file_name, O_RDWR | O_LARGEFILE | O_EXCL, 0);
++	/* android-mainline: no ACK filp_open_block(); upstream zram uses filp_open(). */
++	backing_dev = filp_open(file_name, O_RDWR | O_LARGEFILE | O_EXCL, 0);
+ 	if (IS_ERR(backing_dev)) {
+ 		err = PTR_ERR(backing_dev);
+ 		backing_dev = NULL;
+diff --git a/drivers/block/zram/zram_vh.c b/drivers/block/zram/zram_vh.c
+index e59790f..c9a8bdc 100644
+--- a/drivers/block/zram/zram_vh.c
++++ b/drivers/block/zram/zram_vh.c
+@@ -22,7 +22,7 @@ static void zram_read_page_end_io(struct page *page)
+ 	folio_unlock(folio);
+ }
+ 
+-static void rvh_swap_read_folio_bdev_sync(void *data, struct block_device *bdev,
++static void __maybe_unused rvh_swap_read_folio_bdev_sync(void *data, struct block_device *bdev,
+ 					sector_t sector, struct page *page,
+ 					bool *read)
+ {
+@@ -53,10 +53,12 @@ int zram_vh_init(void)
+ {
+ 	int ret = 0;
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_swap_read_folio_bdev_sync does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_swap_read_folio_bdev_sync(
+ 		rvh_swap_read_folio_bdev_sync, NULL);
+ 	if (ret)
+ 		pr_err("register swap_read_folio_bdev_sync failed\n");
++#endif
+ 
+ 	return ret;
+ }
 diff --git a/drivers/bts/exynos-bts.c b/drivers/bts/exynos-bts.c
-index 6ad921e..6bb6ad5 100644
+index 6ad921e..737d23a 100644
 --- a/drivers/bts/exynos-bts.c
 +++ b/drivers/bts/exynos-bts.c
-@@ -2117,12 +2117,10 @@ static int bts_probe(struct platform_device *pdev)
+@@ -1579,12 +1579,12 @@ int exynos_bts_debugfs_init(void)
+ 	return 0;
+ }
+ 
+-static int exynos_bts_syscore_suspend(void)
++static int exynos_bts_syscore_suspend(void *data)
+ {
+ 	return 0;
+ }
+ 
+-static void exynos_bts_syscore_resume(void)
++static void exynos_bts_syscore_resume(void *data)
+ {
+ 	struct bts_info *info = btsdev->bts_list;
+ 	unsigned int i;
+@@ -1599,11 +1599,15 @@ static void exynos_bts_syscore_resume(void)
+ }
+ 
+ /* Syscore operation */
+-static struct syscore_ops exynos_bts_syscore_ops = {
++static const struct syscore_ops exynos_bts_syscore_ops = {
+ 	.suspend = exynos_bts_syscore_suspend,
+ 	.resume = exynos_bts_syscore_resume,
+ };
+ 
++static struct syscore exynos_bts_syscore = {
++	.ops = &exynos_bts_syscore_ops,
++};
++
+ /* BTS Initialize */
+ static int bts_initialize(struct bts_device *data)
+ {
+@@ -2110,19 +2114,17 @@ static int bts_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		dev_err(btsdev->dev, "exynos_bts_debugfs_init failed\n");
+ 
+-	register_syscore_ops(&exynos_bts_syscore_ops);
++	register_syscore(&exynos_bts_syscore);
+ 
+ 	pr_info("%s successfully done.\n", __func__);
+ 
  	return ret;
  }
  
@@ -84,8 +236,126 @@ index 2e17bc9..5a87915 100644
  #include <linux/clk.h>
  #include <linux/clkdev.h>
  #include <linux/clk-provider.h>
+diff --git a/drivers/clk/gs/composite.c b/drivers/clk/gs/composite.c
+index 2b6d6d1..490c4ce 100644
+--- a/drivers/clk/gs/composite.c
++++ b/drivers/clk/gs/composite.c
+@@ -16,6 +16,21 @@
+ 
+ #include "composite.h"
+ 
++/*
++ * junkyard (lynx-mainline): clk_ops.round_rate was removed upstream in favour
++ * of determine_rate. Adapt the existing round_rate helpers unchanged.
++ */
++#define JY_CLK_DETERMINE_FROM_ROUND(round)					\
++static int round##_determine(struct clk_hw *hw, struct clk_rate_request *req)	\
++{										\
++	long r = round(hw, req->rate, &req->best_parent_rate);			\
++										\
++	if (r < 0)								\
++		return r;							\
++	req->rate = r;								\
++	return 0;								\
++}
++
+ #define PLL_STAT_OSC	(0x0)
+ #define PLL_STAT_PLL	(0x1)
+ #define PLL_STAT_CHANGE	(0x4)
+@@ -221,6 +236,7 @@ static long samsung_pll_round_rate(struct clk_hw *hw,
+ 	/* return minimum supported value */
+ 	return rate_table[i - 1].rate;
+ }
++JY_CLK_DETERMINE_FROM_ROUND(samsung_pll_round_rate)
+ 
+ static int samsung_composite_pll_is_enabled(struct clk_hw *hw)
+ {
+@@ -462,7 +478,7 @@ static int samsung_pll1460x_set_rate(struct clk_hw *hw, unsigned long drate,
+ static const struct clk_ops samsung_pll145xx_clk_ops = {
+ 	.recalc_rate = samsung_pll145xx_recalc_rate,
+ 	.set_rate = samsung_pll145xx_set_rate,
+-	.round_rate = samsung_pll_round_rate,
++	.determine_rate = samsung_pll_round_rate_determine,
+ 	.enable = samsung_composite_pll_enable,
+ 	.disable = samsung_composite_pll_disable,
+ 	.is_enabled = samsung_composite_pll_is_enabled,
+@@ -471,7 +487,7 @@ static const struct clk_ops samsung_pll145xx_clk_ops = {
+ static const struct clk_ops samsung_pll1460x_clk_ops = {
+ 	.recalc_rate = samsung_pll1460x_recalc_rate,
+ 	.set_rate = samsung_pll1460x_set_rate,
+-	.round_rate = samsung_pll_round_rate,
++	.determine_rate = samsung_pll_round_rate_determine,
+ 	.enable = samsung_composite_pll_enable,
+ 	.disable = samsung_composite_pll_disable,
+ 	.is_enabled = samsung_composite_pll_is_enabled,
+@@ -615,7 +631,7 @@ static int samsung_pll255xx_set_rate(struct clk_hw *hw, unsigned long drate,
+ static const struct clk_ops samsung_pll255xx_clk_ops = {
+ 	.recalc_rate = samsung_pll255xx_recalc_rate,
+ 	.set_rate = samsung_pll255xx_set_rate,
+-	.round_rate = samsung_pll_round_rate,
++	.determine_rate = samsung_pll_round_rate_determine,
+ 	.enable = samsung_composite_pll_enable_onchange,
+ 	.disable = samsung_composite_pll_disable_onchange,
+ 	.is_enabled = samsung_composite_pll_is_enabled,
+@@ -717,7 +733,7 @@ static int samsung_pll2650x_set_rate(struct clk_hw *hw, unsigned long drate,
+ static const struct clk_ops samsung_pll2650x_clk_ops = {
+ 	.recalc_rate = samsung_pll2650x_recalc_rate,
+ 	.set_rate = samsung_pll2650x_set_rate,
+-	.round_rate = samsung_pll_round_rate,
++	.determine_rate = samsung_pll_round_rate_determine,
+ 	.enable = samsung_composite_pll_enable_onchange,
+ 	.disable = samsung_composite_pll_disable_onchange,
+ 	.is_enabled = samsung_composite_pll_is_enabled,
+@@ -904,6 +920,7 @@ static long samsung_divider_round_rate(struct clk_hw *hw, unsigned long rate,
+ 
+ 	return *prate / div;
+ }
++JY_CLK_DETERMINE_FROM_ROUND(samsung_divider_round_rate)
+ 
+ static int samsung_divider_set_rate(struct clk_hw *hw, unsigned long rate,
+ 				unsigned long parent_rate)
+@@ -954,7 +971,7 @@ static int samsung_divider_set_rate(struct clk_hw *hw, unsigned long rate,
+ 
+ static const struct clk_ops samsung_composite_divider_ops = {
+ 	.recalc_rate = samsung_divider_recalc_rate,
+-	.round_rate = samsung_divider_round_rate,
++	.determine_rate = samsung_divider_round_rate_determine,
+ 	.set_rate = samsung_divider_set_rate,
+ };
+ 
+@@ -1368,6 +1385,7 @@ long cal_vclk_round_rate(struct clk_hw *hw, unsigned long rate,
+ 	/* round_rate ops is not needed when using cal */
+ 	return (long)rate;
+ }
++JY_CLK_DETERMINE_FROM_ROUND(cal_vclk_round_rate)
+ 
+ int cal_vclk_set_rate(struct clk_hw *hw, unsigned long rate,
+ 		unsigned long prate)
+@@ -1570,19 +1588,19 @@ static const struct clk_ops samsung_vclk_ops = {
+ 	.disable = cal_vclk_disable,
+ 	.is_enabled = cal_vclk_is_enabled,
+ 	.recalc_rate = cal_vclk_recalc_rate,
+-	.round_rate = cal_vclk_round_rate,
++	.determine_rate = cal_vclk_round_rate_determine,
+ 	.set_rate = cal_vclk_set_rate,
+ };
+ 
+ static const struct clk_ops samsung_vclk_dfs_ops = {
+ 	.recalc_rate = cal_vclk_dfs_recalc_rate,
+-	.round_rate = cal_vclk_round_rate,
++	.determine_rate = cal_vclk_round_rate_determine,
+ 	.set_rate = cal_vclk_dfs_set_rate,
+ };
+ 
+ static const struct clk_ops samsung_vclk_dfs_sw_ops = {
+ 	.recalc_rate = cal_vclk_dfs_sw_recalc_rate,
+-	.round_rate = cal_vclk_round_rate,
++	.determine_rate = cal_vclk_round_rate_determine,
+ 	.set_rate = cal_vclk_dfs_set_rate_switch,
+ };
+ 
 diff --git a/drivers/cpufreq/exynos-acme.c b/drivers/cpufreq/exynos-acme.c
-index 88890a6..ff3ce37 100644
+index 88890a6..a4f1666 100644
 --- a/drivers/cpufreq/exynos-acme.c
 +++ b/drivers/cpufreq/exynos-acme.c
 @@ -206,7 +206,7 @@ static void apply_thermal_pressure(struct exynos_cpufreq_domain *domain,
@@ -107,6 +377,28 @@ index 88890a6..ff3ce37 100644
  	if (!ret)
  		apply_thermal_pressure(domain, new_policy->max, TSKIN);
  
+@@ -472,8 +473,8 @@ static int __exynos_cpufreq_suspend(struct cpufreq_policy *policy,
+ 
+ 	freq = domain->resume_freq;
+ 
+-	freq_qos_update_request(policy->min_freq_req, freq);
+-	freq_qos_update_request(policy->max_freq_req, freq);
++	freq_qos_update_request(&policy->min_freq_req, freq);
++	freq_qos_update_request(&policy->max_freq_req, freq);
+ 
+ 	flush_work(update_work);
+ 
+@@ -491,8 +492,8 @@ static int __exynos_cpufreq_resume(struct cpufreq_policy *policy,
+ 	if (!domain)
+ 		return -EINVAL;
+ 
+-	freq_qos_update_request(policy->max_freq_req, domain->max_freq);
+-	freq_qos_update_request(policy->min_freq_req, domain->min_freq);
++	freq_qos_update_request(&policy->max_freq_req, domain->max_freq);
++	freq_qos_update_request(&policy->min_freq_req, domain->min_freq);
+ 
+ 	return 0;
+ }
 @@ -548,7 +549,7 @@ static struct cpufreq_driver exynos_driver = {
  	.offline	= exynos_cpufreq_offline,
  	.suspend	= exynos_cpufreq_suspend,
@@ -126,6 +418,32 @@ index 88890a6..ff3ce37 100644
  	target_freq = policy->freq_table[target_index].frequency;
  	ret = __exynos_cpufreq_target(policy, target_freq);
  
+diff --git a/drivers/devfreq-whi/google/arm-memlat-mon.c b/drivers/devfreq-whi/google/arm-memlat-mon.c
+index 3e6426d..13d6688 100644
+--- a/drivers/devfreq-whi/google/arm-memlat-mon.c
++++ b/drivers/devfreq-whi/google/arm-memlat-mon.c
+@@ -29,7 +29,7 @@
+ #include <linux/spinlock.h>
+ 
+ // Note: This header comes from $KERNEL_SRC/drivers/devfreq
+-#include <governor.h>
++#include <linux/devfreq-governor.h>
+ #include "governor_memlat.h"
+ 
+ static DEFINE_PER_CPU(bool, is_idle);
+diff --git a/drivers/devfreq-whi/google/governor_memlat.c b/drivers/devfreq-whi/google/governor_memlat.c
+index c22c896..d420394 100644
+--- a/drivers/devfreq-whi/google/governor_memlat.c
++++ b/drivers/devfreq-whi/google/governor_memlat.c
+@@ -26,7 +26,7 @@
+ #include <trace/events/power.h>
+ 
+ // Note: this header comes from $KERNEL_SRC/drivers/devfreq
+-#include <governor.h>
++#include <linux/devfreq-governor.h>
+ #include "governor_memlat.h"
+ 
+ #define CREATE_TRACE_POINTS
 diff --git a/drivers/devfreq-whi/google/governor_memlat_trace.h b/drivers/devfreq-whi/google/governor_memlat_trace.h
 index 99517b1..56c0691 100644
 --- a/drivers/devfreq-whi/google/governor_memlat_trace.h
@@ -149,9 +467,18 @@ index 99517b1..56c0691 100644
  		__entry->inst = inst;
  		__entry->mem = mem;
 diff --git a/drivers/devfreq-whi/google/governor_simpleinteractive.c b/drivers/devfreq-whi/google/governor_simpleinteractive.c
-index ef92e0b..95699ea 100644
+index ef92e0b..ab385e2 100644
 --- a/drivers/devfreq-whi/google/governor_simpleinteractive.c
 +++ b/drivers/devfreq-whi/google/governor_simpleinteractive.c
+@@ -19,7 +19,7 @@
+ #include <linux/timer.h>
+ #include <linux/kthread.h>
+ #include <linux/pm_opp.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ 
+ #include <linux/devfreq.h>
+ #include <soc/google/exynos-devfreq.h>
 @@ -295,7 +295,7 @@ static int devfreq_simple_interactive_func(struct devfreq *df,
  
  		goto out;
@@ -222,9 +549,18 @@ index ef92e0b..95699ea 100644
  
  err:
 diff --git a/drivers/devfreq-whi/google/gs-devfreq.c b/drivers/devfreq-whi/google/gs-devfreq.c
-index f5e561b..484ebe6 100644
+index f5e561b..f7ab01f 100644
 --- a/drivers/devfreq-whi/google/gs-devfreq.c
 +++ b/drivers/devfreq-whi/google/gs-devfreq.c
+@@ -48,7 +48,7 @@
+ #endif
+ #include <soc/google/debug-snapshot.h>
+ 
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ 
+ #include "gs-ppc.h"
+ #include "thermal_core.h"
 @@ -1444,8 +1444,13 @@ static int exynos_devfreq_parse_dt(struct device_node *np,
  		data->update_fvp = false;
  	}
@@ -240,7 +576,17 @@ index f5e561b..484ebe6 100644
  		return -ENODEV;
  
  	if (!of_property_read_string(np, "use_get_dev", &use_get_dev)) {
-@@ -2481,7 +2486,7 @@ err_data:
+@@ -2411,8 +2416,7 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
+ 		return -ENODEV;
+ 
+ 	// Register cooling device
+-	data->cooling_dev = devm_thermal_of_cooling_device_register(data->dev,
+-			dev_of_node(data->dev), (char *)devfreq_domain_name,
++	data->cooling_dev = devm_thermal_of_cooling_device_register(data->dev, 0, (char *)devfreq_domain_name,
+ 			data, &exynos_devfreq_cooling_ops);
+ 
+ 	if (IS_ERR(data->cooling_dev)) {
+@@ -2481,7 +2485,7 @@ err_data:
  	return ret;
  }
  
@@ -249,7 +595,7 @@ index f5e561b..484ebe6 100644
  {
  	struct exynos_devfreq_data *data = platform_get_drvdata(pdev);
  #if IS_ENABLED(CONFIG_EXYNOS_DVFS_MANAGER)
-@@ -2523,8 +2528,6 @@ static int exynos_devfreq_remove(struct platform_device *pdev)
+@@ -2523,8 +2527,6 @@ static int exynos_devfreq_remove(struct platform_device *pdev)
  	kfree(data->devfreq_profile.freq_table);
  	mutex_destroy(&data->lock);
  	kfree(data);
@@ -258,6 +604,58 @@ index f5e561b..484ebe6 100644
  }
  
  static struct platform_device_id exynos_devfreq_driver_ids[] = {
+diff --git a/drivers/devfreq-whi/google/memlat-devfreq.c b/drivers/devfreq-whi/google/memlat-devfreq.c
+index 56452e2..0582f33 100644
+--- a/drivers/devfreq-whi/google/memlat-devfreq.c
++++ b/drivers/devfreq-whi/google/memlat-devfreq.c
+@@ -17,7 +17,7 @@
+ #include <soc/google/ect_parser.h>
+ #include <dt-bindings/soc/google/gs101-devfreq.h>
+ #include <trace/events/power.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ #include "governor_memlat.h"
+ 
+ #define MEMLAT_DEVFREQ_MODULE_NAME	"gs101-memlat-devfreq"
+diff --git a/drivers/devfreq/google/arm-memlat-mon.c b/drivers/devfreq/google/arm-memlat-mon.c
+index 8ac5e82..5d92191 100644
+--- a/drivers/devfreq/google/arm-memlat-mon.c
++++ b/drivers/devfreq/google/arm-memlat-mon.c
+@@ -22,7 +22,7 @@
+ #include <linux/cpu_pm.h>
+ #include <linux/cpu.h>
+ #include <linux/of_fdt.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ #include "governor_memlat.h"
+ #include "governor_dsulat.h"
+ #include "arm-memlat-mon.h"
+diff --git a/drivers/devfreq/google/dsulat-devfreq.c b/drivers/devfreq/google/dsulat-devfreq.c
+index cc6d479..b0c8c3a 100644
+--- a/drivers/devfreq/google/dsulat-devfreq.c
++++ b/drivers/devfreq/google/dsulat-devfreq.c
+@@ -17,7 +17,7 @@
+ #include <soc/google/ect_parser.h>
+ #include <dt-bindings/soc/google/zuma-devfreq.h>
+ #include <trace/events/power.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ #include "governor_dsulat.h"
+ 
+ 
+diff --git a/drivers/devfreq/google/governor_dsulat.c b/drivers/devfreq/google/governor_dsulat.c
+index 7aba298..f216cf4 100644
+--- a/drivers/devfreq/google/governor_dsulat.c
++++ b/drivers/devfreq/google/governor_dsulat.c
+@@ -23,7 +23,7 @@
+ #include <linux/devfreq.h>
+ #include <soc/google/exynos_pm_qos.h>
+ #include <trace/events/power.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ #include "governor_memlat.h"
+ #include "governor_dsulat.h"
+ 
 diff --git a/drivers/devfreq/google/governor_dsulat_trace.h b/drivers/devfreq/google/governor_dsulat_trace.h
 index bb43dfd..3fc51c8 100644
 --- a/drivers/devfreq/google/governor_dsulat_trace.h
@@ -280,6 +678,19 @@ index bb43dfd..3fc51c8 100644
  		__entry->dev_id = dev_id;
  		__entry->latency_mode = latency_mode;
  		__entry->inst = inst;
+diff --git a/drivers/devfreq/google/governor_memlat.c b/drivers/devfreq/google/governor_memlat.c
+index b2f303e..fea9b86 100644
+--- a/drivers/devfreq/google/governor_memlat.c
++++ b/drivers/devfreq/google/governor_memlat.c
+@@ -24,7 +24,7 @@
+ #include <soc/google/exynos_pm_qos.h>
+ #include <dt-bindings/soc/google/zuma-devfreq.h>
+ #include <trace/events/power.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ #include "governor_memlat.h"
+ #include "arm-memlat-mon.h"
+ 
 diff --git a/drivers/devfreq/google/governor_memlat_trace.h b/drivers/devfreq/google/governor_memlat_trace.h
 index 8a040e6..3fa76a8 100644
 --- a/drivers/devfreq/google/governor_memlat_trace.h
@@ -303,9 +714,18 @@ index 8a040e6..3fa76a8 100644
  		__entry->inst = inst;
  		__entry->mem = mem;
 diff --git a/drivers/devfreq/google/governor_simpleinteractive.c b/drivers/devfreq/google/governor_simpleinteractive.c
-index 6dce1f0..3f05d2b 100644
+index 6dce1f0..6dc1a57 100644
 --- a/drivers/devfreq/google/governor_simpleinteractive.c
 +++ b/drivers/devfreq/google/governor_simpleinteractive.c
+@@ -19,7 +19,7 @@
+ #include <linux/timer.h>
+ #include <linux/kthread.h>
+ #include <linux/pm_opp.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ 
+ #include <linux/devfreq.h>
+ #include <soc/google/exynos-devfreq.h>
 @@ -305,7 +305,7 @@ static int devfreq_simple_interactive_func(struct devfreq *df,
  
  		goto out;
@@ -376,6 +796,62 @@ index 6dce1f0..3f05d2b 100644
  	kthread_stop(data->change_freq_task);
  
  err:
+diff --git a/drivers/devfreq/google/gs-devfreq.c b/drivers/devfreq/google/gs-devfreq.c
+index 75d5c3b..ce6b806 100644
+--- a/drivers/devfreq/google/gs-devfreq.c
++++ b/drivers/devfreq/google/gs-devfreq.c
+@@ -48,7 +48,7 @@
+ #endif
+ #include <soc/google/debug-snapshot.h>
+ 
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ 
+ #include "gs-ppc.h"
+ #include "thermal_core.h"
+@@ -2601,8 +2601,7 @@ static int exynos_devfreq_probe(struct platform_device *pdev)
+ 		return -ENODEV;
+ 
+ 	// Register cooling device
+-	data->cooling_dev = devm_thermal_of_cooling_device_register(data->dev,
+-			dev_of_node(data->dev), (char *)devfreq_domain_name,
++	data->cooling_dev = devm_thermal_of_cooling_device_register(data->dev, 0, (char *)devfreq_domain_name,
+ 			data, &exynos_devfreq_cooling_ops);
+ 
+ 	if (IS_ERR(data->cooling_dev)) {
+diff --git a/drivers/devfreq/google/memlat-devfreq.c b/drivers/devfreq/google/memlat-devfreq.c
+index ceb8330..c9b9860 100644
+--- a/drivers/devfreq/google/memlat-devfreq.c
++++ b/drivers/devfreq/google/memlat-devfreq.c
+@@ -17,7 +17,7 @@
+ #include <soc/google/ect_parser.h>
+ #include <dt-bindings/soc/google/zuma-devfreq.h>
+ #include <trace/events/power.h>
+-#include "governor.h"
++#include <linux/devfreq-governor.h>	/* android-mainline: moved from drivers/devfreq/governor.h */
+ #include "governor_memlat.h"
+ #include "arm-memlat-mon.h"
+ 
+diff --git a/drivers/dma-buf/heaps/samsung/chunk_heap.c b/drivers/dma-buf/heaps/samsung/chunk_heap.c
+index 5aa7cc1..c8cf210 100644
+--- a/drivers/dma-buf/heaps/samsung/chunk_heap.c
++++ b/drivers/dma-buf/heaps/samsung/chunk_heap.c
+@@ -54,7 +54,14 @@ static int chunk_heap_buffer_allocate(struct cma *cma, unsigned int need_count,
+ 			nr_chunks_per_alloc >>= 1;
+ 		}
+ 
+-		page = __cma_alloc(cma, 1 << alloc_order, alloc_order, gfp_flags);
++		/*
++		 * junkyard (lynx-mainline): ACK's gfp-taking __cma_alloc() does not
++		 * exist upstream. cma_alloc() takes only no_warn; __GFP_NORETRY
++		 * cannot be passed, so the "fail fast first" pass becomes a normal
++		 * (retrying) CMA allocation. The fallback ladder below still works.
++		 */
++		page = cma_alloc(cma, 1 << alloc_order, alloc_order,
++				 !!(gfp_flags & __GFP_NOWARN));
+ 		if (!page) {
+ 			/* Try without GFP_NORETRY first */
+ 			if (gfp_flags & __GFP_NORETRY) {
 diff --git a/drivers/dma/pl330.c b/drivers/dma/pl330.c
 index 0350c5a..6ee4bdd 100644
 --- a/drivers/dma/pl330.c
@@ -489,7 +965,7 @@ index bb2b5cb..2611560 100644
 -MODULE_IMPORT_NS(DMA_BUF);
 +MODULE_IMPORT_NS("DMA_BUF");
 diff --git a/drivers/gpu/exynos/g2d/g2d_fence.c b/drivers/gpu/exynos/g2d/g2d_fence.c
-index 41f1512..2307883 100644
+index 41f1512..cc9c59a 100644
 --- a/drivers/gpu/exynos/g2d/g2d_fence.c
 +++ b/drivers/gpu/exynos/g2d/g2d_fence.c
 @@ -17,7 +17,7 @@
@@ -537,7 +1013,17 @@ index 41f1512..2307883 100644
  };
  
  struct sync_file *g2d_create_release_fence(struct g2d_device *g2d_dev,
-@@ -240,7 +240,7 @@ static bool g2d_fence_has_error(struct g2d_layer *layer, int layer_idx)
+@@ -232,15 +232,15 @@ static bool g2d_fence_has_error(struct g2d_layer *layer, int layer_idx)
+ 	bool err = false;
+ 
+ 	if (fence) {
+-		spin_lock_irqsave(fence->lock, flags);
++		dma_fence_lock_irqsave(fence, flags);
+ 		err = dma_fence_get_status_locked(fence) < 0;
+-		spin_unlock_irqrestore(fence->lock, flags);
++		dma_fence_unlock_irqrestore(fence, flags);
+ 	}
+ 
  	if (err) {
  		char name[32];
  
@@ -636,7 +1122,7 @@ index 8cccc63..543844d 100644
  
  #ifdef CONFIG_PM
 diff --git a/drivers/iio/power/odpm-whi.c b/drivers/iio/power/odpm-whi.c
-index c593f71..356d9aa 100644
+index c593f71..534cc89 100644
 --- a/drivers/iio/power/odpm-whi.c
 +++ b/drivers/iio/power/odpm-whi.c
 @@ -369,7 +369,7 @@ int odpm_configure_start_measurement(struct odpm_info *info)
@@ -648,15 +1134,41 @@ index c593f71..356d9aa 100644
  {
  	struct odpm_info *info =
  		container_of(alarm, struct odpm_info, alarmtimer_refresh);
-@@ -380,8 +380,6 @@ static enum alarmtimer_restart odpm_alarm_handler(struct alarm *alarm, ktime_t t
+@@ -378,10 +378,8 @@ static enum alarmtimer_restart odpm_alarm_handler(struct alarm *alarm, ktime_t t
+ 
+ 	/* schedule the periodic reading from the chip */
  	queue_work(info->work_queue, &info->work_refresh);
- 	alarm_start_relative(&info->alarmtimer_refresh,
- 			     ms_to_ktime(info->chip.max_refresh_time_ms));
+-	alarm_start_relative(&info->alarmtimer_refresh,
+-			     ms_to_ktime(info->chip.max_refresh_time_ms));
 -
 -	return ALARMTIMER_NORESTART;
++	alarm_start_timer(&info->alarmtimer_refresh,
++			     ms_to_ktime(info->chip.max_refresh_time_ms), true);
  }
  
  static void odpm_periodic_refresh_work(struct work_struct *work)
+@@ -406,8 +404,8 @@ static void odpm_periodic_refresh_setup(struct odpm_info *info)
+ 	/* setup the latest moment for reading the regs before saturation */
+ 	/* register the timer */
+ 	alarm_init(&info->alarmtimer_refresh, ALARM_BOOTTIME, odpm_alarm_handler);
+-	alarm_start_relative(&info->alarmtimer_refresh,
+-			     ms_to_ktime(info->chip.max_refresh_time_ms));
++	alarm_start_timer(&info->alarmtimer_refresh,
++			     ms_to_ktime(info->chip.max_refresh_time_ms), true);
+ }
+ 
+ static bool odpm_match_int_sampling_rate(struct odpm_info *info,
+@@ -961,8 +959,8 @@ static int odpm_reset_timer(struct odpm_info *info)
+ 		return ret;
+ 	} else {
+ 		alarm_init(&info->alarmtimer_refresh, ALARM_BOOTTIME, odpm_alarm_handler);
+-		alarm_start_relative(&info->alarmtimer_refresh,
+-				     ms_to_ktime(info->chip.max_refresh_time_ms));
++		alarm_start_timer(&info->alarmtimer_refresh,
++				     ms_to_ktime(info->chip.max_refresh_time_ms), true);
+ 	}
+ 	return ret;
+ }
 @@ -1771,7 +1769,7 @@ static const struct iio_info odpm_iio_info = {
  	.write_raw = odpm_write_raw,
  };
@@ -684,6 +1196,54 @@ index c593f71..356d9aa 100644
  }
  
  static void odpm_probe_init_device_specific(struct odpm_info *info, int id)
+diff --git a/drivers/iio/power/odpm.c b/drivers/iio/power/odpm.c
+index cc5f808..19a6a57 100644
+--- a/drivers/iio/power/odpm.c
++++ b/drivers/iio/power/odpm.c
+@@ -372,7 +372,7 @@ int odpm_configure_start_measurement(struct odpm_info *info)
+ 	return ret;
+ }
+ 
+-static enum alarmtimer_restart odpm_alarm_handler(struct alarm *alarm, ktime_t time)
++static void odpm_alarm_handler(struct alarm *alarm, ktime_t time)
+ {
+ 	struct odpm_info *info =
+ 		container_of(alarm, struct odpm_info, alarmtimer_refresh);
+@@ -381,10 +381,8 @@ static enum alarmtimer_restart odpm_alarm_handler(struct alarm *alarm, ktime_t t
+ 
+ 	/* schedule the periodic reading from the chip */
+ 	queue_work(info->work_queue, &info->work_refresh);
+-	alarm_start_relative(&info->alarmtimer_refresh,
+-			     ms_to_ktime(info->chip.max_refresh_time_ms));
+-
+-	return ALARMTIMER_NORESTART;
++	alarm_start_timer(&info->alarmtimer_refresh,
++			     ms_to_ktime(info->chip.max_refresh_time_ms), true);
+ }
+ 
+ static void odpm_periodic_refresh_work(struct work_struct *work)
+@@ -409,8 +407,8 @@ static void odpm_periodic_refresh_setup(struct odpm_info *info)
+ 	/* setup the latest moment for reading the regs before saturation */
+ 	/* register the timer */
+ 	alarm_init(&info->alarmtimer_refresh, ALARM_BOOTTIME, odpm_alarm_handler);
+-	alarm_start_relative(&info->alarmtimer_refresh,
+-			     ms_to_ktime(info->chip.max_refresh_time_ms));
++	alarm_start_timer(&info->alarmtimer_refresh,
++			     ms_to_ktime(info->chip.max_refresh_time_ms), true);
+ }
+ 
+ static bool odpm_match_int_sampling_rate(struct odpm_info *info,
+@@ -968,8 +966,8 @@ static int odpm_reset_timer(struct odpm_info *info)
+ 		return ret;
+ 	} else {
+ 		alarm_init(&info->alarmtimer_refresh, ALARM_BOOTTIME, odpm_alarm_handler);
+-		alarm_start_relative(&info->alarmtimer_refresh,
+-				     ms_to_ktime(info->chip.max_refresh_time_ms));
++		alarm_start_timer(&info->alarmtimer_refresh,
++				     ms_to_ktime(info->chip.max_refresh_time_ms), true);
+ 	}
+ 	return ret;
+ }
 diff --git a/drivers/input/keyboard/s2mpg12-key.c b/drivers/input/keyboard/s2mpg12-key.c
 index 369089d..d7b1d74 100644
 --- a/drivers/input/keyboard/s2mpg12-key.c
@@ -956,8 +1516,22 @@ index 0000000..c0789c8
 +}
 +EXPORT_SYMBOL_GPL(pixel_iommu_report_fault);
 +
+diff --git a/drivers/iommu/samsung-iommu-v9.c b/drivers/iommu/samsung-iommu-v9.c
+index c5548c0..e275687 100644
+--- a/drivers/iommu/samsung-iommu-v9.c
++++ b/drivers/iommu/samsung-iommu-v9.c
+@@ -454,7 +454,8 @@ static struct samsung_sysmmu_domain *attach_helper(struct iommu_domain *dom, str
+ 	return to_sysmmu_domain(dom);
+ }
+ 
+-static int samsung_sysmmu_attach_dev(struct iommu_domain *dom, struct device *dev)
++static int samsung_sysmmu_attach_dev(struct iommu_domain *dom, struct device *dev,
++		struct iommu_domain *old)
+ {
+ 	struct sysmmu_clientdata *client;
+ 	struct samsung_sysmmu_domain *domain;
 diff --git a/drivers/iommu/samsung-iommu.c b/drivers/iommu/samsung-iommu.c
-index db18e19..ad5deb9 100644
+index db18e19..646aafc 100644
 --- a/drivers/iommu/samsung-iommu.c
 +++ b/drivers/iommu/samsung-iommu.c
 @@ -248,20 +248,22 @@ static bool samsung_sysmmu_capable(struct device *dev, enum iommu_cap cap)
@@ -1013,7 +1587,17 @@ index db18e19..ad5deb9 100644
  		return ERR_PTR(-ENXIO);
  	}
  
-@@ -652,7 +653,26 @@ static int samsung_sysmmu_map(struct iommu_domain *dom, unsigned long l_iova,
+@@ -427,7 +428,8 @@ static struct samsung_sysmmu_domain *attach_helper(struct iommu_domain *dom, str
+ }
+ 
+ static int samsung_sysmmu_attach_dev(struct iommu_domain *dom,
+-				     struct device *dev)
++				     struct device *dev,
++		struct iommu_domain *old)
+ {
+ 	struct sysmmu_clientdata *client;
+ 	struct samsung_sysmmu_domain *domain;
+@@ -652,7 +654,26 @@ static int samsung_sysmmu_map(struct iommu_domain *dom, unsigned long l_iova,
  	return ret;
  }
  
@@ -1041,7 +1625,7 @@ index db18e19..ad5deb9 100644
  				   unsigned long l_iova, size_t size,
  				   struct iommu_iotlb_gather *gather)
  {
-@@ -818,8 +838,8 @@ static void samsung_sysmmu_flush_iotlb_all(struct iommu_domain *dom)
+@@ -818,8 +839,8 @@ static void samsung_sysmmu_flush_iotlb_all(struct iommu_domain *dom)
  	spin_unlock_irqrestore(&groupdata->sysmmu_list_lock[domain->vid], flags);
  }
  
@@ -1052,7 +1636,7 @@ index db18e19..ad5deb9 100644
  {
  	struct samsung_sysmmu_domain *domain = to_sysmmu_domain(dom);
  	sysmmu_pte_t *sent, *pent;
-@@ -844,6 +864,8 @@ next_section:
+@@ -844,6 +865,8 @@ next_section:
  		iova = section_end;
  		sent++;
  	}
@@ -1061,7 +1645,7 @@ index db18e19..ad5deb9 100644
  }
  
  static void samsung_sysmmu_iotlb_sync(struct iommu_domain *dom,
-@@ -904,11 +926,6 @@ static struct iommu_device *samsung_sysmmu_probe_device(struct device *dev)
+@@ -904,11 +927,6 @@ static struct iommu_device *samsung_sysmmu_probe_device(struct device *dev)
  		return ERR_PTR(-ENODEV);
  	}
  
@@ -1073,7 +1657,7 @@ index db18e19..ad5deb9 100644
  	client = (struct sysmmu_clientdata *) dev_iommu_priv_get(dev);
  	client->dev_link = kcalloc(client->sysmmu_count,
  				   sizeof(*client->dev_link), GFP_KERNEL);
-@@ -940,15 +957,13 @@ static void samsung_sysmmu_release_device(struct device *dev)
+@@ -940,15 +958,13 @@ static void samsung_sysmmu_release_device(struct device *dev)
  	struct sysmmu_clientdata *client;
  	unsigned int i;
  
@@ -1090,7 +1674,7 @@ index db18e19..ad5deb9 100644
  }
  
  static void samsung_sysmmu_group_data_release(void *iommu_data)
-@@ -1012,8 +1027,13 @@ static struct iommu_group *samsung_sysmmu_device_group(struct device *dev)
+@@ -1012,8 +1028,13 @@ static struct iommu_group *samsung_sysmmu_device_group(struct device *dev)
  
  	if (need_unmanaged_domain) {
  		int ret;
@@ -1106,7 +1690,7 @@ index db18e19..ad5deb9 100644
  
  		ret = iommu_attach_group(domain, group);
  		if (ret) {
-@@ -1033,7 +1053,7 @@ static void samsung_sysmmu_clientdata_release(struct device *dev, void *res)
+@@ -1033,7 +1054,7 @@ static void samsung_sysmmu_clientdata_release(struct device *dev, void *res)
  }
  
  static int samsung_sysmmu_of_xlate(struct device *dev,
@@ -1115,7 +1699,7 @@ index db18e19..ad5deb9 100644
  {
  	struct platform_device *sysmmu = of_find_device_by_node(args->np);
  	struct sysmmu_drvdata *data = platform_get_drvdata(sysmmu);
-@@ -1075,8 +1095,11 @@ static int samsung_sysmmu_of_xlate(struct device *dev,
+@@ -1075,8 +1096,11 @@ static int samsung_sysmmu_of_xlate(struct device *dev,
  	return ret;
  }
  
@@ -1128,7 +1712,7 @@ index db18e19..ad5deb9 100644
  {
  	struct sysmmu_clientdata *client;
  	struct samsung_sysmmu_domain *domain;
-@@ -1096,6 +1119,13 @@ static int samsung_sysmmu_set_dev_pasid(struct iommu_domain *dom, struct device
+@@ -1096,6 +1120,13 @@ static int samsung_sysmmu_set_dev_pasid(struct iommu_domain *dom, struct device
  		return -EINVAL;
  	}
  
@@ -1142,7 +1726,7 @@ index db18e19..ad5deb9 100644
  	domain = attach_helper(dom, dev);
  	if (IS_ERR(domain))
  		return (int)PTR_ERR(domain);
-@@ -1178,10 +1208,10 @@ group_put:
+@@ -1178,10 +1209,10 @@ group_put:
  	return ret;
  }
  
@@ -1155,7 +1739,7 @@ index db18e19..ad5deb9 100644
  	struct samsung_sysmmu_domain *domain;
  	struct iommu_group *group;
  	struct sysmmu_groupdata *groupdata;
-@@ -1195,8 +1225,7 @@ static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
+@@ -1195,8 +1226,7 @@ static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
  	WARN(vid >= MAX_VIDS, "VID %u for device %s above or equal maximum of %u\n",
  	     vid, dev_name(dev), MAX_VIDS);
  
@@ -1165,7 +1749,7 @@ index db18e19..ad5deb9 100644
  		return;
  	domain = to_sysmmu_domain(dom);
  	client = (struct sysmmu_clientdata *)dev_iommu_priv_get(dev);
-@@ -1235,23 +1264,39 @@ static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
+@@ -1235,23 +1265,40 @@ static void samsung_sysmmu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
  	iommu_group_put(group);
  }
  
@@ -1197,7 +1781,8 @@ index db18e19..ad5deb9 100644
 + * page table, so refuse loudly rather than claim DMA is blocked.
 + */
 +static int samsung_sysmmu_blocked_attach_dev(struct iommu_domain *blocked,
-+					     struct device *dev)
++					     struct device *dev,
++		struct iommu_domain *old)
  {
 -	return -EINVAL;
 +	dev_warn(dev, "SysMMU cannot attach a DMA-blocking domain\n");
@@ -1215,7 +1800,7 @@ index db18e19..ad5deb9 100644
  static void samsung_sysmmu_get_resv_regions(struct device *dev, struct list_head *head)
  {
  	enum iommu_resv_type resvtype[] = {
-@@ -1309,22 +1354,18 @@ static void samsung_sysmmu_get_resv_regions(struct device *dev, struct list_head
+@@ -1309,22 +1356,18 @@ static void samsung_sysmmu_get_resv_regions(struct device *dev, struct list_head
  
  static struct iommu_ops samsung_sysmmu_ops = {
  	.capable		= samsung_sysmmu_capable,
@@ -1242,10 +1827,46 @@ index db18e19..ad5deb9 100644
  		.flush_iotlb_all	= samsung_sysmmu_flush_iotlb_all,
  		.iotlb_sync_map		= samsung_sysmmu_iotlb_sync_map,
 diff --git a/drivers/media/platform/exynos/mfc/mfc.c b/drivers/media/platform/exynos/mfc/mfc.c
-index 64bb1e4..19d5c18 100644
+index 64bb1e4..db40be4 100644
 --- a/drivers/media/platform/exynos/mfc/mfc.c
 +++ b/drivers/media/platform/exynos/mfc/mfc.c
-@@ -420,7 +420,7 @@ static int mfc_open(struct file *file)
+@@ -218,6 +218,8 @@ static int __mfc_init_dec_ctx(struct mfc_ctx *ctx)
+ 	ctx->vq_src.buf_struct_size = sizeof(struct mfc_buf);
+ 	ctx->vq_src.io_modes = VB2_USERPTR | VB2_DMABUF;
+ 	ctx->vq_src.ops = &mfc_dec_qops;
++	/* android-mainline: vb2 drops/retakes q->lock itself (no wait_prepare/finish) */
++	ctx->vq_src.lock = &ctx->dev->mfc_mutex;
+ 	ctx->vq_src.mem_ops = mfc_mem_ops();
+ 	ctx->vq_src.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	ret = vb2_queue_init(&ctx->vq_src);
+@@ -231,6 +233,8 @@ static int __mfc_init_dec_ctx(struct mfc_ctx *ctx)
+ 	ctx->vq_dst.buf_struct_size = sizeof(struct mfc_buf);
+ 	ctx->vq_dst.io_modes = VB2_USERPTR | VB2_DMABUF;
+ 	ctx->vq_dst.ops = &mfc_dec_qops;
++	/* android-mainline: vb2 drops/retakes q->lock itself (no wait_prepare/finish) */
++	ctx->vq_dst.lock = &ctx->dev->mfc_mutex;
+ 	ctx->vq_dst.mem_ops = mfc_mem_ops();
+ 	ctx->vq_dst.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	ret = vb2_queue_init(&ctx->vq_dst);
+@@ -326,6 +330,8 @@ static int __mfc_init_enc_ctx(struct mfc_ctx *ctx)
+ 	ctx->vq_src.buf_struct_size = sizeof(struct mfc_buf);
+ 	ctx->vq_src.io_modes = VB2_USERPTR | VB2_DMABUF;
+ 	ctx->vq_src.ops = &mfc_enc_qops;
++	/* android-mainline: vb2 drops/retakes q->lock itself (no wait_prepare/finish) */
++	ctx->vq_src.lock = &ctx->dev->mfc_mutex;
+ 	ctx->vq_src.mem_ops = mfc_mem_ops();
+ 	ctx->vq_src.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	ret = vb2_queue_init(&ctx->vq_src);
+@@ -340,6 +346,8 @@ static int __mfc_init_enc_ctx(struct mfc_ctx *ctx)
+ 	ctx->vq_dst.buf_struct_size = sizeof(struct mfc_buf);
+ 	ctx->vq_dst.io_modes = VB2_USERPTR | VB2_DMABUF;
+ 	ctx->vq_dst.ops = &mfc_enc_qops;
++	/* android-mainline: vb2 drops/retakes q->lock itself (no wait_prepare/finish) */
++	ctx->vq_dst.lock = &ctx->dev->mfc_mutex;
+ 	ctx->vq_dst.mem_ops = mfc_mem_ops();
+ 	ctx->vq_dst.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
+ 	ret = vb2_queue_init(&ctx->vq_dst);
+@@ -420,7 +428,7 @@ static int mfc_open(struct file *file)
  
  	v4l2_fh_init(&ctx->fh, vdev);
  	file->private_data = &ctx->fh;
@@ -1254,7 +1875,7 @@ index 64bb1e4..19d5c18 100644
  
  	ctx->dev = dev;
  
-@@ -539,7 +539,7 @@ err_ctx_init:
+@@ -539,7 +547,7 @@ err_ctx_init:
  	dev->ctx[ctx->num] = 0;
  
  err_ctx_num:
@@ -1263,7 +1884,7 @@ index 64bb1e4..19d5c18 100644
  	v4l2_fh_exit(&ctx->fh);
  
  err_vdev:
-@@ -579,7 +579,7 @@ static int mfc_release(struct file *file)
+@@ -579,7 +587,7 @@ static int mfc_release(struct file *file)
  	MFC_TRACE_CTX_LT("[INFO] release is called (ctx:%d, total:%d)\n", ctx->num, dev->num_inst);
  
  	/* Free resources */
@@ -1272,7 +1893,16 @@ index 64bb1e4..19d5c18 100644
  	v4l2_fh_exit(&ctx->fh);
  
  	maincore = mfc_get_main_core_wait(dev, ctx);
-@@ -1200,7 +1200,7 @@ err_res_mem:
+@@ -1166,7 +1174,7 @@ static int mfc_probe(struct platform_device *pdev)
+ 	g_mfc_dev = dev;
+ 
+ 	mfc_init_debugfs(dev);
+-	__platform_driver_register(&mfc_core_driver, THIS_MODULE);
++	platform_driver_register(&mfc_core_driver);	/* android-mainline: __platform_driver_register() takes mod_name too */
+ 	of_platform_populate(np, NULL, NULL, device);
+ 
+ 	dev_info(&pdev->dev, "%s is completed\n", __func__);
+@@ -1200,7 +1208,7 @@ err_res_mem:
  }
  
  /* Remove the driver */
@@ -1281,7 +1911,7 @@ index 64bb1e4..19d5c18 100644
  {
  	struct mfc_dev *dev = platform_get_drvdata(pdev);
  
-@@ -1228,7 +1228,6 @@ static int mfc_remove(struct platform_device *pdev)
+@@ -1228,7 +1236,6 @@ static int mfc_remove(struct platform_device *pdev)
  	mfc_dev_debug(2, "Will now deinit HW\n");
  
  	dev_dbg(&pdev->dev, "%s--\n", __func__);
@@ -1289,7 +1919,7 @@ index 64bb1e4..19d5c18 100644
  }
  
  static void mfc_shutdown(struct platform_device *pdev)
-@@ -1385,4 +1384,4 @@ MODULE_SOFTDEP("pre: samsung_dma_heap");
+@@ -1385,4 +1392,4 @@ MODULE_SOFTDEP("pre: samsung_dma_heap");
  
  MODULE_LICENSE("GPL");
  MODULE_AUTHOR("Kamil Debski <k.debski@samsung.com>");
@@ -1573,6 +2203,42 @@ index 110d4b3..a2fc31c 100644
  };
  
  const struct v4l2_ioctl_ops *mfc_get_dec_v4l2_ioctl_ops(void)
+diff --git a/drivers/media/platform/exynos/mfc/mfc_dec_vb2.c b/drivers/media/platform/exynos/mfc/mfc_dec_vb2.c
+index 3021cd2..1471837 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_dec_vb2.c
++++ b/drivers/media/platform/exynos/mfc/mfc_dec_vb2.c
+@@ -99,22 +99,6 @@ static int mfc_dec_queue_setup(struct vb2_queue *vq,
+ 	return 0;
+ }
+ 
+-static void mfc_dec_unlock(struct vb2_queue *q)
+-{
+-	struct mfc_ctx *ctx = q->drv_priv;
+-	struct mfc_dev *dev = ctx->dev;
+-
+-	mutex_unlock(&dev->mfc_mutex);
+-}
+-
+-static void mfc_dec_lock(struct vb2_queue *q)
+-{
+-	struct mfc_ctx *ctx = q->drv_priv;
+-	struct mfc_dev *dev = ctx->dev;
+-
+-	mutex_lock(&dev->mfc_mutex);
+-}
+-
+ static int mfc_dec_buf_init(struct vb2_buffer *vb)
+ {
+ 	struct vb2_queue *vq = vb->vb2_queue;
+@@ -373,8 +357,6 @@ static void mfc_dec_buf_queue(struct vb2_buffer *vb)
+ 
+ struct vb2_ops mfc_dec_qops = {
+ 	.queue_setup		= mfc_dec_queue_setup,
+-	.wait_prepare		= mfc_dec_unlock,
+-	.wait_finish		= mfc_dec_lock,
+ 	.buf_init		= mfc_dec_buf_init,
+ 	.buf_prepare		= mfc_dec_buf_prepare,
+ 	.buf_finish		= mfc_dec_buf_finish,
 diff --git a/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c b/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c
 index eaa4499..c065bba 100644
 --- a/drivers/media/platform/exynos/mfc/mfc_enc_v4l2.c
@@ -1635,6 +2301,42 @@ index eaa4499..c065bba 100644
  	.vidioc_try_ext_ctrls		= mfc_enc_try_ext_ctrls,
  };
  
+diff --git a/drivers/media/platform/exynos/mfc/mfc_enc_vb2.c b/drivers/media/platform/exynos/mfc/mfc_enc_vb2.c
+index 98614d7..95e22d5 100644
+--- a/drivers/media/platform/exynos/mfc/mfc_enc_vb2.c
++++ b/drivers/media/platform/exynos/mfc/mfc_enc_vb2.c
+@@ -107,22 +107,6 @@ static int mfc_enc_queue_setup(struct vb2_queue *vq,
+ 	return 0;
+ }
+ 
+-static void mfc_enc_unlock(struct vb2_queue *q)
+-{
+-	struct mfc_ctx *ctx = q->drv_priv;
+-	struct mfc_dev *dev = ctx->dev;
+-
+-	mutex_unlock(&dev->mfc_mutex);
+-}
+-
+-static void mfc_enc_lock(struct vb2_queue *q)
+-{
+-	struct mfc_ctx *ctx = q->drv_priv;
+-	struct mfc_dev *dev = ctx->dev;
+-
+-	mutex_lock(&dev->mfc_mutex);
+-}
+-
+ static int mfc_enc_buf_init(struct vb2_buffer *vb)
+ {
+ 	struct vb2_queue *vq = vb->vb2_queue;
+@@ -432,8 +416,6 @@ static void mfc_enc_buf_queue(struct vb2_buffer *vb)
+ 
+ struct vb2_ops mfc_enc_qops = {
+ 	.queue_setup		= mfc_enc_queue_setup,
+-	.wait_prepare		= mfc_enc_unlock,
+-	.wait_finish		= mfc_enc_lock,
+ 	.buf_init		= mfc_enc_buf_init,
+ 	.buf_prepare		= mfc_enc_buf_prepare,
+ 	.buf_finish		= mfc_enc_buf_finish,
 diff --git a/drivers/media/platform/exynos/mfc/mfc_meerkat.c b/drivers/media/platform/exynos/mfc/mfc_meerkat.c
 index 9eacefe..03a1235 100644
 --- a/drivers/media/platform/exynos/mfc/mfc_meerkat.c
@@ -1671,7 +2373,7 @@ index 7414f8d..b486068 100644
  
  	mfc_core_debug(5, "[MFCIDLE] MFC HW idle checker is ticking!\n");
 diff --git a/drivers/media/platform/exynos/smfc/smfc-dev.c b/drivers/media/platform/exynos/smfc/smfc-dev.c
-index 2fbf42a..8befbb2 100644
+index 2fbf42a..245ce3c 100644
 --- a/drivers/media/platform/exynos/smfc/smfc-dev.c
 +++ b/drivers/media/platform/exynos/smfc/smfc-dev.c
 @@ -6,6 +6,7 @@
@@ -1700,7 +2402,16 @@ index 2fbf42a..8befbb2 100644
  	struct smfc_ctx *ctx;
  	unsigned long flags;
  	bool suspending;
-@@ -514,7 +515,7 @@ static int exynos_smfc_open(struct file *filp)
+@@ -449,8 +450,6 @@ static struct vb2_ops smfc_vb2_ops = {
+ 	.buf_finish	= smfc_vb2_buf_finish,
+ 	.buf_cleanup	= smfc_vb2_buf_cleanup,
+ 	.buf_queue	= smfc_vb2_buf_queue,
+-	.wait_finish	= vb2_ops_wait_finish,
+-	.wait_prepare	= vb2_ops_wait_prepare,
+ 	.stop_streaming	= smfc_vb2_stop_streaming,
+ };
+ 
+@@ -514,7 +513,7 @@ static int exynos_smfc_open(struct file *filp)
  		goto err_m2m_ctx_init;
  	}
  
@@ -1709,7 +2420,7 @@ index 2fbf42a..8befbb2 100644
  
  	filp->private_data = &ctx->fh;
  
-@@ -556,7 +557,7 @@ err_clk:
+@@ -556,7 +555,7 @@ err_clk:
  err_m2m_ctx_init:
  	v4l2_ctrl_handler_free(&ctx->v4l2_ctrlhdlr);
  err_control:
@@ -1718,7 +2429,7 @@ index 2fbf42a..8befbb2 100644
  	v4l2_fh_exit(&ctx->fh);
  	kfree(ctx);
  	return ret;
-@@ -568,7 +569,7 @@ static int exynos_smfc_release(struct file *filp)
+@@ -568,7 +567,7 @@ static int exynos_smfc_release(struct file *filp)
  
  	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
  	v4l2_ctrl_handler_free(&ctx->v4l2_ctrlhdlr);
@@ -1727,7 +2438,16 @@ index 2fbf42a..8befbb2 100644
  	v4l2_fh_exit(&ctx->fh);
  
  	if (!IS_ERR(ctx->smfc->clk_gate)) {
-@@ -930,7 +931,9 @@ static void g2d_pm_qos_reset_request(struct smfc_dev *smfc)
+@@ -627,7 +626,7 @@ static void smfc_m2m_device_run(void *priv)
+ 	unsigned char thumb_quality_factor = ctx->thumb_quality_factor;
+ 	unsigned char enable_hwfc = ctx->enable_hwfc;
+ 
+-	ret = in_irq() ? pm_runtime_get(ctx->smfc->dev) : pm_runtime_get_sync(ctx->smfc->dev);
++	ret = in_hardirq() ? pm_runtime_get(ctx->smfc->dev) : pm_runtime_get_sync(ctx->smfc->dev);
+ 	if (ret < 0) {
+ 		pr_err("Failed to enable power\n");
+ 		goto err_pm;
+@@ -930,7 +929,9 @@ static void g2d_pm_qos_reset_request(struct smfc_dev *smfc)
  }
  #endif
  
@@ -1738,7 +2458,7 @@ index 2fbf42a..8befbb2 100644
  {
  	struct smfc_dev *smfc = token;
  
-@@ -1088,7 +1091,7 @@ static int exynos_smfc_probe(struct platform_device *pdev)
+@@ -1088,7 +1089,7 @@ static int exynos_smfc_probe(struct platform_device *pdev)
  	if (ret < 0)
  		goto err_v4l2;
  
@@ -1747,7 +2467,7 @@ index 2fbf42a..8befbb2 100644
  
  	timer_setup(&smfc->timer, smfc_timedout_handler, 0);
  
-@@ -1119,7 +1122,7 @@ static void smfc_deinit_clock(struct smfc_dev *smfc)
+@@ -1119,7 +1120,7 @@ static void smfc_deinit_clock(struct smfc_dev *smfc)
  		clk_put(smfc->clk_gate);
  }
  
@@ -1756,7 +2476,7 @@ index 2fbf42a..8befbb2 100644
  {
  	struct smfc_dev *smfc = platform_get_drvdata(pdev);
  
-@@ -1127,9 +1130,7 @@ static int exynos_smfc_remove(struct platform_device *pdev)
+@@ -1127,9 +1128,7 @@ static int exynos_smfc_remove(struct platform_device *pdev)
  
  	smfc_deinit_clock(smfc);
  
@@ -1767,7 +2487,7 @@ index 2fbf42a..8befbb2 100644
  }
  
  #ifdef CONFIG_PM_SLEEP
-@@ -1203,5 +1204,5 @@ MODULE_SOFTDEP("pre: exynos_devfreq");
+@@ -1203,5 +1202,5 @@ MODULE_SOFTDEP("pre: exynos_devfreq");
  
  MODULE_AUTHOR("Cho KyongHo <pullip.cho@samsung.com>");
  MODULE_DESCRIPTION("Exynos Still MFC(JPEG) V4L2 Driver");
@@ -1884,8 +2604,34 @@ index 99811a6..e45ed28 100644
  		struct v4l2_m2m_buffer *mbuf = container_of(vbuf, typeof(*mbuf), vb);
  		struct vb2_smfc_buffer *sbuf = container_of(mbuf, typeof(*sbuf), mb);
  
+diff --git a/drivers/mfd/s2mpg1415-gpio.c b/drivers/mfd/s2mpg1415-gpio.c
+index 5c6afb8..02bd6fb 100644
+--- a/drivers/mfd/s2mpg1415-gpio.c
++++ b/drivers/mfd/s2mpg1415-gpio.c
+@@ -453,7 +453,7 @@ static int s2mpg1415_gpio_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "Failed to find %s DT node\n", pdev->name);
+ 		return -EINVAL;
+ 	}
+-	s2mpg1415_gpio->gc.fwnode = of_node_to_fwnode(dp);
++	s2mpg1415_gpio->gc.fwnode = of_fwnode_handle(dp);
+ 	if (of_property_read_u32(dp, "ngpios", &ngpios)) {
+ 		dev_err(&pdev->dev, "Failed to get ngpios from %s DT node\n",
+ 			pdev->name);
+diff --git a/drivers/mfd/s2mpg1x-gpio-gs101.c b/drivers/mfd/s2mpg1x-gpio-gs101.c
+index 99f783f..78dc30e 100644
+--- a/drivers/mfd/s2mpg1x-gpio-gs101.c
++++ b/drivers/mfd/s2mpg1x-gpio-gs101.c
+@@ -456,7 +456,7 @@ static int s2mpg1x_gpio_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "Failed to find %s DT node\n", pdev->name);
+ 		return -EINVAL;
+ 	}
+-	s2mpg1x_gpio->gc.fwnode = of_node_to_fwnode(dp);
++	s2mpg1x_gpio->gc.fwnode = of_fwnode_handle(dp);
+ 	if (of_property_read_u32(dp, "ngpios", &ngpios)) {
+ 		dev_err(&pdev->dev, "Failed to get ngpios from %s DT node\n",
+ 			pdev->name);
 diff --git a/drivers/mfd/s2mpg1x-gpio-gs201.c b/drivers/mfd/s2mpg1x-gpio-gs201.c
-index f14d7b0..048c506 100644
+index f14d7b0..3dc6e7d 100644
 --- a/drivers/mfd/s2mpg1x-gpio-gs201.c
 +++ b/drivers/mfd/s2mpg1x-gpio-gs201.c
 @@ -152,7 +152,7 @@ static int s2mpg1x_gpio_get(struct gpio_chip *chip, unsigned int offset)
@@ -1924,6 +2670,15 @@ index f14d7b0..048c506 100644
  			data = argument ? GPIO_OUT_MASK : 0;
  			ret = s2mpg1x_update_reg(gc->id, gc->i2c,
  						 GPIO_CTRL_BASE[gc->id] + pin,
+@@ -476,7 +478,7 @@ static int s2mpg1x_gpio_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "Failed to find %s DT node\n", pdev->name);
+ 		return -EINVAL;
+ 	}
+-	s2mpg1x_gpio->gc.fwnode = of_node_to_fwnode(dp);
++	s2mpg1x_gpio->gc.fwnode = of_fwnode_handle(dp);
+ 	if (of_property_read_u32(dp, "ngpios", &ngpios)) {
+ 		dev_err(&pdev->dev, "Failed to get ngpios from %s DT node\n",
+ 			pdev->name);
 @@ -541,9 +543,8 @@ static int s2mpg1x_gpio_probe(struct platform_device *pdev)
  	return 0;
  }
@@ -1935,6 +2690,19 @@ index f14d7b0..048c506 100644
  }
  
  static const struct platform_device_id s2mpg1x_gpio_id[] = {
+diff --git a/drivers/mfd/s2mpg1x-gpio.c b/drivers/mfd/s2mpg1x-gpio.c
+index 99f783f..78dc30e 100644
+--- a/drivers/mfd/s2mpg1x-gpio.c
++++ b/drivers/mfd/s2mpg1x-gpio.c
+@@ -456,7 +456,7 @@ static int s2mpg1x_gpio_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "Failed to find %s DT node\n", pdev->name);
+ 		return -EINVAL;
+ 	}
+-	s2mpg1x_gpio->gc.fwnode = of_node_to_fwnode(dp);
++	s2mpg1x_gpio->gc.fwnode = of_fwnode_handle(dp);
+ 	if (of_property_read_u32(dp, "ngpios", &ngpios)) {
+ 		dev_err(&pdev->dev, "Failed to get ngpios from %s DT node\n",
+ 			pdev->name);
 diff --git a/drivers/mfd/slg51000-core.c b/drivers/mfd/slg51000-core.c
 index b4abff2..84bfcf1 100644
 --- a/drivers/mfd/slg51000-core.c
@@ -2031,8 +2799,30 @@ index 2b24837..7e1f82f 100644
  	return 0;
  }
  
+diff --git a/drivers/misc/sbb-mux/sbb-mux.c b/drivers/misc/sbb-mux/sbb-mux.c
+index ffbe021..6341184 100644
+--- a/drivers/misc/sbb-mux/sbb-mux.c
++++ b/drivers/misc/sbb-mux/sbb-mux.c
+@@ -38,15 +38,11 @@ static void sbb_mux_gpio_controller_get(struct sbb_gpio_tracker *tracker)
+ 
+ static void sbb_mux_gpio_controller_put(struct sbb_gpio_tracker *tracker)
+ {
+-	int ret;
+-
+ 	if (!tracker->pinctrl_pdev)
+ 		return;
+ 
+-	ret = pm_runtime_put(&tracker->pinctrl_pdev->dev);
+-	if (ret < 0)
+-		pr_err("sbb-mux: Failed to put GPIO controller device for GPIO %s, err %d\n",
+-		tracker->name, ret);
++	/* android-mainline: pm_runtime_put() returns void now. */
++	pm_runtime_put(&tracker->pinctrl_pdev->dev);
+ }
+ 
+ static struct kobject *primary_sysfs_folder;
 diff --git a/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c b/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c
-index ecf2f5d..abcf5fc 100644
+index ecf2f5d..31c4c77 100644
 --- a/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c
 +++ b/drivers/pci/controller/dwc-whi/pcie-exynos-rc.c
 @@ -8,6 +8,7 @@
@@ -2043,7 +2833,78 @@ index ecf2f5d..abcf5fc 100644
  #include <linux/clk.h>
  #include <linux/delay.h>
  #include <linux/gpio.h>
-@@ -1625,19 +1626,16 @@ void exynos_pcie_rc_write_dbi(struct dw_pcie *pci, void __iomem *base, u32 reg,
+@@ -60,6 +61,11 @@
+ #include "pcie-exynos-rc.h"
+ #include "pcie-exynos-dbg.h"
+ 
++/* junkyard (lynx-mainline): upstream renamed PCIE_ATU_TYPE_CFG0 (0x4). */
++#ifndef PCIE_ATU_TYPE_CFG0
++#define PCIE_ATU_TYPE_CFG0	PCIE_TLP_TYPE_CFG0_RDWR
++#endif
++
+ #include <linux/dma-map-ops.h>
+ #include <soc/google/s2mpu.h>
+ #include "../../../iommu/exynos-pcie-iommu-exp.h"
+@@ -278,8 +284,13 @@ static void pcie_dma_free_attrs(struct device *dev, size_t size,
+ 		pcie_iommu_unmap(dma_addr, size, pcie_ch_to_hsi(ch_num));
+ }
+ 
+-static dma_addr_t pcie_dma_map_page(struct device *dev, struct page *page,
+-				    size_t offset, size_t size,
++/*
++ * junkyard (lynx-mainline): dma_map_ops.map_page/unmap_page became
++ * map_phys/unmap_phys upstream (and map_resource folded into map_phys with
++ * DMA_ATTR_MMIO). Same forwarding to fake_dma_dev, keyed by phys address.
++ */
++static dma_addr_t pcie_dma_map_phys(struct device *dev, phys_addr_t phys,
++				    size_t size,
+ 				    enum dma_data_direction dir,
+ 				    unsigned long attrs)
+ {
+@@ -289,8 +300,7 @@ static dma_addr_t pcie_dma_map_page(struct device *dev, struct page *page,
+ 	dma_addr_t dma_addr;
+ 	int ret;
+ 
+-	dma_addr = dma_map_page_attrs(&fake_dma_dev, page, offset,
+-				      size, dir, attrs);
++	dma_addr = dma_map_phys(&fake_dma_dev, phys, size, dir, attrs);
+ 	if (exynos_pcie->s2mpu) {
+ 		s2mpu_update_refcnt(dev, dma_addr, size, true, dir);
+ 	} else if (exynos_pcie->use_sysmmu) {
+@@ -304,7 +314,7 @@ static dma_addr_t pcie_dma_map_page(struct device *dev, struct page *page,
+ 	return dma_addr;
+ }
+ 
+-static void pcie_dma_unmap_page(struct device *dev, dma_addr_t dma_addr,
++static void pcie_dma_unmap_phys(struct device *dev, dma_addr_t dma_addr,
+ 				size_t size, enum dma_data_direction dir,
+ 				unsigned long attrs)
+ {
+@@ -312,7 +322,7 @@ static void pcie_dma_unmap_page(struct device *dev, dma_addr_t dma_addr,
+ 	int ch_num = get_ch_num(epdev);
+ 	struct exynos_pcie *exynos_pcie = &g_pcie_rc[ch_num];
+ 
+-	dma_unmap_page_attrs(&fake_dma_dev, dma_addr, size, dir, attrs);
++	dma_unmap_phys(&fake_dma_dev, dma_addr, size, dir, attrs);
+ 
+ 	if (exynos_pcie->s2mpu)
+ 		s2mpu_update_refcnt(dev, dma_addr, size, false, dir);
+@@ -325,12 +335,10 @@ static const struct dma_map_ops pcie_dma_ops = {
+ 	.free = pcie_dma_free_attrs,
+ 	.mmap = NULL,
+ 	.get_sgtable = NULL,
+-	.map_page = pcie_dma_map_page,
+-	.unmap_page = pcie_dma_unmap_page,
++	.map_phys = pcie_dma_map_phys,
++	.unmap_phys = pcie_dma_unmap_phys,
+ 	.map_sg = NULL,
+ 	.unmap_sg = NULL,
+-	.map_resource = NULL,
+-	.unmap_resource = NULL,
+ 	.sync_single_for_cpu = NULL,
+ 	.sync_single_for_device = NULL,
+ 	.sync_sg_for_cpu = NULL,
+@@ -1625,25 +1633,31 @@ void exynos_pcie_rc_write_dbi(struct dw_pcie *pci, void __iomem *base, u32 reg,
  	exynos_pcie_rc_wr_own_conf(pp, reg, size, val);
  }
  
@@ -2060,13 +2921,27 @@ index ecf2f5d..abcf5fc 100644
  	val = exynos_elbi_read(exynos_pcie, PCIE_ELBI_RDLH_LINKUP) & PCIE_ELBI_LTSSM_STATE_MASK;
 -	if (val >= S_RCVRY_LOCK && val <= S_L1_IDLE)
 -		return 1;
--
--	return 0;
 +	return val >= S_RCVRY_LOCK && val <= S_L1_IDLE;
++}
+ 
+-	return 0;
++/* See the use_linkup_irq note in the probe path. */
++static enum dw_pcie_ltssm exynos_pcie_rc_get_ltssm(struct dw_pcie *pci)
++{
++	if (!exynos_pcie_rc_link_up(pci))
++		return DW_PCIE_LTSSM_DETECT_QUIET;
++	return DW_PCIE_LTSSM_L0;
  }
  
  static const struct dw_pcie_ops dw_pcie_ops = {
-@@ -2812,7 +2810,7 @@ static int exynos_pcie_rc_init(struct dw_pcie_rp *pp)
+ 	.read_dbi = exynos_pcie_rc_read_dbi,
+ 	.write_dbi = exynos_pcie_rc_write_dbi,
+ 	.link_up = exynos_pcie_rc_link_up,
++	.get_ltssm = exynos_pcie_rc_get_ltssm,
+ };
+ 
+ static void exynos_pcie_rc_set_iocc(struct dw_pcie_rp *pp, int enable)
+@@ -2812,7 +2826,7 @@ static int exynos_pcie_rc_init(struct dw_pcie_rp *pp)
  }
  
  static struct dw_pcie_host_ops exynos_pcie_rc_ops = {
@@ -2075,7 +2950,7 @@ index ecf2f5d..abcf5fc 100644
  };
  
  void exynos_pcie_msi_post_process(struct dw_pcie_rp *pp)
-@@ -4906,10 +4904,31 @@ int register_separated_msi_vector(int ch_num, irq_handler_t handler, void *conte
+@@ -4906,10 +4920,31 @@ int register_separated_msi_vector(int ch_num, irq_handler_t handler, void *conte
  }
  EXPORT_SYMBOL_GPL(register_separated_msi_vector);
  
@@ -2109,16 +2984,22 @@ index ecf2f5d..abcf5fc 100644
  	int ret, i, sep_irq;
  	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
  	struct exynos_pcie *exynos_pcie = to_exynos_pcie(pci);
-@@ -4970,7 +4989,7 @@ skip_sep_request_irq:
+@@ -4970,7 +5005,13 @@ skip_sep_request_irq:
  	 * we would like to skip the dw_pcie_wait_for_link() in the dw_pcie_host_init()
  	 * so we setup this bit to avoid waiting for the link up during the enumeration.
  	 */
 -	dw_pcie_cap_set(pci, USE_LINKUP_IRQ);
-+	pp->use_linkup_irq = true;	/* 6.13+: was dw_pcie_cap_set(pci, USE_LINKUP_IRQ) */
++	/*
++	 * junkyard (lynx-mainline): dw_pcie_rp.use_linkup_irq is gone; the core
++	 * now always calls dw_pcie_wait_for_link() and fails host init only on
++	 * -ETIMEDOUT. With the link down here, exynos_pcie_rc_get_ltssm() reports
++	 * Detect.Quiet, so the wait ends in a non-fatal -ENODEV ("Device not
++	 * found") after ~1s instead of touching a powered-down controller.
++	 */
  
  	ret = dw_pcie_host_init(pp);
  	if (ret) {
-@@ -4981,16 +5000,16 @@ skip_sep_request_irq:
+@@ -4981,16 +5022,16 @@ skip_sep_request_irq:
  	// Reset this back to 36-bits
  	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
  
@@ -2145,7 +3026,7 @@ index ecf2f5d..abcf5fc 100644
  	}
  
  	return 0;
-@@ -5430,7 +5449,7 @@ probe_fail:
+@@ -5430,7 +5471,7 @@ probe_fail:
  	return ret;
  }
  
@@ -2154,7 +3035,7 @@ index ecf2f5d..abcf5fc 100644
  {
  	struct device *dev = &pdev->dev;
  	struct dw_pcie *pci = container_of(&dev, struct dw_pcie, dev);
-@@ -5439,8 +5458,6 @@ static int __exit exynos_pcie_rc_remove(struct platform_device *pdev)
+@@ -5439,8 +5480,6 @@ static int __exit exynos_pcie_rc_remove(struct platform_device *pdev)
  	dev_info(&pdev->dev, "%s\n", __func__);
  
  	mutex_destroy(&exynos_pcie->power_onoff_lock);
@@ -2163,10 +3044,32 @@ index ecf2f5d..abcf5fc 100644
  }
  
  #if IS_ENABLED(CONFIG_PM)
+diff --git a/drivers/performance/lat_governors/gs_governor_dsulat.c b/drivers/performance/lat_governors/gs_governor_dsulat.c
+index b34a3f1..da4750c 100644
+--- a/drivers/performance/lat_governors/gs_governor_dsulat.c
++++ b/drivers/performance/lat_governors/gs_governor_dsulat.c
+@@ -7,7 +7,7 @@
+ #define pr_fmt(fmt) "gs_governor_dsulat: " fmt
+ 
+ #include <dt-bindings/soc/google/zuma-devfreq.h>
+-#include <governor.h>
++#include <linux/devfreq-governor.h>
+ #include <linux/device.h>
+ #include <linux/err.h>
+ #include <linux/errno.h>
 diff --git a/drivers/performance/lat_governors/gs_governor_memlat.c b/drivers/performance/lat_governors/gs_governor_memlat.c
-index 5a9bf5b..edf43e9 100644
+index 5a9bf5b..c651a8d 100644
 --- a/drivers/performance/lat_governors/gs_governor_memlat.c
 +++ b/drivers/performance/lat_governors/gs_governor_memlat.c
+@@ -7,7 +7,7 @@
+ #define pr_fmt(fmt) "gs_governor_memlat: " fmt
+ 
+ #include <dt-bindings/soc/google/zuma-devfreq.h>
+-#include <governor.h>
++#include <linux/devfreq-governor.h>
+ #include <linux/device.h>
+ #include <linux/err.h>
+ #include <linux/errno.h>
 @@ -386,7 +386,7 @@ err_out:
  	return ret;
  }
@@ -2297,7 +3200,7 @@ index c36243e..57c8880 100644
  	struct exynos_usbdrd_phy *phy_drd = dev_get_drvdata(dev);
  
 diff --git a/drivers/pinctrl/gs/pinctrl-samsung.c b/drivers/pinctrl/gs/pinctrl-samsung.c
-index 30ee7ad..ab5eddd 100644
+index 30ee7ad..920e778 100644
 --- a/drivers/pinctrl/gs/pinctrl-samsung.c
 +++ b/drivers/pinctrl/gs/pinctrl-samsung.c
 @@ -659,7 +659,7 @@ static void samsung_gpio_set_value(struct gpio_chip *gc,
@@ -2318,8 +3221,52 @@ index 30ee7ad..ab5eddd 100644
  }
  
  /* gpiolib gpio_get callback function */
+@@ -1416,7 +1418,7 @@ static void samsung_pinctrl_resume_dev(struct samsung_pinctrl_drv_data *drvdata)
+  *
+  * Save data for all banks across all devices.
+  */
+-static int samsung_pinctrl_suspend(void)
++static int samsung_pinctrl_suspend(void *data)
+ {
+ 	struct samsung_pinctrl_drv_data *drvdata;
+ 
+@@ -1432,7 +1434,7 @@ static int samsung_pinctrl_suspend(void)
+  *
+  * Restore data for all banks across all devices.
+  */
+-static void samsung_pinctrl_resume(void)
++static void samsung_pinctrl_resume(void *data)
+ {
+ 	struct samsung_pinctrl_drv_data *drvdata;
+ 
+@@ -1446,11 +1448,15 @@ static void samsung_pinctrl_resume(void)
+ #define samsung_pinctrl_resume		NULL
+ #endif
+ 
+-static struct syscore_ops samsung_pinctrl_syscore_ops = {
++static const struct syscore_ops samsung_pinctrl_syscore_ops = {
+ 	.suspend	= samsung_pinctrl_suspend,
+ 	.resume		= samsung_pinctrl_resume,
+ };
+ 
++static struct syscore samsung_pinctrl_syscore = {
++	.ops = &samsung_pinctrl_syscore_ops,
++};
++
+ static const struct of_device_id samsung_pinctrl_dt_match[] = {
+ #ifdef CONFIG_PINCTRL_EXYNOS_ARM
+ 	{ .compatible = "samsung,exynos3250-pinctrl",
+@@ -1521,7 +1527,7 @@ static int __init samsung_pinctrl_drv_register(void)
+ 	 * initcall level than any arch-specific init calls that install syscore
+ 	 * ops that turn off pad retention (like exynos_pm_resume).
+ 	 */
+-	register_syscore_ops(&samsung_pinctrl_syscore_ops);
++	register_syscore(&samsung_pinctrl_syscore);
+ 
+ 	return platform_driver_register(&samsung_pinctrl_driver);
+ }
 diff --git a/drivers/pinctrl/pinctrl-slg51000.c b/drivers/pinctrl/pinctrl-slg51000.c
-index dac5aa6..32828b1 100644
+index dac5aa6..70ea545 100644
 --- a/drivers/pinctrl/pinctrl-slg51000.c
 +++ b/drivers/pinctrl/pinctrl-slg51000.c
 @@ -82,7 +82,7 @@ static int slg51000_gpio_get_direction(struct gpio_chip *chip,
@@ -2416,6 +3363,15 @@ index dac5aa6..32828b1 100644
  }
  
  static int slg51000_gpio_direction_input(struct gpio_chip *chip,
+@@ -505,7 +511,7 @@ static int slg51000_pinctrl_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "Failed to find %s DT node\n", pdev->name);
+ 		return -EINVAL;
+ 	}
+-	slg51000_pctl->gc.fwnode = of_node_to_fwnode(dp);
++	slg51000_pctl->gc.fwnode = of_fwnode_handle(dp);
+ 	if (of_property_read_u32(dp, "ngpios", &ngpios)) {
+ 		dev_err(&pdev->dev, "Failed to get ngpios from %s DT node\n",
+ 			pdev->name);
 @@ -586,9 +592,8 @@ static int slg51000_pinctrl_probe(struct platform_device *pdev)
  	return 0;
  }
@@ -2427,6 +3383,19 @@ index dac5aa6..32828b1 100644
  }
  
  static const struct platform_device_id slg51000_pinctrl_id[] = {
+diff --git a/drivers/pinctrl/pinctrl-slg51002.c b/drivers/pinctrl/pinctrl-slg51002.c
+index c758eac..8512a1d 100644
+--- a/drivers/pinctrl/pinctrl-slg51002.c
++++ b/drivers/pinctrl/pinctrl-slg51002.c
+@@ -497,7 +497,7 @@ static int slg51002_pinctrl_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "Failed to find %s DT node\n", pdev->name);
+ 		return -EINVAL;
+ 	}
+-	slg51002_pctl->gc.fwnode = of_node_to_fwnode(dp);
++	slg51002_pctl->gc.fwnode = of_fwnode_handle(dp);
+ 	if (of_property_read_u32(dp, "ngpios", &ngpios)) {
+ 		dev_err(&pdev->dev, "Failed to get ngpios from %s DT node\n",
+ 			pdev->name);
 diff --git a/drivers/pwm/pwm-exynos.c b/drivers/pwm/pwm-exynos.c
 index dd2ef8f..5ed08e6 100644
 --- a/drivers/pwm/pwm-exynos.c
@@ -3300,7 +4269,7 @@ index c493f67..bf797d7 100644
  #if IS_ENABLED(CONFIG_HOTPLUG_CPU)
  	int cpu, ret;
 diff --git a/drivers/soc/google/debug/exynos-ehld.c b/drivers/soc/google/debug/exynos-ehld.c
-index 7188f19..de07cfa 100644
+index 7188f19..6d932c3 100644
 --- a/drivers/soc/google/debug/exynos-ehld.c
 +++ b/drivers/soc/google/debug/exynos-ehld.c
 @@ -229,6 +229,10 @@ void exynos_ehld_do_policy(void)
@@ -3325,6 +4294,15 @@ index 7188f19..de07cfa 100644
  		if (ehld_main.suspending && cpu == 0)
  			smp_call_function_single(0, exynos_ehld_start_cpu_hrtimer, hrtimer, 0);
  		else
+@@ -428,7 +432,7 @@ unsigned long long exynos_ehld_event_read_cpu(unsigned int cpu)
+ 	unsigned long long total = 0;
+ 	unsigned long long enabled, running;
+ 
+-	if (!in_irq() && event) {
++	if (!in_hardirq() && event) {
+ 		total = perf_event_read_value(event, &enabled, &running);
+ 		ehld_info(0, "%s: cpu%u - enabled: %llu, running: %llu, total: %llu\n",
+ 				__func__, cpu, enabled, running, total);
 @@ -539,7 +543,7 @@ void exynos_ehld_event_raw_dump(unsigned int cpu, bool header)
  		if (i < NUM_TRACE_SKIP)
  			continue;
@@ -3391,10 +4369,18 @@ index 46f74d7..4d837f9 100644
  	if (newline)
  		*newline = '\0';
 diff --git a/drivers/soc/google/debug/sjtag-driver.c b/drivers/soc/google/debug/sjtag-driver.c
-index eeb5fad..aadf7f7 100644
+index eeb5fad..900bea8 100644
 --- a/drivers/soc/google/debug/sjtag-driver.c
 +++ b/drivers/soc/google/debug/sjtag-driver.c
-@@ -966,9 +966,8 @@ static int sjtag_probe(struct platform_device *pdev)
+@@ -4,6 +4,7 @@
+  *    Author: Peter Csaszar <pcsaszar@google.com>
+  */
+ 
++#include <linux/hex.h>
+ #include <linux/fs.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -966,9 +967,8 @@ static int sjtag_probe(struct platform_device *pdev)
  	return 0;
  }
  
@@ -3516,6 +4502,54 @@ index 7356cc2..d0cc8b1 100644
  }
  
  static const struct of_device_id hsi0_of_match[] = {
+diff --git a/drivers/soc/google/exynos-pm.c b/drivers/soc/google/exynos-pm.c
+index ea1b1b5..0546b0d 100644
+--- a/drivers/soc/google/exynos-pm.c
++++ b/drivers/soc/google/exynos-pm.c
+@@ -188,7 +188,7 @@ static void exynos_wakeup_sys_powerdown(enum sys_powerdown mode, bool early_wake
+ }
+ 
+ u64 get_frc_time(void);
+-static int exynos_pm_syscore_suspend(void)
++static int exynos_pm_syscore_suspend(void *data)
+ {
+ #ifdef CONFIG_CP_PMUCAL
+ 	if (!exynos_check_cp_status()) {
+@@ -231,7 +231,7 @@ static int exynos_pm_syscore_suspend(void)
+ 	return 0;
+ }
+ 
+-static void exynos_pm_syscore_resume(void)
++static void exynos_pm_syscore_resume(void *data)
+ {
+ 	pm_dbg->mifdn_cnt = acpm_get_mifdn_count();
+ 	pm_info->apdn_cnt = acpm_get_apsocdn_count();
+@@ -296,11 +296,15 @@ bool is_test_pcieon_suspend_set(void)
+ }
+ EXPORT_SYMBOL_GPL(is_test_pcieon_suspend_set);
+ 
+-static struct syscore_ops exynos_pm_syscore_ops = {
++static const struct syscore_ops exynos_pm_syscore_ops = {
+ 	.suspend	= exynos_pm_syscore_suspend,
+ 	.resume		= exynos_pm_syscore_resume,
+ };
+ 
++static struct syscore exynos_pm_syscore = {
++	.ops = &exynos_pm_syscore_ops,
++};
++
+ #ifdef CONFIG_DEBUG_FS
+ static int wake_lock_get(void *data, unsigned long long *val)
+ {
+@@ -543,7 +547,7 @@ static int exynos_pm_drvinit(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	register_syscore_ops(&exynos_pm_syscore_ops);
++	register_syscore(&exynos_pm_syscore);
+ 	register_pm_notifier(&exynos_pm_notifier_block);
+ #ifdef CONFIG_DEBUG_FS
+ 	exynos_pm_debugfs_init();
 diff --git a/drivers/soc/google/exynos-pmu-if.c b/drivers/soc/google/exynos-pmu-if.c
 index 5c5f89d..5e5740c 100644
 --- a/drivers/soc/google/exynos-pmu-if.c
@@ -3528,6 +4562,51 @@ index 5c5f89d..5e5740c 100644
  #include <linux/module.h>
  #include <linux/of_platform.h>
  #include <linux/smp.h>
+diff --git a/drivers/soc/google/exynos-seclog.c b/drivers/soc/google/exynos-seclog.c
+index 72698cf..9862f4e 100644
+--- a/drivers/soc/google/exynos-seclog.c
++++ b/drivers/soc/google/exynos-seclog.c
+@@ -199,7 +199,7 @@ static irqreturn_t exynos_seclog_irq_handler(int irq, void *dev_id)
+ }
+ 
+ #ifdef CONFIG_OF_RESERVED_MEM
+-static int __init exynos_seclog_reserved_mem_setup(struct reserved_mem *remem)
++static int __init exynos_seclog_reserved_mem_setup(unsigned long node, struct reserved_mem *remem)
+ {
+ 	ldata.phys_addr = remem->base;
+ 	ldata.size = remem->size;
+@@ -210,7 +210,12 @@ static int __init exynos_seclog_reserved_mem_setup(struct reserved_mem *remem)
+ 	return 0;
+ }
+ 
+-RESERVEDMEM_OF_DECLARE(seclog_mem, "exynos,seclog", exynos_seclog_reserved_mem_setup);
++/* android-mainline: RESERVEDMEM_OF_DECLARE() takes a reserved_mem_ops table. */
++static const struct reserved_mem_ops seclog_mem_rmem_ops = {
++	.node_init	= exynos_seclog_reserved_mem_setup,
++};
++
++RESERVEDMEM_OF_DECLARE(seclog_mem, "exynos,seclog", &seclog_mem_rmem_ops);
+ #endif	/* CONFIG_OF_RESERVED_MEM */
+ 
+ static int exynos_seclog_probe(struct platform_device *pdev)
+diff --git a/drivers/soc/google/gsa/gsa_mbox.c b/drivers/soc/google/gsa/gsa_mbox.c
+index c554280..b738f7d 100644
+--- a/drivers/soc/google/gsa/gsa_mbox.c
++++ b/drivers/soc/google/gsa/gsa_mbox.c
+@@ -481,11 +481,8 @@ static int gsa_data_xfer_prepare_locked(struct gsa_mbox *mb)
+ 
+ static void gsa_data_xfer_finish_locked(struct gsa_mbox *mb)
+ {
+-	int rc;
+-
+-	rc = pm_runtime_put(mb->dev);
+-	if (rc < 0)
+-		dev_err(mb->dev, "failed to suspend pm_runtime device (%d)\n", rc);
++	/* android-mainline: pm_runtime_put() returns void now. */
++	pm_runtime_put(mb->dev);
+ }
+ 
+ #endif /* CONFIG_GSA_PKVM */
 diff --git a/drivers/soc/google/hardlockup-debug.c b/drivers/soc/google/hardlockup-debug.c
 index 3164520..66364ef 100644
 --- a/drivers/soc/google/hardlockup-debug.c
@@ -3584,6 +4663,257 @@ index 3164520..66364ef 100644
  MODULE_LICENSE("GPL v2");
 -MODULE_IMPORT_NS(MINIDUMP);
 +MODULE_IMPORT_NS("MINIDUMP");
+diff --git a/drivers/soc/google/pixel_stat/mm/cma.c b/drivers/soc/google/pixel_stat/mm/cma.c
+index 551e311..30e8dc0 100644
+--- a/drivers/soc/google/pixel_stat/mm/cma.c
++++ b/drivers/soc/google/pixel_stat/mm/cma.c
+@@ -10,7 +10,7 @@
+ #include <linux/cma.h>
+ #include <linux/kobject.h>
+ #include <linux/slab.h>
+-#include "../../vh/include/sched.h"
++#include "pixel_stat_task.h"
+ #include "cma.h"
+ 
+ #define DEF_LATENCY_MID_BOUND_MS 1500
+@@ -49,10 +49,7 @@ void vh_cma_alloc_start(void *data, const char *name, unsigned long count,
+ 			unsigned long available_count, unsigned long total_count,
+ 			unsigned int align)
+ {
+-	struct vendor_task_struct *tsk;
+-
+-	tsk = get_vendor_task_struct(current);
+-	set_vendor_task_struct_private(tsk, jiffies);
++	*pixel_stat_task_slot(current, PIXEL_STAT_TASK_CMA_TS) = jiffies;
+ }
+ 
+ struct cma *cma;
+@@ -81,11 +78,11 @@ void vh_cma_alloc_finish(void *data, const char *name, unsigned long pfn,
+ 	};
+ 
+ 	s64 delta;
+-	struct vendor_task_struct *tsk;
++	u64 *slot = pixel_stat_task_slot(current, PIXEL_STAT_TASK_CMA_TS);
+ 	unsigned long old_ts;
+ 
+-	tsk = get_vendor_task_struct(current);
+-	old_ts = get_and_reset_vendor_task_struct_private(tsk);
++	old_ts = *slot;
++	*slot = 0;
+ 
+ 	delta = jiffies_to_msecs(jiffies - old_ts);
+ 	WARN_ON_ONCE(delta < 0);
+diff --git a/drivers/soc/google/pixel_stat/mm/init.c b/drivers/soc/google/pixel_stat/mm/init.c
+index 316e2b5..fd81ef3 100644
+--- a/drivers/soc/google/pixel_stat/mm/init.c
++++ b/drivers/soc/google/pixel_stat/mm/init.c
+@@ -28,14 +28,18 @@ static int pixel_stat_mm_init(void)
+ 	if (ret)
+ 		return ret;
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_rmqueue does not exist in android-mainline */
+ 	ret = register_trace_android_vh_rmqueue(vh_rmqueue_mod, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_filemap_get_folio does not exist in android-mainline */
+ 	ret = register_trace_android_vh_filemap_get_folio(
+ 				vh_filemap_get_folio_mod, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
+ 	ret = register_trace_cma_alloc_start(vh_cma_alloc_start, NULL);
+ 	if (ret)
+@@ -45,9 +49,11 @@ static int pixel_stat_mm_init(void)
+ 	if (ret)
+ 		return ret;
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_meminfo_proc_show does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_meminfo_proc_show(rvh_meminfo_proc_show, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
+ 	ret = register_trace_mm_vmscan_direct_reclaim_begin(vh_direct_reclaim_begin, NULL);
+ 	if (ret)
+@@ -57,43 +63,61 @@ static int pixel_stat_mm_init(void)
+ 	if (ret)
+ 		return ret;
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_mm_compaction_begin does not exist in android-mainline */
+ 	ret = register_trace_android_vh_mm_compaction_begin(vh_compaction_begin,
+ 			NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_mm_compaction_end does not exist in android-mainline */
+ 	ret = register_trace_android_vh_mm_compaction_end(vh_compaction_end, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
+ 	/* rvh_madvise_pageout_end depends on rvh_madvise_pageout_begin so do not reorder */
++#if 0	/* junkyard (lynx-mainline): android_rvh_madvise_pageout_end does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_madvise_pageout_end(rvh_madvise_pageout_end, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_madvise_pageout_begin does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_madvise_pageout_begin(rvh_madvise_pageout_begin, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_reclaim_folio_list does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_reclaim_folio_list(rvh_reclaim_folio_list, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_mapping_shrinkable does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_mapping_shrinkable(rvh_mapping_shrinkable, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_vmscan_kswapd_wake does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_vmscan_kswapd_wake(rvh_vmscan_kswapd_wake, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_vmscan_kswapd_done does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_vmscan_kswapd_done(rvh_vmscan_kswapd_done, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_try_alloc_pages_gfp does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_try_alloc_pages_gfp(rvh_try_alloc_pages_gfp_mod, NULL);
+ 	if (ret)
+ 		return ret;
++#endif
+ 
+ 	return 0;
+ }
+diff --git a/drivers/soc/google/pixel_stat/mm/meminfo.c b/drivers/soc/google/pixel_stat/mm/meminfo.c
+index 90cf911..338bbae 100644
+--- a/drivers/soc/google/pixel_stat/mm/meminfo.c
++++ b/drivers/soc/google/pixel_stat/mm/meminfo.c
+@@ -57,12 +57,12 @@ void rvh_meminfo_proc_show(void *data, struct seq_file *m)
+ 		      pages[LRU_ACTIVE_FILE] + pages[LRU_INACTIVE_FILE] +
+ 		      pages[LRU_UNEVICTABLE] + sreclaimable + sunreclaim +
+ 		      global_node_page_state(NR_PAGETABLE) +
+-		      vmalloc_nr_pages() + pcpu_nr_pages();
++		      global_node_page_state(NR_VMALLOC) + pcpu_nr_pages();
+ 
+ 	/*
+ 	 * When CONFIG_VMAP_STACK is enabled, the kernel allocates thread stacks via calls to
+ 	 * vmalloc(). So, the kernel thread stacks are already accounted for as part of the
+-	 * call to vmalloc_nr_pages() above. Therefore, they should not be considered again
++	 * call to global_node_page_state(NR_VMALLOC) above. Therefore, they should not be considered again
+ 	 * to avoid double counting.
+ 	 */
+ 	if (!IS_ENABLED(CONFIG_VMAP_STACK))
+diff --git a/drivers/soc/google/pixel_stat/mm/pixel_stat_task.h b/drivers/soc/google/pixel_stat/mm/pixel_stat_task.h
+new file mode 100644
+index 0000000..91390d1
+--- /dev/null
++++ b/drivers/soc/google/pixel_stat/mm/pixel_stat_task.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * junkyard (lynx-mainline): per-task scratch for the CMA and direct-reclaim
++ * latency stats.
++ *
++ * On the ACK GKI these timestamps lived in vh_sched's struct
++ * vendor_task_struct (android_task_vendor_data()). android-mainline has
++ * neither that accessor nor vh_sched, only task_struct's 6-slot
++ * android_vendor_data1[] (CONFIG_ANDROID_VENDOR_OEM_DATA), which nothing else
++ * the lynx build compiles uses. Two of its slots carry the timestamps.
++ */
++#ifndef _PIXEL_STAT_TASK_H
++#define _PIXEL_STAT_TASK_H
++
++#include <linux/sched.h>
++
++enum {
++	PIXEL_STAT_TASK_CMA_TS,		/* was vendor_task_struct "private" */
++	PIXEL_STAT_TASK_RECLAIM_TS,	/* was vendor_task_struct::direct_reclaim_ts */
++};
++
++static inline u64 *pixel_stat_task_slot(struct task_struct *p, int slot)
++{
++	return &p->android_vendor_data1[slot];
++}
++
++#endif
+diff --git a/drivers/soc/google/pixel_stat/mm/vmscan.c b/drivers/soc/google/pixel_stat/mm/vmscan.c
+index 8aacd4d..0d17cb5 100644
+--- a/drivers/soc/google/pixel_stat/mm/vmscan.c
++++ b/drivers/soc/google/pixel_stat/mm/vmscan.c
+@@ -16,7 +16,7 @@
+ #include <linux/pagemap.h>
+ #include <linux/ktime.h>
+ 
+-#include "../../vh/include/sched.h"
++#include "pixel_stat_task.h"
+ 
+ #include "vmscan.h"
+ 
+@@ -60,25 +60,22 @@ struct direct_reclaim_pixel_stat {
+ 
+ static struct direct_reclaim_pixel_stat *stats[OOM_SCORE_ADJ_NUM_LEVELS];
+ 
+-void vh_direct_reclaim_begin(void *data, int order, gfp_t gfp_mask)
++void vh_direct_reclaim_begin(void *data, gfp_t gfp_mask, int order,
++			     struct mem_cgroup *memcg)
+ {
+-	struct vendor_task_struct *tsk;
+-
+-	tsk = get_vendor_task_struct(current);
+-	tsk->direct_reclaim_ts = jiffies;
++	*pixel_stat_task_slot(current, PIXEL_STAT_TASK_RECLAIM_TS) = jiffies;
+ }
+ 
+-void vh_direct_reclaim_end(void *data, unsigned long nr_reclaimed)
++void vh_direct_reclaim_end(void *data, unsigned long nr_reclaimed,
++			   struct mem_cgroup *memcg)
+ {
+ 	int delta;
+ 	struct direct_reclaim_pixel_stat *stat;
+ 	int oom_score_adj;
+ 	int adj_lvl;
+-	struct vendor_task_struct *tsk;
+ 	unsigned long old_ts;
+ 
+-	tsk = get_vendor_task_struct(current);
+-	old_ts = tsk->direct_reclaim_ts;
++	old_ts = *pixel_stat_task_slot(current, PIXEL_STAT_TASK_RECLAIM_TS);
+ 	oom_score_adj = current->signal->oom_score_adj;
+ 
+ 	delta = jiffies_to_msecs(jiffies - old_ts);
+diff --git a/drivers/soc/google/pixel_stat/mm/vmscan.h b/drivers/soc/google/pixel_stat/mm/vmscan.h
+index eabdd81..950dc94 100644
+--- a/drivers/soc/google/pixel_stat/mm/vmscan.h
++++ b/drivers/soc/google/pixel_stat/mm/vmscan.h
+@@ -4,8 +4,10 @@
+ 
+ #include <trace/events/vmscan.h>
+ 
+-void vh_direct_reclaim_begin(void *data, int order, gfp_t gfp_mask);
+-void vh_direct_reclaim_end(void *data, unsigned long nr_reclaimed);
++void vh_direct_reclaim_begin(void *data, gfp_t gfp_mask, int order,
++			     struct mem_cgroup *memcg);
++void vh_direct_reclaim_end(void *data, unsigned long nr_reclaimed,
++			   struct mem_cgroup *memcg);
+ void rvh_madvise_pageout_begin(void *data, void **private);
+ void rvh_madvise_pageout_end(void *data, void *private, struct list_head *folio_list);
+ void rvh_reclaim_folio_list(void *data, struct list_head *folio_list, void *private);
 diff --git a/drivers/soc/google/pt/pt.c b/drivers/soc/google/pt/pt.c
 index 9985c6c..a61bac8 100644
 --- a/drivers/soc/google/pt/pt.c
@@ -3609,6 +4939,132 @@ index 957996e..5002df2 100644
  #include <linux/list.h>
  #include <linux/of_platform.h>
  #include <linux/module.h>
+diff --git a/drivers/soc/google/vh/kernel/mm/pixel_mm_hint.c b/drivers/soc/google/vh/kernel/mm/pixel_mm_hint.c
+index 4abb893..623b446 100644
+--- a/drivers/soc/google/vh/kernel/mm/pixel_mm_hint.c
++++ b/drivers/soc/google/vh/kernel/mm/pixel_mm_hint.c
+@@ -5,7 +5,11 @@
+ #include <linux/module.h>
+ #include <linux/oom.h>
+ #include <linux/swap.h>
+-#include <trace/events/android_vendor_lmk.h>
++/*
++ * junkyard (lynx-mainline): trace/events/android_vendor_lmk.h (the
++ * android_trigger_vendor_lmk_kill tracepoint lmkd listens on) is ACK-only.
++ * There is no lmkd on the Debian image either; see try_to_trigger_lmkd_kill().
++ */
+ 
+ #include "../../include/pixel_mm_hint.h"
+ 
+@@ -88,8 +92,8 @@ int try_to_trigger_lmkd_kill(int reason, short min_oom_score_adj)
+ 	if (min_oom_score_adj < 0 || min_oom_score_adj > OOM_SCORE_ADJ_MAX)
+ 		return -EINVAL;
+ 
+-	trace_android_trigger_vendor_lmk_kill(reason, min_oom_score_adj);
+-	return 0;
++	/* No android_trigger_vendor_lmk_kill tracepoint (and no lmkd) here. */
++	return -EOPNOTSUPP;
+ }
+ EXPORT_SYMBOL_GPL(try_to_trigger_lmkd_kill);
+ 
+diff --git a/drivers/soc/google/vh/kernel/mm/vh_mm_init.c b/drivers/soc/google/vh/kernel/mm/vh_mm_init.c
+index b390511..10ee66a 100644
+--- a/drivers/soc/google/vh/kernel/mm/vh_mm_init.c
++++ b/drivers/soc/google/vh/kernel/mm/vh_mm_init.c
+@@ -286,14 +286,14 @@ static ssize_t kcompactd_cpu_affinity_store(struct kobject *kobj,
+ 	return ret ? ret : len;
+ }
+ 
+-static void vh_swap_writepage(void *data,
++static void __maybe_unused vh_swap_writepage(void *data,
+ 			      unsigned long *sis_flag,
+ 			      struct page *page)
+ {
+ 	*sis_flag &= ~SWP_SYNCHRONOUS_IO;
+ }
+ 
+-static void rvh_gup_longterm_locked(void *data,
++static void __maybe_unused rvh_gup_longterm_locked(void *data,
+ 				    long rc,
+ 				    long nr_pinned_pages,
+ 				    unsigned long start,
+@@ -332,7 +332,7 @@ static void reset_page_oem_fields(unsigned long *check_flags)
+ 	*check_flags = *check_flags & ~(1UL << PG_oem_reserved_1);
+ }
+ 
+-static void vh_free_one_page_flag_check(void *data, unsigned long *check_flags)
++static void __maybe_unused vh_free_one_page_flag_check(void *data, unsigned long *check_flags)
+ {
+ 	if (kasan_enabled() || !want_init_on_free())
+ 		return;
+@@ -367,7 +367,7 @@ static ssize_t fail_of_gup_longterm_locked_store(struct kobject *kobj,
+ VENDOR_MM_RW(fail_of_gup_longterm_locked);
+ 
+ 
+-static void rvh_read_swap_cache_async_schedule_timeout(void *data, size_t *count, bool *skip)
++static void __maybe_unused rvh_read_swap_cache_async_schedule_timeout(void *data, size_t *count, bool *skip)
+ {
+ 	*skip = true;
+ 
+@@ -455,42 +455,58 @@ static int vh_mm_init(void)
+ 	if (ret)
+ 		goto out_err;
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_swap_writepage does not exist in android-mainline */
+ 	ret = register_trace_android_vh_swap_writepage(
+ 		vh_swap_writepage, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
+ #if IS_ENABLED(CONFIG_DEBUG_VM)
++#if 0	/* junkyard (lynx-mainline): android_vh_free_one_page_flag_check does not exist in android-mainline */
+ 	ret = register_trace_android_vh_free_one_page_flag_check(
+ 		vh_free_one_page_flag_check, NULL);
+ 	if (ret)
+ 		goto out_err;
+ #endif
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_tune_swappiness does not exist in android-mainline */
+ 	ret = register_trace_android_vh_tune_swappiness(vh_vmscan_tune_swappiness, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_calculate_totalreserve_pages does not exist in android-mainline */
+ 	ret = register_trace_android_vh_calculate_totalreserve_pages(vh_update_lmkd_watermark, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_do_async_mmap_readahead does not exist in android-mainline */
+ 	ret = register_trace_android_vh_do_async_mmap_readahead(vh_do_async_mmap_readahead, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_vh_do_sync_mmap_readahead does not exist in android-mainline */
+ 	ret = register_trace_android_vh_do_sync_mmap_readahead(vh_do_sync_mmap_readahead, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_gup_longterm_locked does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_gup_longterm_locked(rvh_gup_longterm_locked, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
++#if 0	/* junkyard (lynx-mainline): android_rvh_read_swap_cache_async_timeout does not exist in android-mainline */
+ 	ret = register_trace_android_rvh_read_swap_cache_async_timeout
+ 			(rvh_read_swap_cache_async_schedule_timeout, NULL);
+ 	if (ret)
+ 		goto out_err;
++#endif
+ 
+ 	return ret;
+ 
 diff --git a/drivers/spi/spi-s3c64xx.c b/drivers/spi/spi-s3c64xx.c
 index 39fd455..cf9bcad 100644
 --- a/drivers/spi/spi-s3c64xx.c
@@ -4019,7 +5475,7 @@ index 48891fe..d7ad056 100644
  
  static struct platform_driver s2mpg13_spmic_thermal_driver = {
 diff --git a/drivers/thermal/samsung/exynos_cpu_cooling.c b/drivers/thermal/samsung/exynos_cpu_cooling.c
-index 2e22f72..a5e7f23 100644
+index 2e22f72..0650874 100644
 --- a/drivers/thermal/samsung/exynos_cpu_cooling.c
 +++ b/drivers/thermal/samsung/exynos_cpu_cooling.c
 @@ -27,6 +27,7 @@
@@ -4067,6 +5523,15 @@ index 2e22f72..a5e7f23 100644
  	if (ret < 0) {
  		cdev = ERR_PTR(ret);
  		goto free_table;
+@@ -1189,7 +1184,7 @@ __exynos_cpu_cooling_register(struct device_node *np,
+ 		goto remove_ida;
+ 	}
+ 
+-	cdev = thermal_of_cooling_device_register(np, dev_name, cpufreq_cdev,
++	cdev = thermal_of_cooling_device_register(np, 0, dev_name, cpufreq_cdev,
+ 						  cooling_ops);
+ 	if (IS_ERR(cdev))
+ 		goto remove_qos_req;
 @@ -1246,7 +1241,7 @@ __exynos_cpu_cooling_register(struct device_node *np,
  remove_qos_req:
  	freq_qos_remove_request(&cpufreq_cdev->qos_req);
@@ -4077,7 +5542,7 @@ index 2e22f72..a5e7f23 100644
  	kfree(cpufreq_cdev->freq_table);
  free_idle_time:
 diff --git a/drivers/thermal/samsung/gpu_cooling.c b/drivers/thermal/samsung/gpu_cooling.c
-index 325b829..b3be221 100644
+index 325b829..4927d37 100644
 --- a/drivers/thermal/samsung/gpu_cooling.c
 +++ b/drivers/thermal/samsung/gpu_cooling.c
 @@ -17,6 +17,7 @@
@@ -4116,8 +5581,17 @@ index 325b829..b3be221 100644
  		if (!instance) {
  			pr_err("%s: (%s, %d)instance isn't valid\n", __func__, cooling_name, i);
  			goto skip_ect;
+@@ -1080,7 +1075,7 @@ static struct thermal_cooling_device *__gpufreq_cooling_register(struct device_n
+ 	snprintf(dev_name, sizeof(dev_name), "thermal-gpufreq-%d",
+ 		 gpufreq_cdev->id);
+ 
+-	cool_dev = thermal_of_cooling_device_register(np, dev_name,
++	cool_dev = thermal_of_cooling_device_register(np, 0, dev_name,
+ 						      gpufreq_cdev, cooling_ops);
+ 	if (IS_ERR(cool_dev)) {
+ 		pr_warn("%s: register cooling device %s failed\n", __func__,
 diff --git a/drivers/thermal/samsung/gs_tmu_v3.c b/drivers/thermal/samsung/gs_tmu_v3.c
-index 83bced9..5617a4e 100644
+index 83bced9..5f1d68d 100644
 --- a/drivers/thermal/samsung/gs_tmu_v3.c
 +++ b/drivers/thermal/samsung/gs_tmu_v3.c
 @@ -34,6 +34,7 @@
@@ -4354,6 +5828,15 @@ index 83bced9..5617a4e 100644
  			data->limited_threshold = value;
  		}
  
+@@ -5668,7 +5684,7 @@ static int gs_tmu_probe(struct platform_device *pdev)
+ 	/* Register a cooling device to fetch the Tj throttling request. */
+ 	scnprintf(cdev_buf, THERMAL_NAME_LENGTH, "%s-tj", data->tmu_name);
+ 	devm_thermal_of_cooling_device_register(
+-			&pdev->dev, pdev->dev.of_node, cdev_buf, data,
++			&pdev->dev, 0, cdev_buf, data,
+ 			&tmu_tj_cooling_ops);
+ 
+ 	return 0;
 @@ -5680,9 +5696,12 @@ err_sensor:
  	return ret;
  }
@@ -4369,6 +5852,19 @@ index 83bced9..5617a4e 100644
  }
  
  #if IS_ENABLED(CONFIG_PM_SLEEP)
+diff --git a/drivers/thermal/samsung/isp_cooling.c b/drivers/thermal/samsung/isp_cooling.c
+index 2438c40..84f3182 100644
+--- a/drivers/thermal/samsung/isp_cooling.c
++++ b/drivers/thermal/samsung/isp_cooling.c
+@@ -433,7 +433,7 @@ __isp_cooling_register(struct device_node *np,
+ 	snprintf(dev_name, sizeof(dev_name), "thermal-isp-%d",
+ 		 isp_dev->id);
+ 
+-	cool_dev = thermal_of_cooling_device_register(np, dev_name, isp_dev,
++	cool_dev = thermal_of_cooling_device_register(np, 0, dev_name, isp_dev,
+ 						      &isp_cooling_ops);
+ 	if (IS_ERR(cool_dev)) {
+ 		release_idr(&isp_idr, isp_dev->id);
 diff --git a/drivers/tty/serial/exynos_tty.c b/drivers/tty/serial/exynos_tty.c
 index 0b18b18..584ef35 100644
 --- a/drivers/tty/serial/exynos_tty.c
@@ -4606,20 +6102,100 @@ index 0b18b18..584ef35 100644
  }
  
  /* UART power management code */
+diff --git a/drivers/ufs/ufs-exynos-crypto.c b/drivers/ufs/ufs-exynos-crypto.c
+index 1ae975f..ffee7ec 100644
+--- a/drivers/ufs/ufs-exynos-crypto.c
++++ b/drivers/ufs/ufs-exynos-crypto.c
+@@ -5,6 +5,7 @@
+  *
+  * Copyright 2020 Google LLC
+  */
++#include <scsi/scsi_cmnd.h>
+ #include <linux/gsa/gsa_kdn.h>
+ #include <linux/regmap.h>
+ #include <linux/soc/samsung/exynos-smc.h>
+@@ -158,9 +159,14 @@ void pixel_ufs_crypto_resume(struct ufs_hba *hba)
+ 
+ /* Configure inline encryption (or decryption) on requests that require it. */
+ static void pixel_ufs_crypto_fill_prdt(void *unused, struct ufs_hba *hba,
+-				       struct ufshcd_lrb *lrbp,
++				       struct scsi_cmnd *cmd,
+ 				       unsigned int segments, int *err)
+ {
++	/*
++	 * android-mainline: ufshcd_lrb lives in the SCSI command's private
++	 * data now, and android_vh_ufs_fill_prdt passes the command.
++	 */
++	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
+ 	struct pixel_ufs_prdt_entry *prdt =
+ 		(struct pixel_ufs_prdt_entry *)lrbp->ucd_prdt_ptr;
+ 	unsigned int i;
+@@ -214,6 +220,13 @@ static int pixel_ufs_register_fill_prdt(void)
+ 				pixel_ufs_crypto_fill_prdt, NULL);
+ }
+ 
++/*
++ * junkyard (lynx-mainline): the FIPS 140 path hangs its self test off
++ * android_rvh_ufs_complete_init, which android-mainline does not have, so it is
++ * only built with SCSI_UFS_PIXEL_FIPS140 (off for lynx-mainline: see
++ * gs201_defconfig). Without it the plain fill_prdt below is registered.
++ */
++#if IS_ENABLED(CONFIG_SCSI_UFS_PIXEL_FIPS140) && !IS_ENABLED(CONFIG_SOC_GS101)
+ static void pixel_ufs_ise_self_test(void *data, struct ufs_hba *hba)
+ {
+ 	/*
+@@ -240,11 +253,12 @@ static int pixel_ufs_register_fips_self_test(void)
+ 	return register_trace_android_rvh_ufs_complete_init(
+ 		pixel_ufs_ise_self_test, NULL);
+ }
++#endif
+ 
+ static int exynos_crypto_init(struct ufs_hba *hba)
+ {
+ 	int err;
+-	bool register_fips_module;
++	bool register_fips_module __maybe_unused;
+ 
+ 	/* Override the PRDT entry size to include the extra crypto fields. */
+ 	hba->sg_entry_size = sizeof(struct pixel_ufs_prdt_entry);
+@@ -264,9 +278,12 @@ static int exynos_crypto_init(struct ufs_hba *hba)
+ #endif
+ 
+ 	/* The FIPS 140 module will register internal fill prdt function. */
++#if IS_ENABLED(CONFIG_SCSI_UFS_PIXEL_FIPS140) && !IS_ENABLED(CONFIG_SOC_GS101)
+ 	if (register_fips_module) {
+ 		err = pixel_ufs_register_fips_self_test();
+-	} else {
++	} else
++#endif
++	{
+ 		err = pixel_ufs_register_fill_prdt();
+ 	}
+ 
 diff --git a/drivers/ufs/ufs-exynos-swkeys.c b/drivers/ufs/ufs-exynos-swkeys.c
-index 2ce39cd..e8033da 100644
+index 2ce39cd..a78245d 100644
 --- a/drivers/ufs/ufs-exynos-swkeys.c
 +++ b/drivers/ufs/ufs-exynos-swkeys.c
-@@ -12,7 +12,7 @@
+@@ -12,7 +12,8 @@
   * (also called the traditional FMP mode or legacy FMP mode).
   */
  
 -#include <asm/unaligned.h>
++#include <scsi/scsi_cmnd.h>
 +#include <linux/unaligned.h>
  #include <crypto/aes.h>
  #include <crypto/algapi.h>
  #include <linux/soc/samsung/exynos-smc.h>
-@@ -100,15 +100,15 @@ int exynos_ufs_crypto_init_sw_keys_mode(struct ufs_hba *hba)
+@@ -25,7 +26,7 @@
+ #include <trace/hooks/ufshcd.h>
+ 
+ static void exynos_ufs_swkeys_fill_prdt(void *unused, struct ufs_hba *hba,
+-				     struct ufshcd_lrb *lrbp,
++				     struct scsi_cmnd *cmd,
+ 				     unsigned int segments, int *err);
+ 
+ static int exynos_ufs_swkeys_register_fips_self_test(void);
+@@ -100,15 +101,15 @@ int exynos_ufs_crypto_init_sw_keys_mode(struct ufs_hba *hba)
  	hba->caps |= UFSHCD_CAP_CRYPTO;
  
  	/* Advertise crypto quirks to ufshcd-core. */
@@ -4639,7 +6215,26 @@ index 2ce39cd..e8033da 100644
  	hba->crypto_profile.dev = hba->dev;
  	hba->crypto_profile.modes_supported[BLK_ENCRYPTION_MODE_AES_256_XTS] =
  		FMP_DATA_UNIT_SIZE;
-@@ -142,7 +142,7 @@ static void exynos_ufs_swkeys_fill_prdt(void *unused, struct ufs_hba *hba,
+@@ -123,9 +124,11 @@ static inline __be32 fmp_key_word(const u8 *key, int j)
+ 
+ /* Configure inline encryption (or decryption) on requests that require it. */
+ static void exynos_ufs_swkeys_fill_prdt(void *unused, struct ufs_hba *hba,
+-					struct ufshcd_lrb *lrbp,
++					struct scsi_cmnd *cmd,
+ 					unsigned int segments, int *err)
+ {
++	/* android-mainline: the hook passes the command; lrb is its priv data. */
++	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
+ 	const struct bio_crypt_ctx *bc;
+ 	const u8 *enckey, *twkey;
+ 	u64 dun_lo, dun_hi;
+@@ -137,12 +140,12 @@ static void exynos_ufs_swkeys_fill_prdt(void *unused, struct ufs_hba *hba,
+ 	 * ("FAS") is already 0 (FMP_BYPASS_MODE) by default, as it's in the
+ 	 * same word as ufshcd_sg_entry::size which was already initialized.
+ 	 */
+-	bc = scsi_cmd_to_rq(lrbp->cmd)->crypt_ctx;
++	bc = scsi_cmd_to_rq(cmd)->crypt_ctx;
+ 	BUILD_BUG_ON(FMP_BYPASS_MODE != 0);
  	if (!bc)
  		return;
  
@@ -4778,10 +6373,16 @@ index 92e3a51..8fc666e 100644
  #include "ufs-pixel-fips.h"
  #include "ufs-pixel-fips_sha256.h"
 diff --git a/drivers/ufs/ufs-pixel-fips.c b/drivers/ufs/ufs-pixel-fips.c
-index b6553eb..5c7215c 100644
+index b6553eb..ae29323 100644
 --- a/drivers/ufs/ufs-pixel-fips.c
 +++ b/drivers/ufs/ufs-pixel-fips.c
-@@ -13,7 +13,7 @@
+@@ -8,12 +8,13 @@
+  *
+  */
+ 
++#include <scsi/scsi_cmnd.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
  #include <linux/kernel.h>
  #include <linux/init.h>
  #include <linux/module.h>
@@ -4790,6 +6391,22 @@ index b6553eb..5c7215c 100644
  #include <scsi/scsi_proto.h>
  #include "ufs-exynos-gs.h"
  #include "ufs-pixel-fips.h"
+@@ -143,9 +144,14 @@ static int ise_available;
+ 
+ /* Configure inline encryption (or decryption) on requests that require it. */
+ static void ufs_pixel_fips_crypto_fill_prdt(void *unused, struct ufs_hba *hba,
+-					     struct ufshcd_lrb *lrbp,
++					     struct scsi_cmnd *cmd,
+ 					     unsigned int segments, int *err)
+ {
++	/*
++	 * android-mainline: ufshcd_lrb lives in the SCSI command's private
++	 * data now, and android_vh_ufs_fill_prdt passes the command.
++	 */
++	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
+ 	struct pixel_ufs_prdt_entry *prdt =
+ 		(struct pixel_ufs_prdt_entry *)lrbp->ucd_prdt_ptr;
+ 	unsigned int i;
 diff --git a/drivers/ufs/ufs-pixel-fips_sha256.c b/drivers/ufs/ufs-pixel-fips_sha256.c
 index f3b8dc7..4c97394 100644
 --- a/drivers/ufs/ufs-pixel-fips_sha256.c
@@ -4804,7 +6421,7 @@ index f3b8dc7..4c97394 100644
  
  static inline u32 Ch(u32 x, u32 y, u32 z)
 diff --git a/drivers/ufs/ufs-pixel.c b/drivers/ufs/ufs-pixel.c
-index fdd9a7a..d819704 100644
+index fdd9a7a..5591329 100644
 --- a/drivers/ufs/ufs-pixel.c
 +++ b/drivers/ufs/ufs-pixel.c
 @@ -8,6 +8,7 @@
@@ -4815,16 +6432,237 @@ index fdd9a7a..d819704 100644
  #include <linux/workqueue.h>
  #include <misc/sbbm.h>
  #include <ufs/ufs.h>
-@@ -922,7 +923,7 @@ static ssize_t manual_gc_store(struct device *dev,
+@@ -161,8 +162,26 @@ static enum pixel_slowio_optype pixel_ufs_get_slowio_optype(u8 opcode)
+ 	return PIXEL_SLOWIO_OP_MAX;
+ }
+ 
++/*
++ * junkyard (lynx-mainline): ACK exported ufshcd_bkops_ctrl_threshold(hba,
++ * status) -- the old upstream ufshcd_bkops_ctrl(hba, status). Upstream's
++ * ufshcd_bkops_ctrl(hba) now takes the threshold from hba->urgent_bkops_lvl,
++ * so set it for the call and put it back.
++ */
++static int jy_ufshcd_bkops_ctrl_threshold(struct ufs_hba *hba,
++					  enum bkops_status status)
++{
++	enum bkops_status saved = hba->urgent_bkops_lvl;
++	int err;
++
++	hba->urgent_bkops_lvl = status;
++	err = ufshcd_bkops_ctrl(hba);
++	hba->urgent_bkops_lvl = saved;
++	return err;
++}
++
+ static void pixel_ufs_log_slowio(struct ufs_hba *hba,
+-		struct ufshcd_lrb *lrbp, s64 iotime_us)
++		struct scsi_cmnd *cmd, s64 iotime_us)
+ {
+ 	struct pixel_ufs *ufs = to_pixel_ufs(hba);
+ 	sector_t sector = ULONG_MAX;
+@@ -176,8 +195,8 @@ static void pixel_ufs_log_slowio(struct ufs_hba *hba,
+ 	if (likely(iotime_us < ufs->slowio_min_us))
+ 		return;
+ 
+-	if (lrbp->cmd) {
+-		opcode = (u8)(*lrbp->cmd->cmnd);
++	if (ufshcd_is_scsi_cmd(cmd)) {
++		opcode = (u8)(*cmd->cmnd);
+ 		optype = pixel_ufs_get_slowio_optype(opcode);
+ 		if (optype < PIXEL_SLOWIO_OP_MAX) {
+ 			if (iotime_us < ufs->slowio[optype][PIXEL_SLOWIO_US])
+@@ -187,7 +206,7 @@ static void pixel_ufs_log_slowio(struct ufs_hba *hba,
+ 		if (optype == PIXEL_SLOWIO_READ ||
+ 			optype == PIXEL_SLOWIO_WRITE ||
+ 			optype == PIXEL_SLOWIO_UNMAP) {
+-			struct request *rq = scsi_cmd_to_rq(lrbp->cmd);
++			struct request *rq = scsi_cmd_to_rq(cmd);
+ 			if (rq && rq->bio) {
+ 				sector = blk_rq_pos(rq);
+ 				affected_bytes = blk_rq_bytes(rq);
+@@ -202,15 +221,15 @@ static void pixel_ufs_log_slowio(struct ufs_hba *hba,
+ }
+ 
+ /* classify request type on statistics by scsi command opcode*/
+-static int pixel_ufs_get_cmd_type(struct ufshcd_lrb *lrbp,
++static int pixel_ufs_get_cmd_type(struct scsi_cmnd *cmd,
+ 				  enum req_type_stats *cmd_type)
+ {
+ 	u8 scsi_op_code;
+ 
+-	if (!lrbp->cmd)
++	if (!ufshcd_is_scsi_cmd(cmd))
+ 		return -EINVAL;
+ 
+-	scsi_op_code = (u8)(*lrbp->cmd->cmnd);
++	scsi_op_code = (u8)(*cmd->cmnd);
+ 	switch (scsi_op_code) {
+ 	case READ_10:
+ 	case READ_16:
+@@ -338,8 +357,9 @@ static inline void record_ufs_stats(struct ufs_hba *hba)
+ 	}
+ }
+ 
+-void pixel_ufs_update_req_stats(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
++void pixel_ufs_update_req_stats(struct ufs_hba *hba, struct scsi_cmnd *cmd)
+ {
++	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
+ 	struct pixel_ufs *ufs = to_pixel_ufs(hba);
+ 	struct pixel_req_stats *rst;
+ 	enum req_type_stats cmd_type;
+@@ -347,9 +367,9 @@ void pixel_ufs_update_req_stats(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
+ 		lrbp->issue_time_stamp);
+ 
+ 	/* Log for slow I/O */
+-	pixel_ufs_log_slowio(hba, lrbp, delta);
++	pixel_ufs_log_slowio(hba, cmd, delta);
+ 
+-	if (pixel_ufs_get_cmd_type(lrbp, &cmd_type))
++	if (pixel_ufs_get_cmd_type(cmd, &cmd_type))
+ 		return;
+ 
+ 	/* Update request statistic if need */
+@@ -414,22 +434,22 @@ static inline void __update_io_stats(struct ufs_hba *hba,
+ }
+ 
+ static void pixel_ufs_update_io_stats(struct ufs_hba *hba,
+-		struct ufshcd_lrb *lrbp, bool is_start)
++		struct scsi_cmnd *cmd, bool is_start)
+ {
+ 	u32 affected_bytes;
+ 	bool is_write;
+ 	enum req_type_stats cmd_type;
+ 
+-	if (pixel_ufs_get_cmd_type(lrbp, &cmd_type))
++	if (pixel_ufs_get_cmd_type(cmd, &cmd_type))
+ 		return;
+ 
+ 	if (cmd_type != REQ_TYPE_READ && cmd_type != REQ_TYPE_WRITE)
+ 		return;
+ 
+-	affected_bytes = blk_rq_bytes(scsi_cmd_to_rq(lrbp->cmd));
++	affected_bytes = blk_rq_bytes(scsi_cmd_to_rq(cmd));
+ 
+ 	/* Upload I/O amount on statistic */
+-	is_write = op_is_write(req_op(scsi_cmd_to_rq(lrbp->cmd)));
++	is_write = op_is_write(req_op(scsi_cmd_to_rq(cmd)));
+ 	__update_io_stats(hba, is_write, affected_bytes, is_start);
+ 
+ 	record_ufs_stats(hba);
+@@ -598,8 +618,9 @@ static void __store_cmd_log(struct ufs_hba *hba, enum pixel_event_type event,
+ }
+ 
+ static void pixel_ufs_trace_fdeviceinit(struct ufs_hba *hba,
+-					struct ufshcd_lrb *lrbp, u8 opcode)
++					struct scsi_cmnd *cmd, u8 opcode)
+ {
++	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
+ 	struct pixel_ufs *ufs = to_pixel_ufs(hba);
+ 	struct latency_metrics *metric = NULL;
+ 
+@@ -622,26 +643,27 @@ static void pixel_ufs_trace_fdeviceinit(struct ufs_hba *hba,
+ }
+ 
+ static void pixel_ufs_trace_upiu_cmd(struct ufs_hba *hba,
+-		struct ufshcd_lrb *lrbp, bool is_start)
++		struct scsi_cmnd *cmd, bool is_start)
+ {
++	struct ufshcd_lrb *lrbp = scsi_cmd_priv(cmd);
+ 	u8 lun = 0, opcode = 0, idn = 0, tag = 0, group_id = 0;
+ 	enum pixel_event_type event = EVENT_UNDEF;
+ 	sector_t sector = 0;
+ 	int affected_bytes = 0;
+ 
+ 	lun = lrbp->lun;
+-	tag = lrbp->task_tag;
++	tag = scsi_cmd_to_rq(cmd)->tag;
+ 
+-	if (lrbp->cmd) {
++	if (ufshcd_is_scsi_cmd(cmd)) {
+ 		event = (is_start) ? EVENT_SCSI_SEND : EVENT_SCSI_COMPL;
+-		opcode = lrbp->cmd->cmnd[0];
+-		sector = blk_rq_pos(scsi_cmd_to_rq(lrbp->cmd));
++		opcode = cmd->cmnd[0];
++		sector = blk_rq_pos(scsi_cmd_to_rq(cmd));
+ 
+-		affected_bytes = blk_rq_bytes(scsi_cmd_to_rq(lrbp->cmd));
++		affected_bytes = blk_rq_bytes(scsi_cmd_to_rq(cmd));
+ 		if (opcode == WRITE_10 || opcode == READ_10)
+-			group_id = lrbp->cmd->cmnd[6] & 0x3f;
++			group_id = cmd->cmnd[6] & 0x3f;
+ 		else if (opcode == WRITE_16 || opcode == READ_16)
+-			group_id = lrbp->cmd->cmnd[14] & 0x3f;
++			group_id = cmd->cmnd[14] & 0x3f;
+ 	} else {
+ 		if (hba->dev_cmd.type == DEV_CMD_TYPE_NOP)
+ 			event = (is_start) ? EVENT_NOP_OUT : EVENT_NOP_IN;
+@@ -651,7 +673,7 @@ static void pixel_ufs_trace_upiu_cmd(struct ufs_hba *hba,
+ 			idn = hba->dev_cmd.query.request.upiu_req.idn;
+ 			if (idn == QUERY_FLAG_IDN_FDEVICEINIT &&
+ 			    event == EVENT_QUERY_COMPL)
+-				pixel_ufs_trace_fdeviceinit(hba, lrbp, opcode);
++				pixel_ufs_trace_fdeviceinit(hba, cmd, opcode);
+ 		}
+ 	}
+ 
+@@ -714,23 +736,24 @@ static void pixel_ufs_check_int_errors(void *data, struct ufs_hba *hba,
+ }
+ 
+ static void pixel_ufs_send_command(void *data, struct ufs_hba *hba,
+-					struct ufshcd_lrb *lrbp)
++					struct scsi_cmnd *cmd)
+ {
+-	pixel_ufs_update_io_stats(hba, lrbp, true);
+-	pixel_ufs_trace_upiu_cmd(hba, lrbp, true);
++	pixel_ufs_update_io_stats(hba, cmd, true);
++	pixel_ufs_trace_upiu_cmd(hba, cmd, true);
+ }
+ 
+ static void pixel_ufs_compl_command(void *data, struct ufs_hba *hba,
+-					struct ufshcd_lrb *lrbp)
++					struct scsi_cmnd *cmd)
+ {
+-	pixel_ufs_update_io_stats(hba, lrbp, false);
+-	pixel_ufs_update_req_stats(hba, lrbp);
+-	pixel_ufs_trace_upiu_cmd(hba, lrbp, false);
++	pixel_ufs_update_io_stats(hba, cmd, false);
++	pixel_ufs_update_req_stats(hba, cmd);
++	pixel_ufs_trace_upiu_cmd(hba, cmd, false);
+ }
+ 
+ static void pixel_ufs_prepare_command(void *data, struct ufs_hba *hba,
+-			struct request *rq, struct ufshcd_lrb *lrbp, int *err)
++			struct scsi_cmnd *cmd, int *err)
+ {
++	struct request *rq = scsi_cmd_to_rq(cmd);
+ 	struct pixel_ufs *ufs = to_pixel_ufs(hba);
+ 	u8 opcode;
+ 
+@@ -756,11 +779,11 @@ static void pixel_ufs_prepare_command(void *data, struct ufs_hba *hba,
+ 	if (hba->dev_info.wspecversion <= 0x300)
+ 		return;
+ 
+-	opcode = (u8)(*lrbp->cmd->cmnd);
++	opcode = (u8)(*cmd->cmnd);
+ 	if (opcode == WRITE_10)
+-		lrbp->cmd->cmnd[6] = 0x11;
++		cmd->cmnd[6] = 0x11;
+ 	else if (opcode == WRITE_16)
+-		lrbp->cmd->cmnd[14] = 0x11;
++		cmd->cmnd[14] = 0x11;
+ 	ufs->need_wb_flush = true;
+ }
+ 
+@@ -922,7 +945,7 @@ static ssize_t manual_gc_store(struct device *dev,
  	}
  
  	if (!ufs->manual_gc.hagc_support) {
 -		err = ufshcd_bkops_ctrl(hba, (value == MANUAL_GC_ON) ?
-+		err = ufshcd_bkops_ctrl_threshold(hba, (value == MANUAL_GC_ON) ?
++		err = jy_ufshcd_bkops_ctrl_threshold(hba, (value == MANUAL_GC_ON) ?
  					BKOPS_STATUS_NON_CRITICAL:
  					BKOPS_STATUS_CRITICAL);
  		if (!hba->auto_bkops_enabled)
-@@ -991,8 +992,8 @@ void pixel_init_manual_gc(struct ufs_hba *hba)
+@@ -991,8 +1014,8 @@ void pixel_init_manual_gc(struct ufs_hba *hba)
  	mgc->hagc_support = true;
  	mgc->delay_ms = UFSHCD_MANUAL_GC_HOLD_HIBERN8;
  
@@ -4835,7 +6673,7 @@ index fdd9a7a..d819704 100644
  
  	INIT_WORK(&mgc->hibern8_work, pixel_mgc_hibern8_work);
  	snprintf(wq_name, ARRAY_SIZE(wq_name), "ufs_mgc_hibern8_work_%d",
-@@ -1776,8 +1777,9 @@ static DEVICE_ATTR_RO(_name)
+@@ -1776,8 +1799,9 @@ static DEVICE_ATTR_RO(_name)
  
  PIXEL_HC_REG_ATTR(cap, _CONTROLLER_CAPABILITIES);
  PIXEL_HC_REG_ATTR(ver, _UFS_VERSION);
@@ -4932,7 +6770,7 @@ index 78cbb05..4ac60a2 100644
  
  done:
 diff --git a/drivers/usb/dwc3/dwc3-exynos.c b/drivers/usb/dwc3/dwc3-exynos.c
-index 4e96435..002bbc2 100644
+index 4e96435..f0394ef 100644
 --- a/drivers/usb/dwc3/dwc3-exynos.c
 +++ b/drivers/usb/dwc3/dwc3-exynos.c
 @@ -252,17 +252,17 @@ static void dwc3_core_config(struct dwc3 *dwc, struct dwc3_exynos *exynos)
@@ -4965,7 +6803,7 @@ index 4e96435..002bbc2 100644
  
  		reg = dwc3_exynos_readl(dwc->regs, DWC3_LSKIPFREQ);
  		reg &= ~(DWC3_PM_LC_TIMER_US_MASK |
-@@ -1262,8 +1262,8 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
+@@ -1262,10 +1262,10 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
  	mutex_init(&exynos->dotg_lock);
  	exynos->usb_data_enabled = true;
  
@@ -4974,8 +6812,11 @@ index 4e96435..002bbc2 100644
 +	exynos_usbdrd_phy_tune(exynos->dwc->usb2_generic_phy[0], 0);
 +	exynos_usbdrd_phy_tune(exynos->dwc->usb3_generic_phy[0], 0);
  
- 	ret = pm_runtime_put(dev);
+-	ret = pm_runtime_put(dev);
++	pm_runtime_put(dev);	/* returns void on android-mainline */
  	pm_runtime_allow(dev);
+ 
+ 	ret = dwc3_exynos_otg_init(exynos->dwc, exynos);
 @@ -1311,7 +1311,7 @@ vdd33_err:
  	return ret;
  }
@@ -4995,10 +6836,31 @@ index 4e96435..002bbc2 100644
  
  static void dwc3_exynos_shutdown(struct platform_device *pdev)
 diff --git a/drivers/usb/host/xhci-exynos.c b/drivers/usb/host/xhci-exynos.c
-index 1759526..0faa1c3 100644
+index 1759526..093e72a 100644
 --- a/drivers/usb/host/xhci-exynos.c
 +++ b/drivers/usb/host/xhci-exynos.c
-@@ -883,7 +883,7 @@ disable_runtime:
+@@ -33,8 +33,11 @@
+ 
+ #include <soc/google/exynos-cpupm.h>
+ 
++#if IS_ENABLED(CONFIG_USB_VENDOR_HOOKS)
++/* junkyard (lynx-mainline): trace/hooks/usb.h only exists on the ACK GKI. */
+ #if IS_ENABLED(CONFIG_USB_VENDOR_HOOKS)
+ #include <trace/hooks/usb.h>
++#endif
+ #endif /* CONFIG_USB_VENDOR_HOOKS */
+ 
+ #include "xhci-exynos.h"
+@@ -827,7 +830,7 @@ static int xhci_exynos_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto disable_usb_phy;
+ 
+-	if (HCC_MAX_PSA(xhci->hcc_params) >= 4)
++	if (GET_MAX_PSA_SIZE(xhci->hcc_params) >= 4)	/* android-mainline: was HCC_MAX_PSA() */
+ 		xhci->shared_hcd->can_do_streams = 1;
+ 
+ 	ret = usb_add_hcd(xhci->shared_hcd, irq, IRQF_SHARED);
+@@ -883,7 +886,7 @@ disable_runtime:
  	return ret;
  }
  
@@ -5007,7 +6869,7 @@ index 1759526..0faa1c3 100644
  {
  	struct xhci_hcd_exynos *xhci_exynos = platform_get_drvdata(dev);
  	struct usb_hcd	*hcd = xhci_exynos->hcd;
-@@ -924,8 +924,6 @@ remove_hcd:
+@@ -924,8 +927,6 @@ remove_hcd:
  	pm_runtime_disable(&dev->dev);
  	pm_runtime_put_noidle(&dev->dev);
  	pm_runtime_set_suspended(&dev->dev);
@@ -5016,7 +6878,7 @@ index 1759526..0faa1c3 100644
  }
  
  static void xhci_exynos_shutdown(struct platform_device *dev)
-@@ -1006,7 +1004,7 @@ static int __maybe_unused xhci_exynos_resume(struct device *dev)
+@@ -1006,7 +1007,7 @@ static int __maybe_unused xhci_exynos_resume(struct device *dev)
  	if (ret)
  		return ret;
  
@@ -5025,11 +6887,144 @@ index 1759526..0faa1c3 100644
  	if (ret) {
  		dev_err(xhci_exynos->dev, "%s: xhci resume failed, ret = %d\n", __func__, ret);
  		return ret;
+diff --git a/drivers/usb/typec/tcpm/google/tcpci_max77759.c b/drivers/usb/typec/tcpm/google/tcpci_max77759.c
+index 9a44971..3c88c39 100644
+--- a/drivers/usb/typec/tcpm/google/tcpci_max77759.c
++++ b/drivers/usb/typec/tcpm/google/tcpci_max77759.c
+@@ -825,7 +825,7 @@ static int ext_bst_en_gpio_init(struct max77759_plat *chip)
+ 	dp = of_find_node_by_name(chip->dev->of_node, chip->gpio.label);
+ 	if (!dp)
+ 		dev_err(chip->dev, "Failed to find %s DT node", chip->gpio.label);
+-	chip->gpio.fwnode = of_node_to_fwnode(dp);
++	chip->gpio.fwnode = of_fwnode_handle(dp);
+ 
+ 	ret = devm_gpiochip_add_data(chip->dev, &chip->gpio, chip);
+ 	if (ret)
+@@ -1872,8 +1872,8 @@ static void floating_cable_sink_detected_handler_locked(struct max77759_plat *ch
+ 	    "floating_cable_or_sink_detected count: %d", chip->floating_cable_or_sink_detected);
+ 	if (chip->floating_cable_or_sink_detected >= FLOATING_CABLE_OR_SINK_INSTANCE_THRESHOLD) {
+ 		max777x9_disable_auto_ultra_low_power_mode(chip, true);
+-		alarm_start_relative(&chip->reenable_auto_ultra_low_power_mode_alarm,
+-				     ms_to_ktime(AUTO_ULTRA_LOW_POWER_MODE_REENABLE_MS));
++		alarm_start_timer(&chip->reenable_auto_ultra_low_power_mode_alarm,
++				     ms_to_ktime(AUTO_ULTRA_LOW_POWER_MODE_REENABLE_MS), true);
+ 	}
+ }
+ 
+@@ -3630,7 +3630,7 @@ static int max77759_aicl_active_cb(struct gvotable_election *el, const char *rea
+ 
+ 	if (is_aicl_limited(chip)) {
+ 		/* Recheck after AICL_CHECK_MS */
+-		alarm_start_relative(&chip->aicl_check_alarm, ms_to_ktime(AICL_CHECK_MS));
++		alarm_start_timer(&chip->aicl_check_alarm, ms_to_ktime(AICL_CHECK_MS), true);
+ 	} else {
+ 		alarm_cancel(&chip->aicl_check_alarm);
+ 		kthread_cancel_work_sync(&chip->aicl_check_alarm_work);
+diff --git a/drivers/usb/typec/tcpm/google/usb_psy.c b/drivers/usb/typec/tcpm/google/usb_psy.c
+index a6e1882..15af4d4 100644
+--- a/drivers/usb/typec/tcpm/google/usb_psy.c
++++ b/drivers/usb/typec/tcpm/google/usb_psy.c
+@@ -523,10 +523,10 @@ __must_hold(&usb->lock)
+ 			       usb->update_sdp_enum_timeout ?
+ 					SDP_ENUMERATION_TIMEOUT_MS :
+ 					SDP_ENUMERATION_TIMEOUT_FIRST_CONNECT_MS);
+-		alarm_start_relative(&usb->sdp_timeout_alarm,
++		alarm_start_timer(&usb->sdp_timeout_alarm,
+ 				     ms_to_ktime(usb->update_sdp_enum_timeout ?
+ 					SDP_ENUMERATION_TIMEOUT_MS :
+-					SDP_ENUMERATION_TIMEOUT_FIRST_CONNECT_MS));
++					SDP_ENUMERATION_TIMEOUT_FIRST_CONNECT_MS), true);
+ 	}
+ }
+ 
+diff --git a/drivers/usb/typec/tcpm/google/usbc_cooling_dev.c b/drivers/usb/typec/tcpm/google/usbc_cooling_dev.c
+index 88b2de3..0ad9d46 100644
+--- a/drivers/usb/typec/tcpm/google/usbc_cooling_dev.c
++++ b/drivers/usb/typec/tcpm/google/usbc_cooling_dev.c
+@@ -368,8 +368,8 @@ static void usb_cdev_work(struct work_struct *work)
+ 	}
+ 
+ resched:
+-	alarm_start_relative(&usb_cdev_info->unplug_alarm,
+-			     ms_to_ktime(usb_cdev_info->cooling_device_polling_interval_ms));
++	alarm_start_timer(&usb_cdev_info->unplug_alarm,
++			     ms_to_ktime(usb_cdev_info->cooling_device_polling_interval_ms), true);
+ free_event:
+ 	pm_relax(usb_cdev_info->dev);
+ 	devm_kfree(usb_cdev_info->dev, event);
+@@ -561,7 +561,7 @@ static int usb_cdev_probe(struct platform_device *pdev)
+ 
+ 	/* Register cooling device */
+ 	usb_cdev_info->cooling_dev =
+-		thermal_of_cooling_device_register(dev_of_node(usb_cdev_info->dev), "usbc-port",
++		thermal_of_cooling_device_register(dev_of_node(usb_cdev_info->dev), 0, "usbc-port",
+ 						   usb_cdev_info, &usb_cdev_ops);
+ 
+ 	if (IS_ERR(usb_cdev_info->cooling_dev)) {
+diff --git a/drivers/video/backlight/Kbuild b/drivers/video/backlight/Kbuild
+index 34d32fb..56cdd05 100644
+--- a/drivers/video/backlight/Kbuild
++++ b/drivers/video/backlight/Kbuild
+@@ -3,7 +3,8 @@
+ # Makefile for backlight drivers.
+ #
+ 
+-EXTRA_CFLAGS += -DDYNAMIC_DEBUG_MODULE=1
+-EXTRA_CFLAGS += -Werror
++# junkyard (lynx-mainline): was EXTRA_CFLAGS, which kbuild no longer honours.
++ccflags-y += -DDYNAMIC_DEBUG_MODULE=1
++ccflags-y += -Werror
+ 
+ obj-$(CONFIG_BACKLIGHT_RT4539_GS) += rt4539_bl.o
 diff --git a/drivers/watchdog/s3c2410_wdt.c b/drivers/watchdog/s3c2410_wdt.c
-index ada1652..4d9ead7 100644
+index ada1652..671d938 100644
 --- a/drivers/watchdog/s3c2410_wdt.c
 +++ b/drivers/watchdog/s3c2410_wdt.c
-@@ -1888,7 +1888,7 @@ static int s3c2410wdt_probe(struct platform_device *pdev)
+@@ -1490,7 +1490,7 @@ static int s3c2410wdt_dev_resume(struct device *dev)
+ static SIMPLE_DEV_PM_OPS(s3c_wdt_pm_ops, s3c2410wdt_dev_suspend, s3c2410wdt_dev_resume);
+ 
+ #ifdef CONFIG_PM
+-static int s3c2410wdt_syscore_suspend(void)
++static int s3c2410wdt_syscore_suspend(void *data)
+ {
+ 	struct s3c2410_wdt *wdt = s3c_wdt[LITTLE_CLUSTER];
+ 
+@@ -1506,7 +1506,7 @@ static int s3c2410wdt_syscore_suspend(void)
+ 	return 0;
+ }
+ 
+-static void s3c2410wdt_syscore_resume(void)
++static void s3c2410wdt_syscore_resume(void *data)
+ {
+ 	int ret;
+ 	unsigned int val;
+@@ -1560,11 +1560,15 @@ static void s3c2410wdt_syscore_resume(void)
+ #define s3c2410_wdt_syscore_resume		NULL
+ #endif
+ 
+-static struct syscore_ops s3c2410wdt_syscore_ops = {
++static const struct syscore_ops s3c2410wdt_syscore_ops = {
+ 	.suspend	= s3c2410wdt_syscore_suspend,
+ 	.resume		= s3c2410wdt_syscore_resume,
+ };
+ 
++static struct syscore s3c2410wdt_syscore = {
++	.ops = &s3c2410wdt_syscore_ops,
++};
++
+ static int s3c2410wdt_pm_notifier(struct notifier_block *notifier,
+ 				  unsigned long pm_event, void *v)
+ {
+@@ -1842,7 +1846,7 @@ static int s3c2410wdt_probe(struct platform_device *pdev)
+ 
+ 	wtcon = readl(wdt->reg_base + S3C2410_WTCON);
+ 	if (cluster_index == LITTLE_CLUSTER) {
+-		register_syscore_ops(&s3c2410wdt_syscore_ops);
++		register_syscore(&s3c2410wdt_syscore);
+ 
+ 		/* register panic handler for watchdog reset */
+ 		wdt_block.nb_panic_block.notifier_call = s3c2410wdt_panic_handler;
+@@ -1888,7 +1892,7 @@ static int s3c2410wdt_probe(struct platform_device *pdev)
  	return ret;
  }
  
@@ -5038,7 +7033,7 @@ index ada1652..4d9ead7 100644
  {
  	int ret = 0;
  	struct s3c2410_wdt *wdt = platform_get_drvdata(dev);
-@@ -1896,7 +1896,7 @@ static int s3c2410wdt_remove(struct platform_device *dev)
+@@ -1896,7 +1900,7 @@ static int s3c2410wdt_remove(struct platform_device *dev)
  	if (wdt->drv_data->pmu_reset_func)
  		ret = wdt->drv_data->pmu_reset_func(wdt, true);
  	if (ret < 0)
@@ -5047,7 +7042,7 @@ index ada1652..4d9ead7 100644
  
  	watchdog_unregister_device(&wdt->wdt_device);
  
-@@ -1912,8 +1912,6 @@ static int s3c2410wdt_remove(struct platform_device *dev)
+@@ -1912,8 +1916,6 @@ static int s3c2410wdt_remove(struct platform_device *dev)
  		WARN_ON(unregister_trace_android_vh_scheduler_tick(vh_scheduler_tick, wdt));
  		free_percpu(wdt->schedstat);
  	}

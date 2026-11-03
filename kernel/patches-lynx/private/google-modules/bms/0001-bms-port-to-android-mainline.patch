@@ -1,0 +1,349 @@
+From: junkyard
+Subject: [PATCH] bms: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(bms: port to Linux 6.18 (lynx))
+
+Port private/google-modules/bms to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - strlcpy() removed, use strscpy() (6.8)
+
+Files: misc/gvotable.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * of_node_to_fwnode() -> of_fwnode_handle(); irq_domain_add_linear() ->
+    irq_domain_create_linear(of_fwnode_handle(np), ...) (as upstream).
+  * alarm_start_relative()/alarm_start() -> alarm_start_timer(.., relative).
+  * thermal_of_cooling_device_register() gained a cdev_id argument (0, as
+    every in-tree caller passes).
+  * misc/logbuffer.c: register_syscore_ops() -> register_syscore() with a
+    struct syscore; syscore callbacks take a void *data.
+---
+diff --git a/google_charger.c b/google_charger.c
+index d7ba934..3600471 100644
+--- a/google_charger.c
++++ b/google_charger.c
+@@ -1231,8 +1231,8 @@ static void chg_termination_work(struct work_struct *work)
+ 			pr_info("Get CHARGE_COUNTER fail, try_cnt=%d, rc=%d\n",
+ 				chg_term->retry_cnt, rc);
+ 			/* try again and keep the pm_stay_awake */
+-			alarm_start_relative(&chg_term->alarm,
+-					     ms_to_ktime(CHG_TERM_RETRY_MS));
++			alarm_start_timer(&chg_term->alarm,
++					     ms_to_ktime(CHG_TERM_RETRY_MS), true);
+ 			return;
+ 		} else {
+ 			goto error;
+@@ -1264,7 +1264,7 @@ static void chg_termination_work(struct work_struct *work)
+ 	pr_info("Prevent overcharge data: cc: %d, cc_full_ref: %d, delay: %d\n",
+ 		cc, chg_term->cc_full_ref, delay);
+ 
+-	alarm_start_relative(&chg_term->alarm, ms_to_ktime(delay));
++	alarm_start_timer(&chg_term->alarm, ms_to_ktime(delay), true);
+ 
+ 	pm_relax(chg_drv->device);
+ 	return;
+@@ -1317,8 +1317,8 @@ static void chg_eval_chg_termination(struct chg_termination *chg_term)
+ 	 * battery. Trigger the function once charging is completed
+ 	 * to prevent overcharing.
+ 	 */
+-	alarm_start_relative(&chg_term->alarm,
+-			     ms_to_ktime(CHG_TERM_LONG_DELAY_MS));
++	alarm_start_timer(&chg_term->alarm,
++			     ms_to_ktime(CHG_TERM_LONG_DELAY_MS), true);
+ 	chg_term->alarm_start = true;
+ 	chg_term->cc_full_ref = 0;
+ 	chg_term->retry_cnt = 0;
+@@ -4911,8 +4911,8 @@ static int msc_update_charger_cb(struct gvotable_election *el,
+ 
+ msc_reschedule:
+ 	alarm_try_to_cancel(&chg_drv->chg_wakeup_alarm);
+-	alarm_start_relative(&chg_drv->chg_wakeup_alarm,
+-			     ms_to_ktime(update_interval));
++	alarm_start_timer(&chg_drv->chg_wakeup_alarm,
++			     ms_to_ktime(update_interval), true);
+ 
+ 	pr_debug("MSC_CHG fv_uv=%d, cc_max=%d, rerun in %d ms (%d)\n",
+ 		 fv_uv, cc_max, update_interval, rc);
+@@ -5957,7 +5957,7 @@ chg_thermal_device_register(const char *of_name,
+ 		return -EINVAL;
+ 	}
+ 
+-	ctdev->tcd = thermal_of_cooling_device_register(cooling_node,
++	ctdev->tcd = thermal_of_cooling_device_register(cooling_node, 0,
+ 							tcd_name,
+ 							ctdev,
+ 							ops);
+diff --git a/google_cpm.c b/google_cpm.c
+index da94302..adb4ece 100644
+--- a/google_cpm.c
++++ b/google_cpm.c
+@@ -3371,7 +3371,7 @@ static int mdis_tdev_register(const char *of_name, const char *tcd_name,
+ 		return -EINVAL;
+ 	}
+ 
+-	ctdev->tcd = thermal_of_cooling_device_register(cooling_node,
++	ctdev->tcd = thermal_of_cooling_device_register(cooling_node, 0,
+ 							tcd_name,
+ 							ctdev,
+ 							ops);
+diff --git a/google_dock.c b/google_dock.c
+index 7d6ff56..395e2b5 100644
+--- a/google_dock.c
++++ b/google_dock.c
+@@ -280,8 +280,8 @@ static void google_dock_icl_ramp_reset(struct dock_drv *dock)
+ static void google_dock_icl_ramp_start(struct dock_drv *dock)
+ {
+ 	dev_info(dock->device, "ICL ramp set alarm %dms\n", dock->icl_ramp_delay_ms);
+-	alarm_start_relative(&dock->icl_ramp_alarm,
+-			     ms_to_ktime(dock->icl_ramp_delay_ms));
++	alarm_start_timer(&dock->icl_ramp_alarm,
++			     ms_to_ktime(dock->icl_ramp_delay_ms), true);
+ }
+ 
+ static void google_dock_notifier_check_dc(struct dock_drv *dock)
+diff --git a/google_wlc.c b/google_wlc.c
+index c4901fd..d57a6ed 100644
+--- a/google_wlc.c
++++ b/google_wlc.c
+@@ -7630,7 +7630,7 @@ static int google_wlc_probe(struct i2c_client *client)
+ 		dev_err(&client->dev, "Failed to find %s DT node\n",
+ 			charger->gpio.label);
+ 
+-	charger->gpio.fwnode = of_node_to_fwnode(dn);
++	charger->gpio.fwnode = of_fwnode_handle(dn);
+ 
+ 	ret = devm_gpiochip_add_data(&client->dev, &charger->gpio, charger);
+ 	dev_info(&client->dev, "%d GPIOs registered ret:%d\n",
+diff --git a/ln8411_driver.c b/ln8411_driver.c
+index 371b23b..43b954f 100644
+--- a/ln8411_driver.c
++++ b/ln8411_driver.c
+@@ -6091,7 +6091,7 @@ static int ln8411_probe(struct i2c_client *client)
+ 	dp = of_find_node_by_name(client->dev.of_node, ln8411_charger->gpio.label);
+ 	if (!dp)
+ 		dev_err(&client->dev, "Failed to find %s DT node\n", ln8411_charger->gpio.label);
+-	ln8411_charger->gpio.fwnode = of_node_to_fwnode(dp);
++	ln8411_charger->gpio.fwnode = of_fwnode_handle(dp);
+ 	ret = devm_gpiochip_add_data(&client->dev, &ln8411_charger->gpio, ln8411_charger);
+ 	dev_info(&client->dev, "%d GPIOs registered ret: %d\n", ln8411_charger->gpio.ngpio, ret);
+ #endif
+diff --git a/max20339.c b/max20339.c
+index 4f10cbe..c82f4b9 100644
+--- a/max20339.c
++++ b/max20339.c
+@@ -433,7 +433,7 @@ static int max20339_probe(struct i2c_client *client)
+ 		dev_err(&client->dev, "Failed to find %s DT node\n",
+ 			ovp->gpio.label);
+ 	else
+-		ovp->gpio.fwnode = of_node_to_fwnode(dp);
++		ovp->gpio.fwnode = of_fwnode_handle(dp);
+ 
+ 	ret = devm_gpiochip_add_data(&client->dev, &ovp->gpio, ovp);
+ 	if (ret)
+diff --git a/max77729_pmic.c b/max77729_pmic.c
+index 91b38bf..f8ef399 100644
+--- a/max77729_pmic.c
++++ b/max77729_pmic.c
+@@ -1336,7 +1336,7 @@ static int max77729_pmic_probe(struct i2c_client *client)
+ 		dp = of_find_node_by_name(dev->of_node, data->gpio.label);
+ 		if (!dp)
+ 			dev_err(dev, "Failed to find %s DT node\n", data->gpio.label);
+-		data->gpio.fwnode = of_node_to_fwnode(dp);
++		data->gpio.fwnode = of_fwnode_handle(dp);
+ 
+ 		/* check regmap-irq */
+ 		girq->chip = &max77729_gpio_irq_chip;
+diff --git a/max77759_charger.c b/max77759_charger.c
+index 28c0675..0bf1fd6 100644
+--- a/max77759_charger.c
++++ b/max77759_charger.c
+@@ -3392,7 +3392,7 @@ static int max77759_charger_probe(struct i2c_client *client)
+ 	dp = of_find_node_by_name(dev->of_node, data->gpio.label);
+ 	if (!dp)
+ 		dev_warn(dev, "Failed to find %s DT node\n", data->gpio.label);
+-	data->gpio.fwnode = of_node_to_fwnode(dp);
++	data->gpio.fwnode = of_fwnode_handle(dp);
+ 	ret = devm_gpiochip_add_data(dev, &data->gpio, data);
+ 	dev_dbg(dev, "%d GPIOs registered ret: %d\n", data->gpio.ngpio, ret);
+ #endif
+diff --git a/max77779_charger.c b/max77779_charger.c
+index 56f0d27..737d756 100644
+--- a/max77779_charger.c
++++ b/max77779_charger.c
+@@ -3887,7 +3887,7 @@ static int max77779_chg_irq_setup(struct max77779_chgr_data *data)
+ 	data->disable_internal_irq_handler =
+ 		of_property_read_bool(dev->of_node, "max77779,disable-internal-irq-handler");
+ 
+-	data->domain = irq_domain_add_linear(dev->of_node, MAX77779_CHG_NUM_IRQS,
++	data->domain = irq_domain_create_linear(of_fwnode_handle(dev->of_node), MAX77779_CHG_NUM_IRQS,
+ 					     &irq_domain_simple_ops, data);
+ 	if (!data->domain) {
+ 		dev_err(data->dev, "Unable to get irq domain\n");
+@@ -4102,7 +4102,7 @@ int max77779_charger_init(struct max77779_chgr_data *data)
+ 	dp = of_find_node_by_name(dev->of_node, data->gpio.label);
+ 	if (!dp)
+ 		dev_warn(dev, "Failed to find %s DT node\n", data->gpio.label);
+-	data->gpio.fwnode = of_node_to_fwnode(dp);
++	data->gpio.fwnode = of_fwnode_handle(dp);
+ 	of_node_put(dp);
+ 	ret = devm_gpiochip_add_data(dev, &data->gpio, data);
+ 	dev_dbg(dev, "%d GPIOs registered ret: %d\n", data->gpio.ngpio, ret);
+diff --git a/max77779_pmic_irq.c b/max77779_pmic_irq.c
+index 46a91fc..fba7b07 100644
+--- a/max77779_pmic_irq.c
++++ b/max77779_pmic_irq.c
+@@ -237,7 +237,7 @@ static int max77779_pmic_irq_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	info->trig_type = 0x00000000;
+-	info->domain = irq_domain_add_linear(dev->of_node, MAX77779_NUM_IRQS,
++	info->domain = irq_domain_create_linear(of_fwnode_handle(dev->of_node), MAX77779_NUM_IRQS,
+ 			&irq_domain_simple_ops, info);
+ 	if (!info->domain) {
+ 		dev_err(info->dev, "Unable to get irq domain\n");
+diff --git a/max77779_pmic_sgpio.c b/max77779_pmic_sgpio.c
+index 455f822..bd769ad 100644
+--- a/max77779_pmic_sgpio.c
++++ b/max77779_pmic_sgpio.c
+@@ -430,7 +430,7 @@ static int max77779_pmic_sgpio_probe(struct platform_device *pdev)
+ 	gpio_chip->set_config = gpiochip_generic_config;
+ 	gpio_chip->base = -1;
+ 	gpio_chip->can_sleep = true;
+-	gpio_chip->fwnode = of_node_to_fwnode(dev->of_node);
++	gpio_chip->fwnode = of_fwnode_handle(dev->of_node);
+ 	gpio_chip->ngpio = MAX77779_SGPIO_NUM_GPIOS;
+ 
+ 	gpio_irq_chip_set_chip(&gpio_chip->irq, &max77779_pmic_sgpio_irq_chip);
+diff --git a/misc/Kbuild b/misc/Kbuild
+index b04fdc4..41a9186 100644
+--- a/misc/Kbuild
++++ b/misc/Kbuild
+@@ -1,4 +1,9 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
++# junkyard (lynx-mainline): kbuild no longer appends $(EXTRA_CFLAGS) to every
++# compile (scripts/Makefile.build dropped EXTRA_*FLAGS support), so the flags
++# the Makefile passes that way were silently lost. Restore exactly that.
++ccflags-y += $(EXTRA_CFLAGS)
++
+ obj-$(CONFIG_GOOGLE_VOTABLE) += gvotable.o
+ obj-$(CONFIG_GOOGLE_LOGBUFFER)	+= logbuffer.o
+diff --git a/misc/gvotable.c b/misc/gvotable.c
+index f079a4d..c745aa9 100644
+--- a/misc/gvotable.c
++++ b/misc/gvotable.c
+@@ -977,7 +977,7 @@ static int gvotable_get_current_reason_unlocked(struct gvotable_election *el,
+ 	if (max_len < 0)
+ 		return -EINVAL;
+ 	strscpy(reason, r, max_len);
+-	/* Preserve the source-length return value of the former strlcpy(). */
++	/* Preserve the source-length return value of the former strscpy(). */
+ 	return strlen(r);
+ }
+ 
+diff --git a/misc/logbuffer.c b/misc/logbuffer.c
+index 0c4dd57..2363835 100644
+--- a/misc/logbuffer.c
++++ b/misc/logbuffer.c
+@@ -275,19 +275,23 @@ void logbuffer_unregister(struct logbuffer *instance)
+ }
+ EXPORT_SYMBOL_GPL(logbuffer_unregister);
+ 
+-static int logbuffer_suspend(void)
++static int logbuffer_suspend(void *data)
+ {
+ 	driver_suspended_count += 1;
+ 	return 0;
+ }
+ 
+-static struct syscore_ops logbuffer_ops = {
++static const struct syscore_ops logbuffer_ops = {
+ 	.suspend        = logbuffer_suspend,
+ };
+ 
++static struct syscore logbuffer_syscore = {
++	.ops = &logbuffer_ops,
++};
++
+ static int __init logbuffer_dev_init(void)
+ {
+-	register_syscore_ops(&logbuffer_ops);
++	register_syscore(&logbuffer_syscore);
+ 
+ 	/* Limit the entry count of each logbuffer instance to maximum 2^20  */
+ 	if (buffer_entry_shift > LOGBUFFER_ENTRY_SHIFT_MAX)
+@@ -306,7 +310,7 @@ static int __init logbuffer_dev_init(void)
+ 
+ static void logbuffer_dev_exit(void)
+ {
+-	unregister_syscore_ops(&logbuffer_ops);
++	unregister_syscore(&logbuffer_syscore);
+ }
+ early_initcall(logbuffer_dev_init);
+ module_exit(logbuffer_dev_exit);
+diff --git a/p9221_charger.c b/p9221_charger.c
+index a83ed86..28fb10a 100644
+--- a/p9221_charger.c
++++ b/p9221_charger.c
+@@ -977,7 +977,7 @@ static int feature_set_dc_icl(struct p9221_charger_data *charger, u32 ilim_ua)
+ 	dev_info(&charger->client->dev, "ICL ramp set alarm %dms, %dua, ramp=%d\n",
+ 		 delay, charger->icl_ramp_alt_ua, charger->icl_ramp);
+ 
+-	alarm_start_relative(&charger->icl_ramp_alarm, ms_to_ktime(delay));
++	alarm_start_timer(&charger->icl_ramp_alarm, ms_to_ktime(delay), true);
+ 	return 0;
+ }
+ 
+@@ -3608,8 +3608,8 @@ static void p9221_icl_ramp_start(struct p9221_charger_data *charger)
+ 		 charger->pdata->icl_ramp_delay_ms, charger->icl_ramp_ua,
+ 		 charger->icl_ramp);
+ 
+-	alarm_start_relative(&charger->icl_ramp_alarm,
+-			     ms_to_ktime(charger->pdata->icl_ramp_delay_ms));
++	alarm_start_timer(&charger->icl_ramp_alarm,
++			     ms_to_ktime(charger->pdata->icl_ramp_delay_ms), true);
+ }
+ 
+ static void p9221_set_online(struct p9221_charger_data *charger)
+@@ -6006,7 +6006,7 @@ static ssize_t authstart_store(struct device *dev,
+ 	if (ret == 0) {
+ 		charger->set_auth_icl = true;
+ 		pm_stay_awake(charger->dev);
+-		alarm_start_relative(&charger->auth_dc_icl_alarm, timeout);
++		alarm_start_timer(&charger->auth_dc_icl_alarm, timeout, true);
+ 		schedule_delayed_work(&charger->auth_dc_icl_work,
+ 				      msecs_to_jiffies(WLCDC_AUTH_CHECK_INIT_DELAY_MS));
+ 	} else if (ret < 0) {
+@@ -8509,7 +8509,7 @@ static int p9221_charger_probe(struct i2c_client *client)
+ 		if(!dn)
+ 			dev_err(&client->dev, "Failed to find %s DT node\n",
+ 				charger->gpio.label);
+-		charger->gpio.fwnode = of_node_to_fwnode(dn);
++		charger->gpio.fwnode = of_fwnode_handle(dn);
+ 
+ 		ret = devm_gpiochip_add_data(&client->dev, &charger->gpio, charger);
+ 		dev_info(&client->dev, "%d GPIOs registered ret:%d\n",
+diff --git a/rt9471_charger.c b/rt9471_charger.c
+index 0bace99..80ff54b 100644
+--- a/rt9471_charger.c
++++ b/rt9471_charger.c
+@@ -2082,7 +2082,7 @@ static int rt9471_probe(struct i2c_client *client)
+ 		if (!dp)
+ 			dev_warn(chip->dev, "Failed to find %s DT node\n",
+ 				chip->gpio.label);
+-		chip->gpio.fwnode = of_node_to_fwnode(dp);
++		chip->gpio.fwnode = of_fwnode_handle(dp);
+ 
+ 		ret = devm_gpiochip_add_data(chip->dev, &chip->gpio, chip);
+ 		dev_info(chip->dev, "%d GPIOs registered ret:%d\n",

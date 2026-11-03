@@ -1,0 +1,1813 @@
+From: junkyard
+Subject: [PATCH] amplifiers: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(amplifiers: port to Linux 6.18 (lynx))
+
+Port private/google-modules/amplifiers to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - strlcpy() removed, use strscpy() (6.8)
+  - ASoC: snd_soc_rtd_to_*() and DAIFMT CBP/CBC naming
+
+Files: cs35l41/cs35l41.c, cs35l45/cs35l45.c, cs35l45/wm_adsp.c, cs40l25/snd-soc-codec-cs40l2x.c, drv2624/drv2624.c, snd_soc_wm_adsp/wm_adsp.c, tas256x/os_layer/src/tas256x-codec.c, tas25xx/src/tas25xx-logic.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline
+(7.3). Mechanical renames mirror the upstream tree-wide conversions that removed
+the old names:
+
+  * ASoC removed the component wrappers snd_soc_kcontrol_component(),
+    snd_soc_component_get_dapm() and snd_soc_component_{force_enable,
+    enable,disable,nc}_pin[_unlocked]()/_get_pin_status(). Use
+    snd_kcontrol_chip(), snd_soc_component_to_dapm() and the
+    snd_soc_dapm_*_pin() calls, which handle the component name prefix
+    themselves now (cf. sound/soc/codecs/wm_adsp.c upstream).
+
+Applied to every codec in the project for consistency; lynx builds
+cs35l41, cs40l26, snd_soc_wm_adsp and audiometrics.
+---
+diff --git a/cs35l41/cs35l41.c b/cs35l41/cs35l41.c
+index c0332f8..5dc1d8b 100644
+--- a/cs35l41/cs35l41.c
++++ b/cs35l41/cs35l41.c
+@@ -320,7 +320,7 @@ static int cs35l41_bp_current_limit_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	struct soc_enum *soc_enum = (struct soc_enum *)kcontrol->private_value;
+@@ -336,7 +336,7 @@ static int cs35l41_bp_current_limit_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	int ret = 0;
+@@ -363,7 +363,7 @@ static int cs35l41_hibernate_switch_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -380,7 +380,7 @@ static int cs35l41_hibernate_switch_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -403,7 +403,7 @@ static int cs35l41_halo_booted_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -416,7 +416,7 @@ static int cs35l41_halo_booted_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	dev_info(cs35l41->dev, "%s: old booted value: %d new boot value: %ld\n",
+@@ -431,7 +431,7 @@ static int cs35l41_force_int_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -444,7 +444,7 @@ static int cs35l41_force_int_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	bool force_int_changed = (cs35l41->force_int !=
+@@ -484,11 +484,11 @@ static int cs35l41_amp_reset_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	struct snd_soc_dapm_context *dapm =
+-		snd_soc_component_get_dapm(component);
++		snd_soc_component_to_dapm(component);
+ 	int ret, retries, timeout = 100;
+ 	u32 status;
+ 
+@@ -562,10 +562,10 @@ static int cs35l41_amp_reset_put(struct snd_kcontrol *kcontrol,
+ 
+ 	if (cs35l41->dsp.preloaded) {
+ 		dev_info(cs35l41->dev, "Reload DSP\n");
+-		snd_soc_component_disable_pin(component, "DSP1 Preload");
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), "DSP1 Preload");
+ 		snd_soc_dapm_sync(dapm);
+ 		usleep_range(4000, 5000);
+-		snd_soc_component_force_enable_pin(component, "DSP1 Preload");
++		snd_soc_dapm_force_enable_pin(snd_soc_component_to_dapm(component), "DSP1 Preload");
+ 		snd_soc_dapm_sync(dapm);
+ 		flush_work(&cs35l41->dsp.boot_work);
+ 	}
+@@ -582,7 +582,7 @@ static int cs35l41_ccm_reset_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	unsigned int val = 0;
+@@ -609,7 +609,7 @@ static int cs35l41_hibernate_force_wake_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -622,7 +622,7 @@ static int cs35l41_hibernate_force_wake_put(struct snd_kcontrol *kcontrol,
+ 				   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	bool valid_transition = cs35l41->hibernate_force_wake !=
+@@ -677,7 +677,7 @@ static int cs35l41_fast_switch_en_get(struct snd_kcontrol *kcontrol,
+ 				      struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -831,7 +831,7 @@ static int cs35l41_fast_switch_en_put(struct snd_kcontrol *kcontrol,
+ 	int ret = 0;
+ 
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -851,7 +851,7 @@ static int cs35l41_fast_switch_file_put(struct snd_kcontrol *kcontrol,
+ 					struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	struct soc_enum *soc_enum;
+@@ -873,7 +873,7 @@ static int cs35l41_fast_switch_file_get(struct snd_kcontrol *kcontrol,
+ 					struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -886,7 +886,7 @@ static int cs35l41_gpi_global_en_get(struct snd_kcontrol *kcontrol,
+ 				   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -899,7 +899,7 @@ static int cs35l41_gpi_global_en_put(struct snd_kcontrol *kcontrol,
+ 				   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -953,7 +953,7 @@ static int cs35l41_reload_tuning_get(struct snd_kcontrol *kcontrol,
+ 				     struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -966,7 +966,7 @@ static int cs35l41_reload_tuning_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -1080,7 +1080,7 @@ static int cs35l41_put_output_dev(struct snd_kcontrol *kcontrol,
+ 	struct soc_enum *soc_enum;
+ 	unsigned int i = ucontrol->value.enumerated.item[0];
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	soc_enum = (struct soc_enum *)kcontrol->private_value;
+@@ -1118,7 +1118,7 @@ static int cs35l41_get_output_dev(struct snd_kcontrol *kcontrol,
+ 	struct cs35l41_private *cs35l41;
+ 	int ret = 0;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.enumerated.item[0] = cs35l41->vol_ctl.output_dev;
+@@ -1351,7 +1351,7 @@ static int cs35l41_get_vol(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l41->vol_ctl.dig_vol;
+@@ -1366,7 +1366,7 @@ static int cs35l41_put_vol(struct snd_kcontrol *kcontrol,
+ 	struct cs35l41_private *cs35l41;
+ 	int ret = 0;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1388,7 +1388,7 @@ static int cs35l41_get_ramp_status(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -1403,7 +1403,7 @@ static int cs35l41_put_ramp_status(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	dev_info(cs35l41->dev,
+@@ -1417,7 +1417,7 @@ static int cs35l41_get_manual_ramp(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -1432,7 +1432,7 @@ static int cs35l41_put_manual_ramp(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1471,7 +1471,7 @@ static int cs35l41_get_init_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l41->vol_ctl.ramp_init_att;
+@@ -1484,7 +1484,7 @@ static int cs35l41_put_init_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1503,7 +1503,7 @@ static int cs35l41_get_knee_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l41->vol_ctl.ramp_knee_att;
+@@ -1516,7 +1516,7 @@ static int cs35l41_put_knee_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1535,7 +1535,7 @@ static int cs35l41_get_ramp_end_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l41->vol_ctl.ramp_end_time;
+@@ -1548,7 +1548,7 @@ static int cs35l41_put_ramp_end_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1567,7 +1567,7 @@ static int cs35l41_get_auto_ramp_timeout(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -1581,7 +1581,7 @@ static int cs35l41_put_auto_ramp_timeout(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1600,7 +1600,7 @@ static int cs35l41_get_ramp_knee_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private	*cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -1614,7 +1614,7 @@ static int cs35l41_put_ramp_knee_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1633,7 +1633,7 @@ static int cs35l41_get_port_blocked_status(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = cs35l41->speaker_port_blocked;
+@@ -1647,7 +1647,7 @@ static int cs35l41_get_open_short_status(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = cs35l41->speaker_open_short_status;
+@@ -1661,7 +1661,7 @@ static int cs35l41_default_96k_get(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -1675,7 +1675,7 @@ static int cs35l41_default_96k_put(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l41_private *cs35l41;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l41 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1704,7 +1704,7 @@ static int cs35l41_imp_put(struct snd_kcontrol *kcontrol,
+ 			struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	struct cs35l41_misc_priv_type *misc_priv = NULL;
+@@ -1727,7 +1727,7 @@ static int cs35l41_imp_get(struct snd_kcontrol *kcontrol,
+ 			struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l41_private *cs35l41 =
+ 		snd_soc_component_get_drvdata(component);
+ 	struct cs35l41_misc_priv_type *misc_priv = NULL;
+@@ -2598,10 +2598,10 @@ static int cs35l41_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
+ 	unsigned int asp_fmt, lrclk_fmt, sclk_fmt, clock_mode;
+ 
+ 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+-	case SND_SOC_DAIFMT_CBM_CFM:
++	case SND_SOC_DAIFMT_CBP_CFP:
+ 		clock_mode = 1;
+ 		break;
+-	case SND_SOC_DAIFMT_CBS_CFS:
++	case SND_SOC_DAIFMT_CBC_CFC:
+ 		clock_mode = 0;
+ 		break;
+ 	default:
+@@ -3220,7 +3220,7 @@ static const char * const dapm_names[] = { "SPK", "VP", "VBST", "ISENSE",
+ 
+ static void cs35l41_component_ignore_suspend(struct snd_soc_component *component)
+ {
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+ 	int i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(dapm_names); i++) {
+diff --git a/cs35l43/cs35l43.c b/cs35l43/cs35l43.c
+index 45cd500..6de4eff 100644
+--- a/cs35l43/cs35l43.c
++++ b/cs35l43/cs35l43.c
+@@ -197,7 +197,7 @@ static int cs35l43_delta_select_get(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l43_private *cs35l43;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l43 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = cs35l43->delta_applied;
+@@ -241,7 +241,7 @@ static int cs35l43_delta_select_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-				 snd_soc_kcontrol_component(kcontrol);
++				 snd_kcontrol_chip(kcontrol);
+ 	struct cs35l43_private *cs35l43 =
+ 				 snd_soc_component_get_drvdata(component);
+ 
+@@ -394,7 +394,7 @@ static int cs35l43_reinit_put(struct snd_kcontrol *kcontrol,
+ 	struct cs35l43_private *cs35l43;
+ 	int ret = 0;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l43 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0]) {
+@@ -419,7 +419,7 @@ static int cs35l43_bp_current_limit_get(struct snd_kcontrol *kcontrol,
+ 	int value = 0;
+ 	int ret = 0;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l43 = snd_soc_component_get_drvdata(component);
+ 	soc_enum = (struct soc_enum *)kcontrol->private_value;
+ 
+@@ -438,7 +438,7 @@ static int cs35l43_bp_current_limit_put(struct snd_kcontrol *kcontrol,
+ 	struct soc_enum *soc_enum;
+ 	int ret = 0;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l43 = snd_soc_component_get_drvdata(component);
+ 	soc_enum = (struct soc_enum *)kcontrol->private_value;
+ 
+@@ -889,7 +889,7 @@ err_free:
+ 
+ static int cs35l43_dsp_reset(struct cs35l43_private *cs35l43)
+ {
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cs35l43->component);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cs35l43->component);
+ 	struct snd_soc_dapm_widget fake_dapm_widget = {.dapm = dapm};
+ 
+ 	unsigned int val = 0;
+@@ -2545,7 +2545,7 @@ static const char * const dapm_names[] = { "SPK", "VP", "AMP Playback", "AMP Cap
+ 
+ static void cs35l43_component_ignore_suspend(struct snd_soc_component *component)
+ {
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+ 	int i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(dapm_names); i++) {
+diff --git a/cs35l43/wm_adsp.c b/cs35l43/wm_adsp.c
+index b7584b2..dbda079 100644
+--- a/cs35l43/wm_adsp.c
++++ b/cs35l43/wm_adsp.c
+@@ -317,7 +317,7 @@ struct wm_coeff_ctl {
+ int wm_adsp_fw_get(struct snd_kcontrol *kcontrol,
+ 		   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = snd_soc_component_get_drvdata(component);
+ 
+@@ -330,7 +330,7 @@ EXPORT_SYMBOL_GPL(wm_adsp_fw_get);
+ int wm_adsp_fw_put(struct snd_kcontrol *kcontrol,
+ 		   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = snd_soc_component_get_drvdata(component);
+ 	int ret = 1;
+@@ -981,7 +981,7 @@ EXPORT_SYMBOL_GPL(wm_adsp2_set_dspclk);
+ int wm_adsp2_preloader_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct wm_adsp *dsps = snd_soc_component_get_drvdata(component);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+@@ -996,9 +996,9 @@ EXPORT_SYMBOL_GPL(wm_adsp2_preloader_get);
+ int wm_adsp2_preloader_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct wm_adsp *dsps = snd_soc_component_get_drvdata(component);
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = &dsps[mc->shift - 1];
+@@ -1010,9 +1010,9 @@ int wm_adsp2_preloader_put(struct snd_kcontrol *kcontrol,
+ 	snprintf(preload, ARRAY_SIZE(preload), "%s Preload", dsp->cs_dsp.name);
+ 
+ 	if (ucontrol->value.integer.value[0] || dsp->toggle_preload)
+-		snd_soc_component_force_enable_pin(component, preload);
++		snd_soc_dapm_force_enable_pin(snd_soc_component_to_dapm(component), preload);
+ 	else
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 
+ 	snd_soc_dapm_sync(dapm);
+ 
+@@ -1021,7 +1021,7 @@ int wm_adsp2_preloader_put(struct snd_kcontrol *kcontrol,
+ 	dsp->preloaded = ucontrol->value.integer.value[0];
+ 
+ 	if (dsp->toggle_preload) {
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 		snd_soc_dapm_sync(dapm);
+ 	}
+ 
+@@ -1155,7 +1155,7 @@ int wm_adsp2_component_probe(struct wm_adsp *dsp, struct snd_soc_component *comp
+ 
+ 	if (!dsp->cs_dsp.no_core_startstop) {
+ 		snprintf(preload, ARRAY_SIZE(preload), "%s Preload", dsp->cs_dsp.name);
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 	}
+ 
+ 	cs_dsp_init_debugfs(&dsp->cs_dsp, component->debugfs_root);
+diff --git a/cs35l45/cs35l45.c b/cs35l45/cs35l45.c
+index 5e66f0e..a1b4688 100644
+--- a/cs35l45/cs35l45.c
++++ b/cs35l45/cs35l45.c
+@@ -495,7 +495,7 @@ static int cs35l45_get_ramp_status(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -510,7 +510,7 @@ static int cs35l45_put_ramp_status(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	dev_info(cs35l45->dev,
+@@ -524,7 +524,7 @@ static int cs35l45_get_manual_ramp(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -539,7 +539,7 @@ static int cs35l45_put_manual_ramp(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -578,7 +578,7 @@ static int cs35l45_get_init_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l45->vol_ctl.ramp_init_att;
+@@ -591,7 +591,7 @@ static int cs35l45_put_init_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -610,7 +610,7 @@ static int cs35l45_get_knee_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l45->vol_ctl.ramp_knee_att;
+@@ -623,7 +623,7 @@ static int cs35l45_put_knee_attenuation(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -642,7 +642,7 @@ static int cs35l45_get_ramp_end_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = (long)cs35l45->vol_ctl.ramp_end_time;
+@@ -655,7 +655,7 @@ static int cs35l45_put_ramp_end_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -674,7 +674,7 @@ static int cs35l45_get_auto_ramp_timeout(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -688,7 +688,7 @@ static int cs35l45_put_auto_ramp_timeout(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -707,7 +707,7 @@ static int cs35l45_get_ramp_knee_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private	*cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] =
+@@ -721,7 +721,7 @@ static int cs35l45_put_ramp_knee_time(struct snd_kcontrol *kcontrol,
+ 	struct snd_soc_component *component;
+ 	struct cs35l45_private *cs35l45;
+ 
+-	component = snd_soc_kcontrol_component(kcontrol);
++	component = snd_kcontrol_chip(kcontrol);
+ 	cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	if (ucontrol->value.integer.value[0] < 0 ||
+@@ -1108,7 +1108,7 @@ static int cs35l45_amplifier_mode_get(struct snd_kcontrol *kcontrol,
+ 				      struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-			snd_soc_kcontrol_component(kcontrol);
++			snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 			snd_soc_component_get_drvdata(component);
+ 
+@@ -1121,17 +1121,17 @@ static int cs35l45_amplifier_mode_put(struct snd_kcontrol *kcontrol,
+ 				      struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-			snd_soc_kcontrol_component(kcontrol);
++			snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 			snd_soc_component_get_drvdata(component);
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(component);
++			snd_soc_component_to_dapm(component);
+ 	int ret;
+ 
+ 	if (ucontrol->value.integer.value[0] == AMP_MODE_NONE) {
+ 		cs35l45->amplifier_mode = ucontrol->value.integer.value[0];
+ 
+-		snd_soc_component_disable_pin(component, "SPK");
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), "SPK");
+ 
+ 		snd_soc_dapm_sync(dapm);
+ 
+@@ -1139,7 +1139,7 @@ static int cs35l45_amplifier_mode_put(struct snd_kcontrol *kcontrol,
+ 	}
+ 
+ 	if (ucontrol->value.integer.value[0] == AMP_MODE_SPK) {
+-		snd_soc_component_disable_pin(component, "SPK");
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), "SPK");
+ 		snd_soc_dapm_sync(dapm);
+ 
+ 		flush_work(&cs35l45->dsp_pmd_work);
+@@ -1161,7 +1161,7 @@ static int cs35l45_amplifier_mode_put(struct snd_kcontrol *kcontrol,
+ 			dev_err(cs35l45->dev,
+ 				"Unable to deactivate ctl (%d)\n", ret);
+ 
+-		snd_soc_component_enable_pin(component, "SPK");
++		snd_soc_dapm_enable_pin(snd_soc_component_to_dapm(component), "SPK");
+ 		snd_soc_dapm_sync(dapm);
+ 
+ 		if (atomic_read(&cs35l45->vol_ctl.playback) &&
+@@ -1179,7 +1179,7 @@ static int cs35l45_amplifier_mode_put(struct snd_kcontrol *kcontrol,
+ 		}
+ 
+ 	} else  /* AMP_MODE_RCV */ {
+-		snd_soc_component_disable_pin(component, "SPK");
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), "SPK");
+ 		snd_soc_dapm_sync(dapm);
+ 
+ 		flush_work(&cs35l45->dsp_pmd_work);
+@@ -1211,7 +1211,7 @@ static int cs35l45_amplifier_mode_put(struct snd_kcontrol *kcontrol,
+ 			dev_err(cs35l45->dev,
+ 				"Unable to deactivate ctl (%d)\n", ret);
+ 
+-		snd_soc_component_enable_pin(component, "SPK");
++		snd_soc_dapm_enable_pin(snd_soc_component_to_dapm(component), "SPK");
+ 		snd_soc_dapm_sync(dapm);
+ 	}
+ 
+@@ -1224,10 +1224,10 @@ static int cs35l45_dsp_boot_get(struct snd_kcontrol *kcontrol,
+ 				struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-			snd_soc_kcontrol_component(kcontrol);
++			snd_kcontrol_chip(kcontrol);
+ 	unsigned int val;
+ 
+-	val = snd_soc_component_get_pin_status(component, "DSP1");
++	val = snd_soc_dapm_get_pin_status(snd_soc_component_to_dapm(component), "DSP1");
+ 
+ 	ucontrol->value.integer.value[0] = (val > 0) ? 1 : 0;
+ 
+@@ -1238,11 +1238,11 @@ static int cs35l45_dsp_boot_put(struct snd_kcontrol *kcontrol,
+ 				struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-			snd_soc_kcontrol_component(kcontrol);
++			snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 			snd_soc_component_get_drvdata(component);
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(component);
++			snd_soc_component_to_dapm(component);
+ 
+ 	if (!cs35l45->dsp.cs_dsp.booted) {
+ 		dev_err(cs35l45->dev, "Preload DSP before boot\n");
+@@ -1250,7 +1250,7 @@ static int cs35l45_dsp_boot_put(struct snd_kcontrol *kcontrol,
+ 	}
+ 
+ 	if (ucontrol->value.integer.value[0]) {
+-		snd_soc_component_force_enable_pin(component, "DSP1");
++		snd_soc_dapm_force_enable_pin(snd_soc_component_to_dapm(component), "DSP1");
+ 
+ 		snd_soc_dapm_sync(dapm);
+ 
+@@ -1260,7 +1260,7 @@ static int cs35l45_dsp_boot_put(struct snd_kcontrol *kcontrol,
+ 	} else {
+ 		pm_runtime_resume_and_get(cs35l45->dev);
+ 
+-		snd_soc_component_disable_pin(component, "DSP1");
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), "DSP1");
+ 
+ 		snd_soc_dapm_sync(dapm);
+ 
+@@ -1283,7 +1283,7 @@ static int cs35l45_fast_switch_en_get(struct snd_kcontrol *kcontrol,
+ 				      struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -1452,7 +1452,7 @@ static int cs35l45_fast_switch_en_put(struct snd_kcontrol *kcontrol,
+ 	int			ret = 0;
+ 
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -1472,7 +1472,7 @@ static int cs35l45_fast_switch_file_put(struct snd_kcontrol *kcontrol,
+ 					struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 		snd_soc_component_get_drvdata(component);
+ 	struct soc_enum		*soc_enum;
+@@ -1494,7 +1494,7 @@ static int cs35l45_fast_switch_file_get(struct snd_kcontrol *kcontrol,
+ 					struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -1507,7 +1507,7 @@ static int cs35l45_get_speaker_status(struct snd_kcontrol *kcontrol,
+ 					 struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -1519,7 +1519,7 @@ static int cs35l45_get_speaker_status(struct snd_kcontrol *kcontrol,
+ static int cs35l45_force_int_get(struct snd_kcontrol *kcontrol,
+ 				 struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = cs35l45->force_int;
+@@ -1530,7 +1530,7 @@ static int cs35l45_force_int_get(struct snd_kcontrol *kcontrol,
+ static int cs35l45_force_int_put(struct snd_kcontrol *kcontrol,
+ 				 struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 = snd_soc_component_get_drvdata(component);
+ 	bool force_int_changed;
+ 	int ret = 0;
+@@ -1595,7 +1595,7 @@ out:
+ static int cs35l45_classh_en_get(struct snd_kcontrol *kcontrol,
+ 				 struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 = snd_soc_component_get_drvdata(component);
+ 
+ 	ucontrol->value.integer.value[0] = cs35l45->classh_tracking;
+@@ -1606,7 +1606,7 @@ static int cs35l45_classh_en_get(struct snd_kcontrol *kcontrol,
+ static int cs35l45_classh_en_put(struct snd_kcontrol *kcontrol,
+ 				 struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 = snd_soc_component_get_drvdata(component);
+ 	bool classh_tracking_changed;
+ 	int ret = 0;
+@@ -1717,7 +1717,7 @@ static int cs35l45_snd_soc_put_volsw_sx(struct snd_kcontrol *kcontrol,
+ 			 struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_component *component =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct cs35l45_private *cs35l45 =
+ 		snd_soc_component_get_drvdata(component);
+ 
+@@ -2515,10 +2515,10 @@ static int cs35l45_component_probe(struct snd_soc_component *component)
+ 	struct cs35l45_private *cs35l45 =
+ 			snd_soc_component_get_drvdata(component);
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(component);
++			snd_soc_component_to_dapm(component);
+ 	int ret;
+ 
+-	snd_soc_component_disable_pin(component, "DSP1");
++	snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), "DSP1");
+ 
+ 	snd_soc_dapm_sync(dapm);
+ 
+@@ -3407,7 +3407,7 @@ static int cs35l45_activate_ctl(struct cs35l45_private *cs35l45,
+ 	else
+ 		snprintf(name, SNDRV_CTL_ELEM_ID_NAME_MAXLEN, "%s", ctl_name);
+ 
+-	kcontrol = snd_soc_card_get_kcontrol_locked(component->card, name);
++	kcontrol = snd_soc_card_get_kcontrol(component->card, name);
+ 	if (!kcontrol) {
+ 		dev_err(cs35l45->dev, "Can't find kcontrol %s\n", name);
+ 		return -EINVAL;
+diff --git a/cs35l45/wm_adsp.c b/cs35l45/wm_adsp.c
+index 11295e8..51ce386 100644
+--- a/cs35l45/wm_adsp.c
++++ b/cs35l45/wm_adsp.c
+@@ -317,7 +317,7 @@ struct wm_coeff_ctl {
+ int wm_adsp_fw_get_v1(struct snd_kcontrol *kcontrol,
+ 		   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = snd_soc_component_get_drvdata(component);
+ 
+@@ -330,7 +330,7 @@ EXPORT_SYMBOL_GPL(wm_adsp_fw_get_v1);
+ int wm_adsp_fw_put_v1(struct snd_kcontrol *kcontrol,
+ 		   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = snd_soc_component_get_drvdata(component);
+ 	int ret = 1;
+@@ -697,7 +697,7 @@ int wm_adsp_write_ctl_v1(struct wm_adsp *dsp, const char *name, int type,
+ 		snprintf(ctl_name, SNDRV_CTL_ELEM_ID_NAME_MAXLEN, "%s",
+ 			 ctl->name);
+ 
+-	kcontrol = snd_soc_card_get_kcontrol_locked(dsp->component->card, ctl_name);
++	kcontrol = snd_soc_card_get_kcontrol(dsp->component->card, ctl_name);
+ 	if (!kcontrol) {
+ 		adsp_err(dsp, "Can't find kcontrol %s\n", ctl_name);
+ 		return -EINVAL;
+@@ -961,7 +961,7 @@ EXPORT_SYMBOL_GPL(wm_adsp2_set_dspclk_v1);
+ int wm_adsp2_preloader_get_v1(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct wm_adsp *dsps = snd_soc_component_get_drvdata(component);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+@@ -976,9 +976,9 @@ EXPORT_SYMBOL_GPL(wm_adsp2_preloader_get_v1);
+ int wm_adsp2_preloader_put_v1(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct wm_adsp *dsps = snd_soc_component_get_drvdata(component);
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = &dsps[mc->shift - 1];
+@@ -990,9 +990,9 @@ int wm_adsp2_preloader_put_v1(struct snd_kcontrol *kcontrol,
+ 	snprintf(preload, ARRAY_SIZE(preload), "%s Preload", dsp->cs_dsp.name);
+ 
+ 	if (ucontrol->value.integer.value[0] || dsp->toggle_preload)
+-		snd_soc_component_force_enable_pin(component, preload);
++		snd_soc_dapm_force_enable_pin(snd_soc_component_to_dapm(component), preload);
+ 	else
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 
+ 	snd_soc_dapm_sync(dapm);
+ 
+@@ -1001,7 +1001,7 @@ int wm_adsp2_preloader_put_v1(struct snd_kcontrol *kcontrol,
+ 	dsp->preloaded = ucontrol->value.integer.value[0];
+ 
+ 	if (dsp->toggle_preload) {
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 		snd_soc_dapm_sync(dapm);
+ 	}
+ 
+@@ -1107,7 +1107,7 @@ int wm_adsp2_component_probe_v1(struct wm_adsp *dsp, struct snd_soc_component *c
+ 	char preload[32];
+ 
+ 	snprintf(preload, ARRAY_SIZE(preload), "%s Preload", dsp->cs_dsp.name);
+-	snd_soc_component_disable_pin(component, preload);
++	snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 
+ 	cs_dsp_init_debugfs(&dsp->cs_dsp, component->debugfs_root);
+ 
+@@ -1218,22 +1218,22 @@ int wm_adsp_compr_open_v1(struct wm_adsp *dsp, struct snd_compr_stream *stream)
+ 
+ 	if (wm_adsp_fw[dsp->fw].num_caps == 0) {
+ 		adsp_err(dsp, "%s: Firmware does not support compressed API\n",
+-			 asoc_rtd_to_codec(rtd, 0)->name);
++			 snd_soc_rtd_to_codec(rtd, 0)->name);
+ 		ret = -ENXIO;
+ 		goto out;
+ 	}
+ 
+ 	if (wm_adsp_fw[dsp->fw].compr_direction != stream->direction) {
+ 		adsp_err(dsp, "%s: Firmware does not support stream direction\n",
+-			 asoc_rtd_to_codec(rtd, 0)->name);
++			 snd_soc_rtd_to_codec(rtd, 0)->name);
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+ 
+ 	list_for_each_entry(tmp, &dsp->compr_list, list) {
+-		if (!strcmp(tmp->name, asoc_rtd_to_codec(rtd, 0)->name)) {
++		if (!strcmp(tmp->name, snd_soc_rtd_to_codec(rtd, 0)->name)) {
+ 			adsp_err(dsp, "%s: Only a single stream supported per dai\n",
+-				 asoc_rtd_to_codec(rtd, 0)->name);
++				 snd_soc_rtd_to_codec(rtd, 0)->name);
+ 			ret = -EBUSY;
+ 			goto out;
+ 		}
+@@ -1247,7 +1247,7 @@ int wm_adsp_compr_open_v1(struct wm_adsp *dsp, struct snd_compr_stream *stream)
+ 
+ 	compr->dsp = dsp;
+ 	compr->stream = stream;
+-	compr->name = asoc_rtd_to_codec(rtd, 0)->name;
++	compr->name = snd_soc_rtd_to_codec(rtd, 0)->name;
+ 
+ 	list_add_tail(&compr->list, &dsp->compr_list);
+ 
+diff --git a/cs40l25/snd-soc-codec-cs40l2x.c b/cs40l25/snd-soc-codec-cs40l2x.c
+index 304ac46..84230a7 100644
+--- a/cs40l25/snd-soc-codec-cs40l2x.c
++++ b/cs40l25/snd-soc-codec-cs40l2x.c
+@@ -333,7 +333,7 @@ static int cs40l2x_pcm_ev(struct snd_soc_dapm_widget *w,
+ static int cs40l2x_vol_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 	struct regmap *regmap = priv->regmap;
+ 	struct device *dev = priv->dev;
+@@ -374,7 +374,7 @@ vol_get_err:
+ static int cs40l2x_vol_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 	struct regmap *regmap = priv->regmap;
+ 	struct device *dev = priv->dev;
+@@ -412,7 +412,7 @@ static int cs40l2x_vol_put(struct snd_kcontrol *kcontrol,
+ static int cs40l2x_tuning_get(struct snd_kcontrol *kcontrol,
+ 			      struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 
+ 	ucontrol->value.enumerated.item[0] = priv->tuning;
+@@ -423,7 +423,7 @@ static int cs40l2x_tuning_get(struct snd_kcontrol *kcontrol,
+ static int cs40l2x_tuning_put(struct snd_kcontrol *kcontrol,
+ 			      struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 	struct cs40l2x_private *core = priv->core;
+ 
+@@ -450,7 +450,7 @@ static int cs40l2x_tuning_put(struct snd_kcontrol *kcontrol,
+ static int cs40l2x_delay_get(struct snd_kcontrol *kcontrol,
+ 			     struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 	struct regmap *regmap = priv->regmap;
+ 	struct device *dev = priv->dev;
+@@ -483,7 +483,7 @@ static int cs40l2x_delay_get(struct snd_kcontrol *kcontrol,
+ static int cs40l2x_delay_put(struct snd_kcontrol *kcontrol,
+ 				 struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 	struct regmap *regmap = priv->regmap;
+ 	struct device *dev = priv->dev;
+@@ -517,7 +517,7 @@ static int cs40l2x_delay_put(struct snd_kcontrol *kcontrol,
+ static int cs40l2x_slots_get(struct snd_kcontrol *kcontrol,
+ 			     struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 
+ 	ucontrol->value.integer.value[0] = priv->rx1_slot;
+@@ -529,7 +529,7 @@ static int cs40l2x_slots_get(struct snd_kcontrol *kcontrol,
+ static int cs40l2x_slots_put(struct snd_kcontrol *kcontrol,
+ 				 struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
+ 	struct cs40l2x_codec *priv = snd_soc_component_get_drvdata(comp);
+ 
+ 	priv->rx1_slot = ucontrol->value.integer.value[0];
+@@ -615,7 +615,7 @@ static int cs40l2x_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+ 	unsigned int asp_fmt;
+ 
+ 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+-	case SND_SOC_DAIFMT_CBS_CFS:
++	case SND_SOC_DAIFMT_CBC_CFC:
+ 		break;
+ 	default:
+ 		dev_err(priv->dev, "This device can be slave only\n");
+diff --git a/cs40l26/cs40l26-codec.c b/cs40l26/cs40l26-codec.c
+index 0b76621..55285d5 100644
+--- a/cs40l26/cs40l26-codec.c
++++ b/cs40l26/cs40l26-codec.c
+@@ -278,7 +278,7 @@ err_mutex:
+ static int cs40l26_i2s_vmon_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	int error;
+ 	u32 val;
+@@ -311,7 +311,7 @@ static int cs40l26_dsp_bypass_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 
+ 	mutex_lock(&cs40l26->lock);
+@@ -330,7 +330,7 @@ static int cs40l26_dsp_bypass_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 
+ 	mutex_lock(&cs40l26->lock);
+@@ -348,7 +348,7 @@ static int cs40l26_dsp_bypass_put(struct snd_kcontrol *kcontrol,
+ static int cs40l26_svc_en_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	unsigned int algo_id, val = 0, reg;
+@@ -388,9 +388,9 @@ pm_err:
+ static int cs40l26_svc_en_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_to_dapm(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -429,7 +429,7 @@ static int cs40l26_invert_streaming_data_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	unsigned int algo_id, val = 0, reg;
+@@ -470,9 +470,9 @@ static int cs40l26_invert_streaming_data_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_to_dapm(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -509,7 +509,7 @@ pm_err:
+ static int cs40l26_tuning_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 
+ 	ucontrol->value.enumerated.item[0] = codec->tuning;
+ 
+@@ -519,7 +519,7 @@ static int cs40l26_tuning_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem
+ static int cs40l26_tuning_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 
+ 	if (ucontrol->value.enumerated.item[0] == codec->tuning)
+@@ -544,7 +544,7 @@ static int cs40l26_tuning_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem
+ static int cs40l26_a2h_level_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -577,9 +577,9 @@ pm_err:
+ static int cs40l26_a2h_level_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_to_dapm(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -618,7 +618,7 @@ static int cs40l26_a2h_level_put(struct snd_kcontrol *kcontrol, struct snd_ctl_e
+ static int cs40l26_i2s_atten_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -648,8 +648,8 @@ pm_err:
+ 
+ static int cs40l26_i2s_atten_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(comp);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(comp);
+ 	struct cs40l26_codec *codec = snd_soc_component_get_drvdata(comp);
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+@@ -688,7 +688,7 @@ static int cs40l26_slots_get(
+ 	struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec = snd_soc_component_get_drvdata(
+-		snd_soc_kcontrol_component(kcontrol));
++		snd_kcontrol_chip(kcontrol));
+ 
+ 	dev_dbg(codec->dev, "%s: 0: %ld->%d, 1: %ld->%d\n", __func__,
+ 		ucontrol->value.integer.value[0], codec->tdm_slot[0],
+@@ -704,7 +704,7 @@ static int cs40l26_slots_put(
+ 	struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec = snd_soc_component_get_drvdata(
+-		snd_soc_kcontrol_component(kcontrol));
++		snd_kcontrol_chip(kcontrol));
+ 
+ 	dev_dbg(codec->dev, "%s: 0: %d->%ld, 1: %d->%ld\n", __func__,
+ 		codec->tdm_slot[0], ucontrol->value.integer.value[0],
+@@ -719,7 +719,7 @@ static int cs40l26_slots_put(
+ static int cs40l26_a2h_delay_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -752,9 +752,9 @@ err:
+ static int cs40l26_a2h_delay_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_to_dapm(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	struct regmap *regmap = cs40l26->regmap;
+ 	struct device *dev = cs40l26->dev;
+@@ -794,7 +794,7 @@ static int cs40l26_boost_disable_delay_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+ 	struct cs40l26_codec *codec =
+-			snd_soc_component_get_drvdata(snd_soc_kcontrol_component(kcontrol));
++			snd_soc_component_get_drvdata(snd_kcontrol_chip(kcontrol));
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	u32 algo_id, delay, reg;
+ 	int error;
+@@ -827,8 +827,8 @@ pm_err:
+ static int cs40l26_boost_disable_delay_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(comp);
++	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(comp);
+ 	struct cs40l26_codec *codec = snd_soc_component_get_drvdata(comp);
+ 	struct cs40l26_private *cs40l26 = codec->core;
+ 	u32 algo_id, delay, reg;
+diff --git a/drv2624/drv2624.c b/drv2624/drv2624.c
+index 53ac6b9..1fa9c93 100644
+--- a/drv2624/drv2624.c
++++ b/drv2624/drv2624.c
+@@ -1087,7 +1087,7 @@ static ssize_t mode_store(struct device *dev,
+ 	unsigned char new_mode;
+ 
+ 	mode_name[sizeof(mode_name) - 1] = '\0';
+-	strlcpy(mode_name, buf, sizeof(mode_name) - 1);
++	strscpy(mode_name, buf, sizeof(mode_name) - 1);
+ 	len = strlen(mode_name);
+ 
+ 	if (len && mode_name[len - 1] == '\n')
+diff --git a/snd_soc_wm_adsp/wm_adsp.c b/snd_soc_wm_adsp/wm_adsp.c
+index 9156116..c2d146a 100644
+--- a/snd_soc_wm_adsp/wm_adsp.c
++++ b/snd_soc_wm_adsp/wm_adsp.c
+@@ -782,7 +782,7 @@ static inline void wm_adsp_debugfs_clear(struct wm_adsp *dsp)
+ int wm_adsp_fw_get(struct snd_kcontrol *kcontrol,
+ 		   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = snd_soc_component_get_drvdata(component);
+ 
+@@ -795,7 +795,7 @@ EXPORT_SYMBOL_GPL(wm_adsp_fw_get);
+ int wm_adsp_fw_put(struct snd_kcontrol *kcontrol,
+ 		   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = snd_soc_component_get_drvdata(component);
+ 	int ret = 0;
+@@ -2088,7 +2088,7 @@ int wm_adsp_write_ctl(struct wm_adsp *dsp, const char *name, int type,
+ 		snprintf(ctl_name, SNDRV_CTL_ELEM_ID_NAME_MAXLEN, "%s",
+ 			 ctl->name);
+ 
+-	kcontrol = snd_soc_card_get_kcontrol_locked(dsp->component->card, ctl_name);
++	kcontrol = snd_soc_card_get_kcontrol(dsp->component->card, ctl_name);
+ 	if (!kcontrol) {
+ 		adsp_err(dsp, "Can't find kcontrol %s\n", ctl_name);
+ 		return -EINVAL;
+@@ -3146,7 +3146,7 @@ EXPORT_SYMBOL_GPL(wm_adsp2_set_dspclk);
+ int wm_adsp2_preloader_get(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct wm_adsp *dsps = snd_soc_component_get_drvdata(component);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+@@ -3161,9 +3161,9 @@ EXPORT_SYMBOL_GPL(wm_adsp2_preloader_get);
+ int wm_adsp2_preloader_put(struct snd_kcontrol *kcontrol,
+ 			   struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct wm_adsp *dsps = snd_soc_component_get_drvdata(component);
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+ 	struct wm_adsp *dsp = &dsps[mc->shift - 1];
+@@ -3177,9 +3177,9 @@ int wm_adsp2_preloader_put(struct snd_kcontrol *kcontrol,
+ 			ucontrol->value.integer.value[0]);
+ 
+ 	if (ucontrol->value.integer.value[0] || dsp->toggle_preload)
+-		snd_soc_component_force_enable_pin(component, preload);
++		snd_soc_dapm_force_enable_pin(snd_soc_component_to_dapm(component), preload);
+ 	else
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 
+ 	snd_soc_dapm_sync(dapm);
+ 
+@@ -3188,7 +3188,7 @@ int wm_adsp2_preloader_put(struct snd_kcontrol *kcontrol,
+ 	dsp->preloaded = ucontrol->value.integer.value[0];
+ 
+ 	if (dsp->toggle_preload) {
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 		snd_soc_dapm_sync(dapm);
+ 	}
+ 
+@@ -3388,7 +3388,7 @@ int wm_adsp2_component_probe(struct wm_adsp *dsp, struct snd_soc_component *comp
+ 
+ 	//if (!dsp->no_preloader) {
+ 		snprintf(preload, ARRAY_SIZE(preload), "%s Preload", dsp->name);
+-		snd_soc_component_disable_pin(component, preload);
++		snd_soc_dapm_disable_pin(snd_soc_component_to_dapm(component), preload);
+ 	//}
+ 
+ 	wm_adsp2_init_debugfs(dsp, component);
+@@ -3527,22 +3527,22 @@ int wm_adsp_compr_open(struct wm_adsp *dsp, struct snd_compr_stream *stream)
+ 
+ 	if (wm_adsp_fw[dsp->fw].num_caps == 0) {
+ 		adsp_err(dsp, "%s: Firmware does not support compressed API\n",
+-			 asoc_rtd_to_codec(rtd, 0)->name);
++			 snd_soc_rtd_to_codec(rtd, 0)->name);
+ 		ret = -ENXIO;
+ 		goto out;
+ 	}
+ 
+ 	if (wm_adsp_fw[dsp->fw].compr_direction != stream->direction) {
+ 		adsp_err(dsp, "%s: Firmware does not support stream direction\n",
+-			 asoc_rtd_to_codec(rtd, 0)->name);
++			 snd_soc_rtd_to_codec(rtd, 0)->name);
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+ 
+ 	list_for_each_entry(tmp, &dsp->compr_list, list) {
+-		if (!strcmp(tmp->name, asoc_rtd_to_codec(rtd, 0)->name)) {
++		if (!strcmp(tmp->name, snd_soc_rtd_to_codec(rtd, 0)->name)) {
+ 			adsp_err(dsp, "%s: Only a single stream supported per dai\n",
+-				 asoc_rtd_to_codec(rtd, 0)->name);
++				 snd_soc_rtd_to_codec(rtd, 0)->name);
+ 			ret = -EBUSY;
+ 			goto out;
+ 		}
+@@ -3556,7 +3556,7 @@ int wm_adsp_compr_open(struct wm_adsp *dsp, struct snd_compr_stream *stream)
+ 
+ 	compr->dsp = dsp;
+ 	compr->stream = stream;
+-	compr->name = asoc_rtd_to_codec(rtd, 0)->name;
++	compr->name = snd_soc_rtd_to_codec(rtd, 0)->name;
+ 
+ 	list_add_tail(&compr->list, &dsp->compr_list);
+ 
+diff --git a/tas256x/os_layer/src/tas256x-codec.c b/tas256x/os_layer/src/tas256x-codec.c
+index a5ef0a9..67b3ba8 100644
+--- a/tas256x/os_layer/src/tas256x-codec.c
++++ b/tas256x/os_layer/src/tas256x-codec.c
+@@ -514,7 +514,7 @@ static int tas256x_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+ 
+ 	p_tas256x->mn_fmt = 1;
+ 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+-	case SND_SOC_DAIFMT_CBS_CFS:
++	case SND_SOC_DAIFMT_CBC_CFC:
+ 		asi_cfg_1 = 0x00;
+ 		asi_cfg_2 = 0x00;
+ 		break;
+@@ -702,7 +702,7 @@ static int tas256xiv_put(struct snd_kcontrol *kcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec
+-				= snd_soc_kcontrol_component(kcontrol);
++				= snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -739,7 +739,7 @@ static int tas256xiv_get(struct snd_kcontrol *kcontrol,
+ 				  struct snd_ctl_elem_value *ucontrol)
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -1042,7 +1042,7 @@ static int tas256x_info_profile(struct snd_kcontrol *kcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec
+-					= snd_soc_kcontrol_component(kcontrol);
++					= snd_kcontrol_chip(kcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+@@ -1069,7 +1069,7 @@ static int tas256x_get_profile_id(struct snd_kcontrol *kcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec
+-		= snd_soc_kcontrol_component(kcontrol);
++		= snd_kcontrol_chip(kcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+@@ -1091,7 +1091,7 @@ static int tas256x_set_profile_id(struct snd_kcontrol *kcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec
+-	  = snd_soc_kcontrol_component(kcontrol);
++	  = snd_kcontrol_chip(kcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+@@ -1296,7 +1296,7 @@ static int tas256x_codec_probe(struct snd_soc_component *codec)
+ 	struct linux_platform *plat_data =
+ 		(struct linux_platform *) p_tas256x->platform_data;
+ 	struct snd_soc_dapm_context *dapm =
+-			snd_soc_component_get_dapm(codec);
++			snd_soc_component_to_dapm(codec);
+ 
+ 	if (plat_data)
+ 		plat_data->codec = codec;
+@@ -1405,7 +1405,7 @@ static int tas256x_system_mute_ctrl_get(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec
+-					= snd_soc_kcontrol_component(pKcontrol);
++					= snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1426,7 +1426,7 @@ static int tas256x_system_mute_ctrl_put(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1449,7 +1449,7 @@ static int tas256x_mute_ctrl_get(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1477,7 +1477,7 @@ static int tas256x_mute_ctrl_put(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1505,7 +1505,7 @@ static int tas256x_dac_mute_ctrl_get(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	 struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1531,7 +1531,7 @@ static int tas256x_dac_mute_ctrl_put(struct snd_kcontrol *pKcontrol,
+ 	int i = 0, chnTemp = 0;
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1582,7 +1582,7 @@ static int tas256x_get_icn_switch(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1601,7 +1601,7 @@ static int tas256x_set_icn_switch(struct snd_kcontrol *pKcontrol,
+ 	int ret  = 0;
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1622,7 +1622,7 @@ static int tas256x_set_rx_slot_map_single(struct snd_kcontrol *pKcontrol,
+ 	int value = 0;
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1645,7 +1645,7 @@ static int tas256x_get_rx_slot_map_single(struct snd_kcontrol *pKcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(pKcontrol);
++		snd_kcontrol_chip(pKcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(pKcontrol);
+@@ -1698,7 +1698,7 @@ static int tas256x_get_rx_slot_map_multi(struct snd_kcontrol *kcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+@@ -1723,7 +1723,7 @@ static int tas256x_set_rx_slot_map_multi(struct snd_kcontrol *kcontrol,
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+ 	struct snd_soc_component *codec =
+-		snd_soc_kcontrol_component(kcontrol);
++		snd_kcontrol_chip(kcontrol);
+ 	struct tas256x_priv *p_tas256x = snd_soc_component_get_drvdata(codec);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+diff --git a/tas256x/os_layer/src/tas256x-regmap.c b/tas256x/os_layer/src/tas256x-regmap.c
+index 469b386..6670c4e 100644
+--- a/tas256x/os_layer/src/tas256x-regmap.c
++++ b/tas256x/os_layer/src/tas256x-regmap.c
+@@ -218,7 +218,7 @@ static int tas2564_put(struct snd_kcontrol *kcontrol,
+ 				  struct snd_ctl_elem_value *ucontrol)
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -260,7 +260,7 @@ static int tas2564_get(struct snd_kcontrol *kcontrol,
+ {
+ 	int ret = -1;
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -300,7 +300,7 @@ static int tas256x_put(struct snd_kcontrol *kcontrol,
+ 				  struct snd_ctl_elem_value *ucontrol)
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -421,7 +421,7 @@ static int tas256x_get(struct snd_kcontrol *kcontrol,
+ 				  struct snd_ctl_elem_value *ucontrol)
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -539,7 +539,7 @@ static int tas256x_enum_get(struct snd_kcontrol *kcontrol,
+ {
+ 	int ret = -1;
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+@@ -644,7 +644,7 @@ static int tas256x_enum_put(struct snd_kcontrol *kcontrol,
+ 				  struct snd_ctl_elem_value *ucontrol)
+ {
+ #if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ #else
+ 	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+ #endif
+diff --git a/tas25xx/src/tas25xx-codec.c b/tas25xx/src/tas25xx-codec.c
+index d954020..92d6e32 100644
+--- a/tas25xx/src/tas25xx-codec.c
++++ b/tas25xx/src/tas25xx-codec.c
+@@ -601,7 +601,7 @@ int tas25xx_start_fw_load(struct tas25xx_priv *p_tas25xx, int retry_count)
+ static int tas25xx_codec_probe(struct snd_soc_component *codec)
+ {
+ 	int ret = -1, i = 0;
+-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(codec);
++	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(codec);
+ 	struct tas25xx_priv *p_tas25xx = snd_soc_component_get_drvdata(codec);
+ 	struct linux_platform *plat_data =
+ 		(struct linux_platform *) p_tas25xx->platform_data;
+diff --git a/tas25xx/src/tas25xx-logic.c b/tas25xx/src/tas25xx-logic.c
+index 36d1b8c..ffed95d 100644
+--- a/tas25xx/src/tas25xx-logic.c
++++ b/tas25xx/src/tas25xx-logic.c
+@@ -161,8 +161,8 @@ int tas25xx_set_dai_fmt_for_fmt(struct tas25xx_priv *p_tas25xx, unsigned int fmt
+ 		(struct linux_platform *) p_tas25xx->platform_data;
+ 
+ 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+-	case SND_SOC_DAIFMT_CBS_CFS:
+-		dev_info(plat_data->dev, "SND_SOC_DAIFMT_CBS_CFS\n");
++	case SND_SOC_DAIFMT_CBC_CFC:
++		dev_info(plat_data->dev, "SND_SOC_DAIFMT_CBC_CFC\n");
+ 		break;
+ 	default:
+ 		dev_err(plat_data->dev, "ASI format mask is not found\n");
+diff --git a/tas25xx/src/tas25xx-regbin-parser.c b/tas25xx/src/tas25xx-regbin-parser.c
+index 7078681..7df63c6 100644
+--- a/tas25xx/src/tas25xx-regbin-parser.c
++++ b/tas25xx/src/tas25xx-regbin-parser.c
+@@ -326,7 +326,7 @@ EXIT:
+ static int32_t tas25xx_em_left_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct tas25xx_priv *p_tas25xx = snd_soc_component_get_drvdata(component);
+ 	struct soc_enum *soc_enum = (struct soc_enum *)kcontrol->private_value;
+ 	uint32_t reg;
+@@ -348,7 +348,7 @@ static int32_t tas25xx_em_left_get(struct snd_kcontrol *kcontrol,
+ static int32_t tas25xx_em_left_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct tas25xx_priv *p_tas25xx = snd_soc_component_get_drvdata(component);
+ 	struct soc_enum *soc_enum = (struct soc_enum *)kcontrol->private_value;
+ 	uint32_t reg;
+@@ -369,7 +369,7 @@ static int32_t tas25xx_em_left_put(struct snd_kcontrol *kcontrol,
+ static int32_t tas25xx_em_right_get(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct tas25xx_priv *p_tas25xx = snd_soc_component_get_drvdata(component);
+ 	struct soc_enum *soc_enum = (struct soc_enum *)kcontrol->private_value;
+ 	uint32_t reg;
+@@ -391,7 +391,7 @@ static int32_t tas25xx_em_right_get(struct snd_kcontrol *kcontrol,
+ static int32_t tas25xx_em_right_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+ 	struct tas25xx_priv *p_tas25xx = snd_soc_component_get_drvdata(component);
+ 	struct soc_enum *soc_enum = (struct soc_enum *)kcontrol->private_value;
+ 	uint32_t reg;
+@@ -1365,7 +1365,7 @@ static int32_t tas25xx_int_put_idx_value(struct tas25xx_priv *p_tas25xx,
+ static int32_t tas25xx_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+ 	struct tas25xx_priv *p_tas25xx = NULL;
+@@ -1464,7 +1464,7 @@ static int32_t tas25xx_enum_put_idx_value(struct tas25xx_priv *p_tas25xx,
+ static int32_t tas25xx_enum_put(struct snd_kcontrol *kcontrol,
+ 		struct snd_ctl_elem_value *ucontrol)
+ {
+-	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
++	struct snd_soc_component *codec = snd_kcontrol_chip(kcontrol);
+ 	struct soc_mixer_control *mc =
+ 		(struct soc_mixer_control *)kcontrol->private_value;
+ 	struct tas25xx_priv *p_tas25xx = NULL;
