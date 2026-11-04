@@ -71,6 +71,9 @@ KERNEL_SIGN_MODULES    := 1
 KERNEL_BASE_DEFCONFIG   = $(REPO)/kernel/kbuild/linus_gki_defconfig
 KERNEL_EXTRA_KCONFIGS  := kernel/kbuild/linus_Kconfig.gki
 KERNEL_GKI_MODULES     := kernel/kbuild/linus-gki-modules.txt
+# Not an ACK, so no -D__ANDROID_COMMON_KERNEL__ (vendor code picks the upstream
+# paths without it).
+KERNEL_KCFLAGS         :=
 # gs201_base then lynx, as device_build() layered them.
 KERNEL_DEFCONFIG_FRAGMENTS := \
 	private/devices/google/gs201/gs201_defconfig \

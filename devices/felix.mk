@@ -24,6 +24,8 @@ KERNEL_TREE            := aosp
 KERNEL_BASE_DEFCONFIG   = $(KTREE)/arch/arm64/configs/gki_defconfig
 KERNEL_EXTRA_KCONFIGS  :=
 KERNEL_GKI_MODULES     := kernel/kbuild/android14-6.1-gki-modules.txt
+# ACK's COMMON_KCFLAGS, which Kleaf built this kernel and its modules with.
+KERNEL_KCFLAGS         := -D__ANDROID_COMMON_KERNEL__
 # Modules stay unsigned, as with Kleaf (gs201_defconfig turns
 # CONFIG_MODULE_SIG_ALL off and the 6.1 GKI does not force signatures).
 KERNEL_SIGN_MODULES    := 0
