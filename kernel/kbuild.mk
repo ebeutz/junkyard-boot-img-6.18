@@ -197,8 +197,9 @@ define build_ddk
 		modules
 endef
 
-# make: the package's own Makefile, invoked the way Kleaf's kernel_module did
-# (it finds its deps' Module.symvers under COMMON_OUT_DIR itself).
+# make: the package's own Makefile, invoked the way Kleaf's kernel_module did:
+# its default goal (some name it `all`, some `modules`), and it finds its deps'
+# Module.symvers under COMMON_OUT_DIR itself.
 #
 # KCFLAGS is exported (empty) in the ENVIRONMENT, as Kleaf's kernel_env did.
 # These Makefiles add their include paths with `KCFLAGS += ...` (e.g.
@@ -210,8 +211,7 @@ endef
 define build_make
 	KCFLAGS= $(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ PAHOLE=$(PAHOLE) \
 		M=$(call ext_m,$(1)) O=$(KOUT) $(call ext_mo_arg,$(1)) KERNEL_SRC=$(KTREE) \
-		ROOT_DIR=$(SRC) COMMON_OUT_DIR=$(MOUT) OUT_DIR=$(KOUT) KERNEL_DIR=$(KERNEL_TREE) \
-		modules
+		ROOT_DIR=$(SRC) COMMON_OUT_DIR=$(MOUT) OUT_DIR=$(KOUT) KERNEL_DIR=$(KERNEL_TREE)
 endef
 
 define ext_module_rule
