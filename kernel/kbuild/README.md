@@ -45,6 +45,34 @@ objects, compile flags (as the compiler sees them), LINUXINCLUDE, and
 Module.symvers deps. The set of shipped modules matches too. `dtbo.img` from
 [tools/mkdtboimg.py](../../tools/mkdtboimg.py) is byte-identical to Kleaf's.
 
+## Where plain kbuild differs from Kleaf
+
+These are the places where reproducing Kleaf's environment mattered. Each one
+broke a module when it was missing:
+
+- **No sandbox.** Kleaf built each module with only its declared files
+  present, but a plain build sees the whole tree. edgetpu ships
+  `include/linux/*.h` stubs that `#error` if used. Its BUILD.bazel keeps them
+  out of the sandbox, but on `-I` they shadowed soc/gs's real headers, so its
+  patch deletes them. `bazel2kbuild.py` warns about every header on a DDK
+  module's own include path that nothing it uses declares.
+- **`KCFLAGS` in the environment.** Kleaf exported it, ACK's
+  `-D__ANDROID_COMMON_KERNEL__` for felix and empty for lynx
+  (`KERNEL_KCFLAGS`). Makefile-based modules add their includes with
+  `KCFLAGS +=`, and make hands that to kbuild only for an environment
+  variable.
+- **`PAHOLE` on the command line.** The kernel Makefile assigns it, which
+  beats the environment. It also has to be ≥ 1.27.
+- **`M` relative to the kernel tree** for Makefile-based modules (soc/gs
+  includes `$(KERNEL_SRC)/$(M)/Makefile.preinstall`). They also run with their
+  default goal, which is `all` for some of them.
+- **`MO=`** (a separate external-module output directory) exists upstream
+  since 6.13 but not in ACK 6.1. There, an external module built with a
+  relative `M` lands at `$(O)/$(M)`, which is still outside the source tree.
+- **Outs by basename.** A `kernel_module`'s declared outs may be bare
+  basenames, like trusty's for `drivers/trusty/*.ko`, so they are matched by
+  path suffix.
+
 ## Regenerating
 
 Run this after anything changes the vendor tree's BUILD files, such as moving
