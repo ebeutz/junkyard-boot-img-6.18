@@ -9,7 +9,8 @@ CONFIG_FW_LOADER_COMPRESS=y
 CONFIG_FW_LOADER_COMPRESS_ZSTD=y
 CONFIG_VHOST_NET=y
 # AUTOFS_FS, not the old AUTOFS4_FS: the latter was only a transitional alias and
-# is gone in 6.18 (kleaf then fails the build: fragment value not in .config).
+# is gone in 6.18 (the build then fails: tools/kconfig-check-fragments.sh
+# finds the fragment value missing from .config).
 # AUTOFS_FS is the real symbol on 6.1 too, so felix is unaffected.
 CONFIG_AUTOFS_FS=y
 CONFIG_NFS_FS=y
@@ -55,13 +56,10 @@ CONFIG_IP6_NF_NAT=y
 # the mainline track uses. NETCONSOLE_DYNAMIC allows retargeting at runtime via
 # configfs (the dongle MAC/IP changes between bench and datacenter).
 #
-# BUILT-IN (=y), not =m, deliberately. kleaf enforces an exact module manifest:
-# building it as a module fails the build with
-#   "The following kernel modules are built but not copied. Add these lines to
-#    the module_outs attribute of @//aosp:kernel_aarch64:
-#        drivers/net/netconsole.ko"
-# and that attribute lives in kernel/source/aosp/BUILD.bazel — the repo-managed
-# GKI tree, so an edit there is reverted by the next `repo sync`. Built-in
+# BUILT-IN (=y), not =m, deliberately. The build ships an in-tree module only
+# if it is on the GKI list (kernel/kbuild/*-gki-modules.txt) or the device's
+# KERNEL_VENDOR_INTREE_MODULES, as Kleaf's exact module manifest did. As =m,
+# netconsole.ko would be built and then left out of the image. Built-in
 # produces no .ko, so there is nothing to declare. NETCONSOLE_DYNAMIC still
 # gives runtime retargeting through /sys/kernel/config/netconsole, which is what
 # we need anyway since the dongle's MAC and the target IP differ between the

@@ -39,9 +39,8 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Reclaim space on the root volume. ubuntu-latest ships only ~14 GB free on
-      # / but a ~70 GB ephemeral disk at /mnt. The AOSP `repo sync` + Bazel build
-      # is tens of GB, and Bazel's output base lives under ~/.cache/bazel (on /),
-      # so a full kernel build exhausts / and the runner dies with
+      # / but a ~70 GB ephemeral disk at /mnt. The kernel checkout + build is
+      # tens of GB, so a full kernel build can exhaust / and the runner dies with
       # "No space left on device". Drop the preinstalled toolchains we never use
       # to buy back ~25-30 GB on /.
       # Only needed on GitHub-hosted runners - self-hosted machines aren't disk-constrained
@@ -66,8 +65,7 @@ jobs:
       # All file writes go to a temporary in-memory layer instead of hitting the disk directly.
       # The upper/work layers are placed on the large /mnt ephemeral disk (not /),
       # so the repo checkout and in-tree build outputs don't crowd the small root
-      # volume. (Bazel's own output base still lives under ~/.cache/bazel on /,
-      # which is why the cleanup step above is also required.)
+      # volume.
       # Only needed on GitHub-hosted runners - self-hosted machines have their own
       # persistent, appropriately-sized disk and don't need this workaround.
       - name: Mount volatile overlayfs for faster builds
@@ -111,7 +109,11 @@ jobs:
         run: |
           sudo rm -f /var/lib/man-db/auto-update
           sudo apt update
-          sudo eatmydata apt install -y repo kmod debootstrap systemd-container qemu-user-binfmt age
+          sudo eatmydata apt install -y repo kmod debootstrap systemd-container qemu-user-binfmt age \
+            flex bison bc cpio lz4 rsync libssl-dev libelf-dev libdw-dev dwarves
+      # NOTE: the kernel build (kernel/kbuild.mk) needs pahole >= 1.27 for BTF;
+      # ubuntu-24.04's dwarves is 1.25 and kbuild.mk refuses it. Supply a newer
+      # one (PAHOLE=/path/to/pahole) on a GitHub-hosted runner.
 
       # Compiles the kernel and prepares the module tree and source artifacts using
       # the `just` command runner. Two targets are invoked:
