@@ -19,9 +19,12 @@
 # "lynx-linus-mainline".
 #
 # What that changes here:
-#   * kernel release 7.3.0-linus-4k -> /lib/modules/7.3.0-linus-4k/.
+#   * kernel release 7.3.0-gc03c1a14507d-linus-4k (kleaf stamps common/'s SHA;
+#     a Linus tag is not an ACK release branch, so nothing suppresses it)
+#     -> /lib/modules/7.3.0-gc03c1a14507d-linus-4k/.
 #   * GKI module signing as on lynx-mainline (no MODULE_SIG_FORCE).
-#   * Built and passed modpost; NOT booted.
+#   * `make .build_kernel` passes from a pristine tree (build, version,
+#     module signing); NOT booted.
 #
 # ★ (lynx-mainline) GKI is AOSP kernel/common `android-mainline`, not 6.18.
 #

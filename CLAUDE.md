@@ -77,7 +77,7 @@ The shared `kernel/patches/aosp/0003` (kobject_uevent) still applies too. lynx-m
 - **Removed-upstream interfaces** (not ACK-specific): `strncpy()` (exact old semantics) and `trace_clock_set_rate()` (a no-op) come from the force-included `soc/google/linus-compat.h`. A single site is converted directly instead (`strscpy_pad`, `sched_set_fifo_low`).
 
 What is different downstream of that:
-- The kernel release is `7.3.0-linus-4k`, so `/lib/modules/7.3.0-linus-4k/`.
+- The kernel release is `7.3.0-gc03c1a14507d-linus-4k`, so `/lib/modules/7.3.0-gc03c1a14507d-linus-4k/`. kleaf stamps `common/`'s SHA, and moving the Linus tag changes it.
 - There is no KMI and no symbol list. `CONFIG_MODULE_SIG_FORCE` is off; `KERNEL_SIGN_MODULES=1` stays.
 - mac80211/cfg80211 are GKI modules.
 
@@ -86,7 +86,7 @@ From `lynx-mainline`, still true:
 - **Kbuild no longer honours `EXTRA_CFLAGS`.** mali passed every `-DCONFIG_MALI_*` that way and kept "building" with all of them compiled out.
 - **kleaf's DDK config step** needs `kernel/patches-lynx/build/kernel/0001`, so a Kconfig the inherited `Kconfig.ext` already sources is not sourced twice. That patch was missing from `lynx-mainline`: the Android template's unanchored `build/` in `.gitignore` swallowed `kernel/patches-lynx/build/`. `.gitignore` now un-ignores it.
 
-It builds and passes modpost to a full `lynx/dist`. It has not been booted. Disk: 30 GB free is enough. `clone_kernel_source` fetches first (`repo sync -n`), then [tools/sparse-prebuilts.sh](tools/sparse-prebuilts.sh) restricts the clang and rust prebuilt checkouts to the one release used (`KERNEL_CLANG_VERSION` / `KERNEL_RUSTC_VERSION` in `devices/lynx.mk`), and only then checks out. A plain `repo sync` checks out all six clang and four rust releases, and that filled a 40 GB host before the build started. Do not pass `--config=local` on a small disk: its per-module caches cost 15 GB+, and plain sandboxed builds work.
+`make .build_kernel DEVICE=lynx` passes from a pristine tree: patches apply, `tools/kernel-drift.sh` reports clean, `lynx/dist` builds through modpost and the initramfs depmod, and 343 modules are signed. It has not been booted. `crc8.ko` is a device-built in-tree module listed first in `vendor_ramdisk.modules.gs201`, because Linus' GKI does not build CRC8 in and the GBMS modules load from the ramdisk. Disk: 30 GB free is enough. `clone_kernel_source` fetches first (`repo sync -n`), then [tools/sparse-prebuilts.sh](tools/sparse-prebuilts.sh) restricts the clang and rust prebuilt checkouts to the one release used (`KERNEL_CLANG_VERSION` / `KERNEL_RUSTC_VERSION` in `devices/lynx.mk`), and only then checks out. A plain `repo sync` checks out all six clang and four rust releases, and that filled a 40 GB host before the build started. Do not pass `--config=local` on a small disk: its per-module caches cost 15 GB+, and plain sandboxed builds work.
 
 The kernel version string is derived from the module staging archive and written to `kernel/kernel_version.<device>`. That file drives all the `/lib/modules/<ver>/` paths, so the kernel must be rebuilt whenever the branch or version changes and every downstream rootfs target depends on that value being current.
 
