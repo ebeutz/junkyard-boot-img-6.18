@@ -87,7 +87,7 @@ How the Kleaf model maps onto one make build (details in the kbuild.mk header):
 - **Removed-upstream interfaces** (not ACK-specific): `strncpy()` (exact old semantics) and `trace_clock_set_rate()` (a no-op) come from the force-included `soc/google/linus-compat.h`. Where only one site uses an interface, it is converted directly instead (`strscpy_pad`, `sched_set_fifo_low`).
 
 What is different downstream of that:
-- The kernel release is `7.3.0-linus-4k` plus setlocalversion's `-g<sha>` of `common/` (see `kernel/kernel_version.lynx`), and the `/lib/modules/` path follows it.
+- The kernel release is `7.3.0-linus-4k`, so `/lib/modules/7.3.0-linus-4k/`. `common/` is checked out exactly at the tag, so setlocalversion adds nothing (Kleaf's stamping used to append `-g<sha>`). A `-dirty` suffix means uncommitted kernel work, as `.apply_kernel_patches` explains.
 - There is no KMI and no symbol list. `CONFIG_MODULE_SIG_FORCE` is off, and `KERNEL_SIGN_MODULES=1` stays.
 - mac80211/cfg80211 are GKI modules.
 - `CONFIG_RUST` is off in `kernel/kbuild/linus_gki_defconfig`, along with AOSP's two Rust users (Rust binder, the Rust firmware-loader abstractions). No vendor module is Rust and the Debian userspace has no binder, so keeping it would only add a pinned rustc + bindgen.

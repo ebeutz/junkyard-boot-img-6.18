@@ -21,8 +21,8 @@
 # "lynx-linus-mainline".
 #
 # What that changes here:
-#   * kernel release 7.3.0-linus-4k plus setlocalversion's -g<sha> of common/
-#     (kernel/kernel_version.lynx) -> /lib/modules/<that>/.
+#   * kernel release 7.3.0-linus-4k -> /lib/modules/7.3.0-linus-4k/ (common/
+#     is at the tag exactly, so setlocalversion adds no -g<sha>).
 #   * No KMI, no symbol lists, no MODULE_SIG_FORCE; modules are signed anyway
 #     (KERNEL_SIGN_MODULES below).
 #   * NOT booted.
