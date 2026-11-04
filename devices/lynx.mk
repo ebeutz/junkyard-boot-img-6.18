@@ -3,7 +3,27 @@
 # Same SoC as felix — only these board values differ. Included by the Makefile
 # via `include devices/$(DEVICE).mk`; a command-line `make VAR=val` overrides.
 
-# ★ BRANCH lynx-mainline: GKI is AOSP kernel/common `android-mainline`, not 6.18.
+# ★ BRANCH lynx-linus-mainline: the "GKI" is Linus Torvalds' tree, not an ACK.
+#
+# Same layout as lynx-mainline (below), but kernel/local-manifests/lynx.xml puts
+# git.kernel.org torvalds/linux.git at common/, at the upstream tag AOSP
+# android-mainline was last rebased onto (v7.3 at the pin). kleaf, clang r596125
+# and rust 1.96.0 stay at the same AOSP superproject pin.
+#
+# Patches to the Linux tree are kept to build plumbing (kernel/patches-lynx/common/:
+# kleaf's BUILD/defconfig glue, the kbuild hooks kleaf's mixed build needs, one
+# Kconfig dependency for the Samsung UART). Everything the vendor modules took
+# from ACK -- vendor hooks, ~40 extra exports, ACK-only headers and struct
+# fields -- is handled in the modules: ported to the upstream equivalent, rebuilt
+# from exported API, or compiled out. See kernel/patches/README.md,
+# "lynx-linus-mainline".
+#
+# What that changes here:
+#   * kernel release 7.3.0-linus-4k -> /lib/modules/7.3.0-linus-4k/.
+#   * GKI module signing as on lynx-mainline (no MODULE_SIG_FORCE).
+#   * Built and passed modpost; NOT booted.
+#
+# ★ (lynx-mainline) GKI is AOSP kernel/common `android-mainline`, not 6.18.
 #
 # The device/module side is still GrapheneOS's kernel_pixel_6.18 monorepo
 # (below, pinned by kernel/kernel-source.lynx.rev), but
@@ -54,6 +74,11 @@
 #     its flat dist/*.ko after the fact). KERNEL_SIGN_MODULES=1 makes .build_kernel
 #     do the same to the staging archives we install, or no vendor module loads.
 KERNEL_SOURCE_KIND  := grapheneos
+# The one clang / rustc release the kernel builds with (common/bazel/constants.scl,
+# from kernel/patches-lynx/common/). clone_kernel_source checks out only these from
+# the prebuilt repos, which carry every release side by side (tools/sparse-prebuilts.sh).
+KERNEL_CLANG_VERSION := r596125
+KERNEL_RUSTC_VERSION := 1.96.0
 KERNEL_REPO_URL     := https://gitlab.com/grapheneos/kernel_pixel_6.18
 KERNEL_BRANCH       := 17-muzel
 BAZEL_CONFIG        := lynx

@@ -1,0 +1,265 @@
+From: junkyard
+Subject: [PATCH] kbuild: the hooks kleaf's mixed build relies on
+
+Build-system only; no kernel code. These are the exact hunks AOSP
+android-mainline carries for kleaf, and nothing else from those files:
+
+  Kconfig, init/Kconfig     source $(KCONFIG_EXT_PREFIX)Kconfig.ext (how the
+                            device build adds the vendor Kconfig tree) and
+                            init/Kconfig.gki.
+  Makefile                  KBUILD_MIXED_TREE: build the device kernel's
+                            modules against the GKI's vmlinux.symvers and
+                            System.map instead of a vmlinux of their own;
+                            `dtstree ?=` so kleaf can point dtbs at the
+                            out-of-tree gs201 device tree; a
+                            headers_install target for M= builds, which
+                            kleaf runs for every external module.
+  scripts/Makefile.modpost  use the base build's vmlinux.symvers in a mixed
+                            build.
+  scripts/Makefile.modinst  install modules.order.<hash> for each external
+                            module, which kleaf collects to order the dist.
+  scripts/Makefile.dtbs     DTC_INCLUDE += instead of :=, so the device build
+                            can add the vendor dt-bindings include path.
+  scripts/headers_install.sh
+                            run unifdef from $(objtree), as kleaf installs
+                            headers from outside the object directory.
+  kernel/gen_kheaders.sh    tar --dereference: kleaf's sandbox is symlinks,
+                            which kheaders.ko would otherwise archive as
+                            dangling links.
+---
+diff --git a/Kconfig b/Kconfig
+index 307e58114..d051645b8 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -32,3 +32,6 @@ source "lib/Kconfig.debug"
+ source "Documentation/Kconfig"
+ 
+ source "io_uring/Kconfig"
++
++# ANDROID: Set KCONFIG_EXT_PREFIX to decend into an external project.
++source "$(KCONFIG_EXT_PREFIX)Kconfig.ext"
+diff --git a/Makefile b/Makefile
+index c61ea07ee..4b9972060 100644
+--- a/Makefile
++++ b/Makefile
+@@ -151,6 +151,19 @@ endif
+ 
+ export KBUILD_EXTMOD
+ 
++# ANDROID: set up mixed-build support. mixed-build allows device kernel modules
++# to be compiled against a GKI kernel. This approach still uses the headers and
++# Kbuild from device kernel, so care must be taken to ensure that those headers match.
++ifdef KBUILD_MIXED_TREE
++# Need vmlinux.symvers for modpost and System.map for depmod, check whether they exist in KBUILD_MIXED_TREE
++required_mixed_files=vmlinux.symvers System.map
++$(if $(filter-out $(words $(required_mixed_files)), \
++		$(words $(wildcard $(add-prefix $(KBUILD_MIXED_TREE)/,$(required_mixed_files))))),,\
++	$(error KBUILD_MIXED_TREE=$(KBUILD_MIXED_TREE) doesn't contain $(required_mixed_files)))
++endif
++
++export KBUILD_MIXED_TREE
++
+ ifeq ("$(origin W)", "command line")
+   KBUILD_EXTRA_WARN := $(W)
+ endif
+@@ -829,11 +842,13 @@ drivers-y	:=
+ libs-y		:= lib/
+ endif # KBUILD_EXTMOD
+ 
++ifndef KBUILD_MIXED_TREE
+ # The all: target is the default when no target is given on the
+ # command line.
+ # This allow a user to issue only 'make' to build a kernel including modules
+ # Defaults to vmlinux, but the arch makefile usually adds further targets
+ all: vmlinux
++endif
+ 
+ # The arch Makefiles can override CC_FLAGS_FTRACE. We may also append it later.
+ ifdef CONFIG_FUNCTION_TRACER
+@@ -1363,6 +1378,7 @@ vmlinux_a: $(KBUILD_VMLINUX_OBJS) scripts/head-object-list.txt FORCE
+ vmlinux.a: vmlinux_a
+ 	@:
+ 
++ifndef KBUILD_MIXED_TREE
+ PHONY += vmlinux_o
+ vmlinux_o: vmlinux.a $(KBUILD_VMLINUX_LIBS)
+ 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.vmlinux_o
+@@ -1385,6 +1401,7 @@ vmlinux: private _LDFLAGS_vmlinux := $(LDFLAGS_vmlinux)
+ vmlinux: export LDFLAGS_vmlinux = $(_LDFLAGS_vmlinux)
+ vmlinux: vmlinux.o $(KBUILD_LDS) modpost
+ 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.vmlinux
++endif
+ 
+ # The actual objects are generated when descending,
+ # make sure no implicit rule kicks in
+@@ -1652,7 +1669,9 @@ kselftest-merge:
+ # Devicetree files
+ 
+ ifneq ($(wildcard $(srctree)/arch/$(SRCARCH)/boot/dts/),)
+-dtstree := arch/$(SRCARCH)/boot/dts
++# ANDROID: allow this to be overridden by the build environment. This allows
++# one to compile a device tree that is located out-of-tree.
++dtstree ?= arch/$(SRCARCH)/boot/dts
+ endif
+ 
+ dtbindingtree := Documentation/devicetree/bindings
+@@ -2124,6 +2143,29 @@ __external_modules_error:
+ 	@false
+ endif
+ 
++# ---------------------------------------------------------------------------
++# Kernel headers from External Modules
++
++#Default location for installed headers
++export INSTALL_HDR_PATH = $(objtree)/usr
++
++quiet_cmd_headers_install = INSTALL $(INSTALL_HDR_PATH)/include
++      cmd_headers_install = \
++	mkdir -p $(INSTALL_HDR_PATH); \
++	rsync -mrl --include='*/' --include='*\.h' --exclude='*' \
++	usr/include $(INSTALL_HDR_PATH);
++
++PHONY += headers_install
++headers_install: headers
++	$(call cmd,headers_install)
++
++hdr-inst := -f $(srctree)/scripts/Makefile.headersinst obj
++
++PHONY += headers
++headers:
++	$(Q)$(MAKE) $(hdr-inst)=include/uapi
++	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi
++
+ endif # KBUILD_EXTMOD
+ 
+ # ---------------------------------------------------------------------------
+@@ -2174,7 +2216,9 @@ KBUILD_MODULES :=
+ endif # CONFIG_MODULES
+ 
+ PHONY += modpost
+-modpost: $(if $(single-build),, $(if $(KBUILD_BUILTIN), vmlinux.o)) \
++modpost: $(if $(single-build),, $(if $(KBUILD_EXTMOD),, \
++	 $(if $(KBUILD_MIXED_TREE), vmlinux.symvers, \
++	 $(if $(KBUILD_BUILTIN), vmlinux.o)))) \
+ 	 $(if $(KBUILD_MODULES), modules_check)
+ 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
+ 
+@@ -2226,7 +2270,7 @@ prepare: outputmakefile
+ # Error messages still appears in the original language
+ PHONY += $(build-dir)
+ $(build-dir): prepare
+-	$(Q)$(MAKE) $(build)=$@ need-builtin=1 need-modorder=1 $(single-goals)
++	$(Q)$(MAKE) $(build)=$@ $(if $(KBUILD_MIXED_TREE),,need-builtin=1) need-modorder=1 $(single-goals)
+ 
+ clean-dirs := $(addprefix _clean_, $(clean-dirs))
+ PHONY += $(clean-dirs) clean
+diff --git a/init/Kconfig b/init/Kconfig
+index ad592fdf2..ed468919a 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -2366,3 +2366,5 @@ config ARCH_HAS_SYNC_CORE_BEFORE_USERMODE
+ # <asm/syscall_wrapper.h>.
+ config ARCH_HAS_SYSCALL_WRAPPER
+ 	def_bool n
++
++source "init/Kconfig.gki"
+diff --git a/kernel/gen_kheaders.sh b/kernel/gen_kheaders.sh
+index 896a503df..34a4cfac8 100755
+--- a/kernel/gen_kheaders.sh
++++ b/kernel/gen_kheaders.sh
+@@ -30,8 +30,8 @@ rm -rf "${tmpdir}"
+ mkdir "${tmpdir}"
+ 
+ # shellcheck disable=SC2154 # srctree is passed as an env variable
+-sed "s:^${srctree}/::" "${srclist}" | ${TAR} -c -f - -C "${srctree}" -T - | ${TAR} -xf - -C "${tmpdir}"
+-${TAR} -c -f - -T "${objlist}" | ${TAR} -xf - -C "${tmpdir}"
++sed "s:^${srctree}/::" "${srclist}" | ${TAR} -c --dereference -f - -C "${srctree}" -T - | ${TAR} -xf - -C "${tmpdir}"
++${TAR} -c --dereference -f - -T "${objlist}" | ${TAR} -xf - -C "${tmpdir}"
+ 
+ # Remove comments except SDPX lines
+ # Use a temporary file to store directory contents to prevent find/xargs from
+diff --git a/scripts/Makefile.dtbs b/scripts/Makefile.dtbs
+index c4e466390..2583819f8 100644
+--- a/scripts/Makefile.dtbs
++++ b/scripts/Makefile.dtbs
+@@ -122,9 +122,11 @@ DTC_FLAGS += $(DTC_FLAGS_$(target-stem))
+ # Set -@ if the target is a base DTB that overlay is applied onto
+ DTC_FLAGS += $(if $(filter $(patsubst $(obj)/%,%,$@), $(base-dtb-y)), -@)
+ 
+-DTC_INCLUDE := $(srctree)/scripts/dtc/include-prefixes
++# ANDROID: Allow DTC_INCLUDE to be set by the BUILD_CONFIG. This allows one to
++# compile an out-of-tree device tree.
++DTC_INCLUDE += $(srctree)/scripts/dtc/include-prefixes
+ 
+-dtc_cpp_flags = -Wp,-MMD,$(depfile).pre.tmp -nostdinc -I $(DTC_INCLUDE) -undef -D__DTS__
++dtc_cpp_flags = -Wp,-MMD,$(depfile).pre.tmp -nostdinc $(addprefix -I,$(DTC_INCLUDE)) -undef -D__DTS__
+ 
+ dtc-tmp = $(subst $(comma),_,$(dot-target).dts.tmp)
+ 
+diff --git a/scripts/Makefile.modinst b/scripts/Makefile.modinst
+index 9ba45e5b3..11b3b7f64 100644
+--- a/scripts/Makefile.modinst
++++ b/scripts/Makefile.modinst
+@@ -60,6 +60,10 @@ suffix-$(CONFIG_MODULE_COMPRESS_ZSTD)	:= .zst
+ endif
+ 
+ modules := $(patsubst %.o, $(dst)/%.ko$(suffix-y), $(modules))
++ifneq ($(KBUILD_EXTMOD),)
++extmod_suffix := $(shell echo "${KBUILD_EXTMOD}" | md5sum | cut -d " " -f 1)
++modules += $(dst)/modules.order.$(extmod_suffix)
++endif
+ install-$(CONFIG_MODULES) += $(modules)
+ 
+ __modinst: $(install-y)
+@@ -124,6 +128,13 @@ $(dst)/%.ko: %.ko FORCE
+ 	$(call cmd,strip)
+ 	$(call cmd,sign)
+ 
++ifneq ($(KBUILD_EXTMOD),)
++$(dst)/modules.order.$(extmod_suffix): modules.order FORCE
++	$(call cmd,install)
++	@sed -e 's:^\(.*\)\.o$$:$(INSTALL_MOD_DIR)/\1.ko:' \
++	     -i $@
++endif
++
+ ifdef CONFIG_MODULES
+ __modinst: depmod
+ 
+diff --git a/scripts/Makefile.modpost b/scripts/Makefile.modpost
+index d7d45067d..9d6693d38 100644
+--- a/scripts/Makefile.modpost
++++ b/scripts/Makefile.modpost
+@@ -102,8 +102,20 @@ modpost-deps += $(ksym-wl)
+ endif
+ 
+ ifeq ($(wildcard vmlinux.o),)
++
++# ANDROID: Use vmlinux.symvers from base build when doing mixed build
++ifneq ($(wildcard vmlinux.symvers),)
++modpost-args += -i vmlinux.symvers
++# Not adding vmlinux.symvers to modpost-deps to avoid dependency on
++#   .vmlinux.objs. Just use the one from base build.
++# Note: we don't want to include the vmlinux symbols here because we want to be
++# sure we only use the vmlinux symbols from the GKI kernel.
++output-symdump := modules-only.symvers
++else # vmlinux.symvers does not exist
+ missing-input := vmlinux.o
+ output-symdump := modules-only.symvers
++endif # whether vmlinux.symvers exists
++
+ else
+ modpost-args += vmlinux.o
+ modpost-deps += vmlinux.o
+diff --git a/scripts/headers_install.sh b/scripts/headers_install.sh
+index 2f1d1767c..85c452f5b 100755
+--- a/scripts/headers_install.sh
++++ b/scripts/headers_install.sh
+@@ -39,7 +39,7 @@ sed -E -e '
+ 	s/__ASSEMBLY__/__ASSEMBLER__/g
+ ' $INFILE > $TMPFILE || exit 1
+ 
+-scripts/unifdef -U__KERNEL__ -D__EXPORTED_HEADERS__ $TMPFILE > $OUTFILE
++${objtree}/scripts/unifdef -U__KERNEL__ -D__EXPORTED_HEADERS__ $TMPFILE > $OUTFILE
+ [ $? -gt 1 ] && exit 1
+ 
+ # Remove /* ... */ style comments, and find CONFIG_ references in code
