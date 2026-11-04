@@ -29,7 +29,7 @@
       #
       # ★ This belongs in buildToolsFor, NOT in devShells.default alone. It lived
       # there, and buildToolsFor is the list that BOTH other entry points use — the
-      # `nix run .#build` app and the bazel FHS env. So the one-command build ran an
+      # `nix run .#build` app and the kernel FHS env. So the one-command build ran an
       # hour of kernel, then died several stages later on a bare
       # "sh: line 2: cargo: not found", while `nix develop` built the same tree
       # fine. It only surfaces when a pixel-* submodule gitlink moves and
@@ -66,15 +66,16 @@
         openssh             # ssh/scp for flash-ssh.sh
         nmap                # host discovery for flash-nmap.sh
 
-        # --- kernel build deps (mainline kbuild + AOSP/kleaf host tools) ---
-        python3             # kleaf's cache_dir_config_tags etc. bootstrap via `/usr/bin/env python3`
-        perl                # kleaf hermetic-tools host_tools = [bash perl rsync sh]
+        # --- kernel build deps (kbuild host tools; kernel/kbuild.mk) ---
+        python3             # tools/bazel2kbuild.py, mkdtboimg.py, modules-load-lists.py
+        perl
         bc
         bison
         flex
         openssl
         (pkgs.lib.getDev openssl)
-        elfutils
+        elfutils            # libelf (resolve_btfids), libdw (gendwarfksyms)
+        pahole              # CONFIG_DEBUG_INFO_BTF
         ncurses             # nconfig (just config_kernel)
         pkg-config
         cpio
@@ -88,29 +89,37 @@
         (rustToolchainFor pkgs)
       ];
 
-      # AOSP / Bazel track (`main`, `feature/btrfs-root`): the vendored
-      # kernel/source/tools/bazel downloads hermetic prebuilt toolchains and
-      # kleaf py_binaries that expect a standard FHS layout (/usr/bin/python3,
-      # /lib64/ld-linux, ...), which a plain nix shell does not provide. This FHS
-      # env supplies those so the Bazel build's sandboxed actions resolve.
+      # The kernel builds with the clang the kernel tree pins
+      # (kernel/source-<device>/prebuilts/clang/host/linux-x86/clang-<ver>, see
+      # KERNEL_CLANG_VERSION), an AOSP prebuilt for generic Linux: it needs
+      # /lib64/ld-linux-x86-64.so.2, and as HOSTCC it compiles kbuild's host
+      # programs against headers and libraries in the usual FHS places
+      # (/usr/include/openssl, libelf, libdw, ...). A plain nix shell has neither,
+      # so the kernel stage runs in this FHS env. (It used to exist for Kleaf's
+      # Bazel, which is gone; the prebuilt clang is why it stays.)
       fhsFor = pkgs: pkgs.buildFHSEnv {
-        name = "felix-bazel-fhs";
+        name = "junkyard-kernel-fhs";
         targetPkgs = p: (buildToolsFor p) ++ (with p; [
           coreutils which gnutar gzip xz zip unzip file diffutils
           gcc binutils zlib
+          # Headers for kbuild's host programs (sign-file, extract-cert,
+          # resolve_btfids, gendwarfksyms, kconfig's nconfig).
+          (lib.getDev openssl) (lib.getDev elfutils) (lib.getDev zlib)
+          (lib.getDev ncurses) (lib.getDev zstd)
         ]);
         runScript = "bash";
         profile = ''
           export ARCH=arm64
-          echo "gs201 AOSP/Bazel FHS shell — run 'just device=<dev> build_kernel' here (then 'just <dev>' in the default shell)"
+          echo "gs201 kernel FHS shell — run 'just device=<dev> build_kernel' here (then 'just <dev>' in the default shell)"
         '';
       };
     in
     {
       devShells = eachSystem (pkgs:
         let
-          # aarch64 Linux cross toolchain for the *mainline* kbuild path
-          # (the AOSP/Bazel path brings its own hermetic toolchain).
+          # aarch64 Linux cross toolchain for the *mainline* kbuild track
+          # (feature/linux-kernel). This branch's kernels use the tree's own
+          # prebuilt clang (LLVM=), so they do not need it.
           crossCC = pkgs.pkgsCross.aarch64-multiplatform.stdenv.cc;
           crossPrefix = crossCC.targetPrefix; # "aarch64-unknown-linux-gnu-"
           # (rustToolchainFor now lives in buildToolsFor — see the note there for
@@ -131,8 +140,8 @@
               echo "    nix run .#build                  every device"
               echo "    nix run .#build -- felix         one device"
               echo "    nix run .#build -- lynx"
-              echo "Kernel alone (kleaf needs the FHS env):"
-              echo "    nix run .#bazel-fhs -- -c 'just device=<dev> build_kernel'"
+              echo "Kernel alone (the tree's prebuilt clang needs the FHS env):"
+              echo "    nix run .#kernel-fhs -- -c 'just device=<dev> build_kernel'"
               echo
               echo "NOTE — system-level prerequisites a flake CANNOT provide (set in your NixOS host / krg-nixos-flakes):"
               echo "  • binfmt for foreign-arch debootstrap:  boot.binfmt.emulatedSystems = [ \"aarch64-linux\" ];"
@@ -141,23 +150,21 @@
             '';
           };
 
-          # Interactive FHS shell for the AOSP/Bazel kernel build:
-          #   nix develop .#bazel   then   just build_kernel
-          bazel = (fhsFor pkgs).env;
+          # Interactive FHS shell for the kernel build:
+          #   nix develop .#kernel   then   just device=<dev> build_kernel
+          kernel = (fhsFor pkgs).env;
         });
 
-      # Scriptable/non-interactive FHS entry for the AOSP/Bazel build:
-      #   nix run .#bazel-fhs -- -c 'just build_kernel'
-      #   nix run .#bazel-fhs                       (drops into an FHS bash)
+      # Scriptable/non-interactive FHS entry for the kernel build:
+      #   nix run .#kernel-fhs -- -c 'just device=<dev> build_kernel'
+      #   nix run .#kernel-fhs                       (drops into an FHS bash)
       packages = eachSystem (pkgs: {
-        bazel-fhs = fhsFor pkgs;
+        kernel-fhs = fhsFor pkgs;
       });
 
       # One-command NixOS build. Nix lives ONLY here, so the Makefile/justfile stay
       # portable (non-Nix hosts still build with a plain `just <device>`). The kernel build
-      # runs in the FHS env — kleaf execs /bin/bash and /usr/bin/env python3 with a
-      # sanitized PATH, and only real FHS files satisfy that (envfs resolves on exec
-      # but not on the stat() that `env`/bash do, so python3 isn't found). Everything
+      # runs in the FHS env, for the tree's prebuilt clang (see fhsFor). Everything
       # else runs in the normal env where sudo works. Run from an external,
       # sudo-capable terminal (VSCode terminals block sudo):  nix run .#build
       apps = eachSystem (pkgs:
@@ -178,11 +185,11 @@
           # The loop is per-device rather than one `just all`, because phase 1 can
           # only put ONE device's kernel through the FHS env; `just all` inside it
           # would run the other device's kernel build in phase 2's normal env,
-          # where kleaf cannot work.
+          # where the prebuilt clang cannot run.
           devices = [ "felix" "lynx" ];
           junkyard-build = pkgs.writeShellApplication {
             name = "junkyard-build";
-            runtimeInputs = buildToolsFor pkgs ++ [ pkgs.procps ];
+            runtimeInputs = buildToolsFor pkgs;
             text = ''
               ALL_DEVICES="${pkgs.lib.concatStringsSep " " devices}"
               if [ "$#" -gt 0 ]; then
@@ -198,16 +205,8 @@
               fi
               echo "[junkyard-build] building:$(for d in $TARGETS; do printf ' %s' "$d"; done)"
               for DEVICE in $TARGETS; do
-                echo "[junkyard-build] $DEVICE 1/2 — kernel build in FHS env (kleaf needs real /bin/bash + /usr/bin/python3)"
-                # A bazel server started outside the FHS env (e.g. a prior plain
-                # `just felix`) persists and runs actions in the non-FHS mount
-                # namespace, so an FHS build reuses it and fails
-                # `execvp(/bin/bash): No such file`. `bazel shutdown` from inside
-                # FHS doesn't reliably reach it, so kill this repo's bazel server
-                # here (host ns) to force a fresh one inside FHS. Harmless if none
-                # is running. Per-device path — trees are kernel/source-<device>/.
-                pkill -f "$PWD/kernel/source-$DEVICE/out/bazel" 2>/dev/null || true
-                "${fhs}/bin/felix-bazel-fhs" -c "just device=$DEVICE build_kernel"
+                echo "[junkyard-build] $DEVICE 1/2 — kernel build in FHS env (the tree's prebuilt clang)"
+                "${fhs}/bin/junkyard-kernel-fhs" -c "just device=$DEVICE build_kernel"
                 echo "[junkyard-build] $DEVICE 2/2 — rootfs/boot in normal env (kernel cached; needs sudo + aarch64 binfmt)"
                 # The device recipe re-runs .build_kernel, but phase 1 just touched
                 # its sentinel, so make skips it and the FHS-built kernel is used.

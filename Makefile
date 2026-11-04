@@ -7,7 +7,7 @@
 # ═══ DEVICE SELECTION ════════════════════════════════════════════════════════
 #
 # Which gs201 Pixel this build targets. Selects the per-device config fragment
-# (kernel branch, Bazel target/config, vendor-firmware OTA, super size, hostname).
+# (kernel source and build description, vendor-firmware OTA, super size, hostname).
 # Default felix, so a bare `make` / `just all` behaves exactly as it did before
 # the multi-device split. `make ... DEVICE=lynx` (or `just device=lynx all`)
 # builds the other one.
@@ -44,7 +44,7 @@ include devices/$(DEVICE).mk
 # the extracted vendor firmware, the module-order list and the kernel-staging
 # unpack tree — live under here, so felix and lynx never clobber each other and
 # switching between them is incremental. The expensive caches are per-device too:
-# the ~1hr kernel build lands in out/$(BAZEL_CONFIG)/dist and the ~2GB OTA under
+# the ~1hr kernel build lands in kernel/source-<device>/out/<device>/ and the ~2GB OTA under
 # $(BUILD_DIR)/vendor-firmware/. `build/` is gitignored.
 BUILD_DIR := build/$(DEVICE)
 
@@ -110,41 +110,18 @@ SYSROOT_DIR ?= rootfs/sysroot
 # and any uncommitted kernel work would be reverted twice per `just all`.
 # Separate trees cost ~22 GB each and make each device's kernel independent.
 KERNEL_SOURCE_DIR := kernel/source-$(DEVICE)
-# Bazel builds into out/<config>/dist; BAZEL_CONFIG comes from the device
-# fragment. `:=` rather than `?=` so it always tracks $(DEVICE) even if the
-# justfile leaves a stale KERNEL_BUILD_DIR in the environment.
-KERNEL_BUILD_DIR := $(KERNEL_SOURCE_DIR)/out/$(BAZEL_CONFIG)/dist
+# kernel/kbuild.mk builds into out/<device>/ and assembles out/<device>/dist,
+# with the file names and layout Kleaf's dist used to have, so the rootfs and
+# boot stages below read the same files. `:=` rather than `?=` so it always
+# tracks $(DEVICE) even if the justfile leaves a stale KERNEL_BUILD_DIR in the
+# environment.
+KERNEL_BUILD_DIR := $(KERNEL_SOURCE_DIR)/out/$(DEVICE)/dist
 # Where .install_kernel takes the {vendor,system}_dlkm staging archives from.
-#
-# Straight out of dist, unless the device fragment sets KERNEL_SIGN_MODULES=1:
-# then .build_kernel writes GKI-key-signed copies here and those are installed.
-# Needed for GrapheneOS's 6.18 GKI, which is CONFIG_MODULE_SIG_FORCE=y — kleaf's
-# vendor modules are signed (if at all) by the DEVICE kernel_build's throwaway
-# key, which the GKI Image does not trust, so unsigned-by-GKI = refused at load.
-# GrapheneOS's own tools/build_dist.sh re-signs its flat dist/*.ko for the same
-# reason; it deliberately leaves the archives alone, so we sign copies instead.
-# Copies (not in-place) so dist stays byte-for-byte what bazel produced.
-KERNEL_STAGING_DIR := $(if $(filter 1,$(KERNEL_SIGN_MODULES)),$(BUILD_DIR)/kernel-staging-signed,$(KERNEL_BUILD_DIR))
-# Extra per-device bazel flags (devices/<device>.mk). felix's 6.1 tree needs
-# --config=use_source_tree_aosp to build GKI from source; GrapheneOS's 6.18 tree
-# always does and has no such config.
-KERNEL_BAZEL_FLAGS ?=
-# Host-side bazel flags, same for every device. Override on the make command line.
-#
-# Delete each action's sandbox as soon as the action finishes. Bazel's default
-# (=4) only empties its sandbox trash WHILE THE SERVER IS IDLE, and a kernel
-# build is one long non-idle command: the first lynx build piled 420 discarded
-# sandboxes / 12 GB into out/bazel/.../sandbox/_moved_trash_dir before GKI had
-# even linked, and ran a 40 GB build host out of disk mid-compile. The cost of
-# deleting synchronously is a little wall time; the alternative is ENOSPC.
-#
-# --config=local (kleaf's "reduce sandboxes" mode, see the .build_kernel note)
-# keeps a persistent prepared-kernel copy PER MODULE under out/cache/ (~150 MB
-# each, ~100 modules for a Pixel device = 15 GB+). It is what the NixOS FHS env
-# needs, so it stays the default; on a small disk drop it with
-#   make ... KERNEL_BAZEL_HOST_FLAGS=--experimental_sandbox_async_tree_delete_idle_threads=0
-# (costs one full rebuild: it changes bazel's configuration hash).
-KERNEL_BAZEL_HOST_FLAGS ?= --config=local --experimental_sandbox_async_tree_delete_idle_threads=0
+# The make build signs modules as it installs them (KERNEL_SIGN_MODULES in
+# devices/<device>.mk), so the archives in dist are what gets installed.
+KERNEL_STAGING_DIR := $(KERNEL_BUILD_DIR)
+# Parallelism of the kernel build. Override on the make command line.
+KERNEL_JOBS ?= $(shell nproc)
 # Every fragment must say where its kernel comes from — `aosp` (repo manifest
 # branch) or `grapheneos` (monorepo + sync.sh). See clone_kernel_source.
 ifeq ($(filter aosp grapheneos,$(KERNEL_SOURCE_KIND)),)
@@ -216,13 +193,6 @@ SUPER_IMG := $(BUILD_DIR)/super.img
 # Half, 4K-aligned exactly as rootfs-slot.sh computes it (sectors/2, minus %8).
 SUPER_HALF_BYTES := $(shell echo $$(( ( ($(SUPER_BYTES)/512/2) - ($(SUPER_BYTES)/512/2) % 8 ) * 512 )))
 MKBOOTIMG ?= tools/mkbootimg/mkbootimg.py
-# ABSOLUTE, deliberately: .build_kernel does `cd $(KERNEL_SOURCE_DIR); $(BAZEL)`,
-# so a path relative to the repo root stops resolving the moment we cd into the
-# tree. This used to work by accident — the justfile exported BAZEL as an
-# absolute path, overriding the Makefile's relative `?=` default. That export is
-# gone (the layout is derived from $(DEVICE) here now), so the absoluteness has
-# to be stated rather than inherited.
-BAZEL := $(abspath $(KERNEL_SOURCE_DIR))/tools/bazel
 OVERLAY_DIR ?= rootfs/overlay
 # Per-device: each device's OTA supplies its own /vendor/firmware. Also keeps the
 # ~2GB download cached per-device, so switching back and forth doesn't re-fetch.
@@ -439,17 +409,6 @@ $(S_DEBOOT): $(S_CREATE) | $(BUILD_DIR)
 	just device=$(DEVICE) unmount_rootfs
 	touch $@
 
-# Must build inside the flake's FHS shell so kleaf's host tools (python3, perl, bash,
-# rsync) resolve and Bazel's server starts in the FHS mount namespace:
-#   nix run .#bazel-fhs -- -c 'just build_kernel'
-# --config=local is kleaf's "reduce sandboxes" mode (build/kernel/kleaf/docs/sandbox.md):
-# it runs the in-tree kernel_build/kernel_config actions locally (per-target cache dirs)
-# while keeping modules_install/dtbo/uapi/abi actions sandboxed. This is what makes
-# --config=use_source_tree_aosp (in-tree GKI build) work on NixOS. Do NOT replace it with
-# a blanket --spawn_strategy=local: that forces the sandbox-required actions to run local
-# and they abort with "FATAL: this action must be executed in a sandbox!".
-# NOTE: per the kleaf docs, run `tools/bazel clean` if you change --strategy/--config,
-# else stale cached action outputs cause confusing failures.
 # Apply the tree patches under kernel/patches/ to the repo-managed checkout.
 #
 # WHY THIS STAGE EXISTS: `kernel/source/` is a `repo` checkout whose .gitignore
@@ -507,10 +466,10 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 	#               (setlocalversion's check is -uno). Refuse to build rather than
 	#               emit an image whose contents no version identifies.
 	#
-	# Nothing here writes .scmversion: kleaf supplies "-android14-11-g8769cc47188c"
-	# by its own mechanism and APPENDS .scmversion on top, producing a string that
-	# blows the 64-character limit. A local commit is no good either — it moves the
-	# SHA, which is the thing being kept stable.
+	# Nothing here writes .scmversion: setlocalversion already appends the
+	# tree's -g<sha>, and a .scmversion on top of that only lengthens the release
+	# string (it once blew the 64-character limit). A local commit is no good
+	# either — it moves the SHA, which is the thing being kept stable.
 	@set -e; \
 	verdict=$$(tools/kernel-drift.sh $(KERNEL_SOURCE_DIR) $(PATCH_FILES)) || true; \
 	case "$$verdict" in \
@@ -570,14 +529,16 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 	done
 	touch $@
 
-$(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_defconfig_mod/custom_defconfig kernel/custom_defconfig_mod/$(DEVICE)_cmdline_defconfig tools/sign-kernel-modules.sh | $(BUILD_DIR)
-	cd $(KERNEL_SOURCE_DIR); $(BAZEL) run \
-		--config=stamp \
-		--config=$(BAZEL_CONFIG) \
-		--defconfig_fragment=//custom_defconfig_mod:custom_defconfig_$(DEVICE) \
-		$(KERNEL_BAZEL_FLAGS) \
-		$(KERNEL_BAZEL_HOST_FLAGS) \
-		$(BAZEL_TARGET)
+# The kernel, its modules and device tree: plain kbuild, driven by
+# kernel/kbuild.mk (see the header there). kbuild is incremental, so a rerun
+# after a source change rebuilds only what changed; this sentinel only decides
+# whether to ask it at all.
+KERNEL_BUILD_INPUTS := kernel/kbuild.mk $(wildcard kernel/kbuild/*) \
+	kernel/custom_defconfig_mod/custom_defconfig kernel/custom_defconfig_mod/$(DEVICE)_cmdline_defconfig \
+	tools/kconfig-check-fragments.sh tools/modules-load-lists.py tools/mkdtboimg.py
+
+$(S_KERNEL): $(S_PATCH) $(KERNEL_BUILD_INPUTS) | $(BUILD_DIR)
+	$(MAKE) -f kernel/kbuild.mk DEVICE=$(DEVICE) -j$(KERNEL_JOBS) dist
 	@echo "Updating kernel version string"
 	# Derive KERNEL_VERSION from the module staging archive, NOT from `strings Image`.
 	#
@@ -617,10 +578,6 @@ $(S_KERNEL): $(S_PATCH) kernel/custom_defconfig_mod/BUILD.bazel kernel/custom_de
 	fi; \
 	echo "  kernel version: $$KVER"; \
 	printf '%s\n' "$$KVER" > $(KERNEL_VERSION_FILE)
-	# KERNEL_SIGN_MODULES=1 (devices/<device>.mk): re-sign every module in the
-	# staging archives with the GKI build's key, into $(KERNEL_STAGING_DIR). Runs
-	# here, in the bazel FHS env, because sign-file is a kleaf-built host tool.
-	$(if $(filter 1,$(KERNEL_SIGN_MODULES)),tools/sign-kernel-modules.sh $(KERNEL_SOURCE_DIR) $(KERNEL_BUILD_DIR) $(KERNEL_STAGING_DIR),@true)
 	touch $@
 
 $(S_SYNCFW): | $(BUILD_DIR)
@@ -640,8 +597,8 @@ $(S_INSTFW): $(S_DEBOOT) $(S_SYNCFW) | $(BUILD_DIR)
 	touch $@
 
 # WHY A PREFLIGHT: the toolchains are split across environments — the rootfs
-# stages need sudo (tools/dockershell, a Debian container), the kernel needs the
-# bazel FHS env, and these two stages need cargo. Nothing here can install cargo
+# stages need sudo (tools/dockershell, a Debian container), the kernel needs
+# the kernel host tools (see Build-host prerequisites), and these two stages need cargo. Nothing here can install cargo
 # (Nix lives only in flake.nix so this Makefile stays portable), but it can say
 # so. Without the check the failure is a bare "sh: line 2: cargo: not found"
 # several stages into a build, with nothing naming the missing toolchain, which

@@ -1,0 +1,5 @@
+{
+  "all_headers": {"kind": "alias", "actual": "//aosp:all_headers"},
+  "all_headers_aarch64": {"kind": "alias", "actual": "//aosp:all_headers_aarch64"},
+  "kernel_aarch64": {"kind": "alias", "actual": "//aosp:kernel_aarch64"}
+}

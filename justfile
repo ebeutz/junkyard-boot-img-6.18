@@ -90,8 +90,6 @@ _mkbootimg := join(justfile_directory(), "tools", "mkbootimg", "mkbootimg.py")
 # KERNEL_SOURCE_DIR comment in the Makefile for why they are not shared.
 [private]
 _kernel_source_dir := join(justfile_directory(), "kernel", "source-" + device)
-[private]
-_bazel := join(_kernel_source_dir, "tools", "bazel")
 
 # Paths / variables
 #
@@ -139,8 +137,8 @@ _payload_dumper_bin := join(_payload_dumper_dir, "payload-dumper-go")
 
 # Env vars consumed by Makefile.
 #
-# KERNEL_BUILD_DIR, KERNEL_SOURCE_DIR, BAZEL and MODULE_ORDER_PATH are NOT
-# exported any more: the Makefile derives all four from $(DEVICE) with `:=`, and
+# KERNEL_BUILD_DIR, KERNEL_SOURCE_DIR and MODULE_ORDER_PATH are NOT
+# exported any more: the Makefile derives all three from $(DEVICE) with `:=`, and
 # a simple assignment in a makefile beats the environment. Exporting them here
 # would just be a second, silently-ignored copy of the layout that could drift.
 [private]
@@ -294,19 +292,19 @@ clone_kernel_source:
     #
     # Not a `repo` manifest branch. KERNEL_REPO_URL is ONE git repo carrying
     # private/devices/google/* and private/google-modules/* (separate `repo`
-    # projects on AOSP), plus aosp_manifest.xml listing what it builds against —
-    # common/ (GrapheneOS kernel_common), build/kernel, prebuilts/, external/ —
-    # each at a pinned revision. That manifest's `dependencies` group is synced
-    # exactly as the tree's own sync.sh does it (standalone manifest, partial
-    # clone); we inline sync.sh only to use our `repo` and our -j.
+    # projects on AOSP). Its aosp_manifest.xml lists what Kleaf builds it
+    # against; the make build (kernel/kbuild.mk) needs only two of those, so
+    # they are fetched here with plain git, at the revisions devices/<device>.mk
+    # pins: the kernel tree at common/ (KERNEL_LINUX_*), and one clang release
+    # (KERNEL_CLANG_*). No `repo`, no Kleaf, no other prebuilts.
     #
-    # Pinning: the monorepo commit pins everything, because aosp_manifest.xml
-    # inside it pins every dependency by SHA. `just pin_kernel_source` records it
-    # in kernel/kernel-source.<device>.rev; with that file present a FRESH clone
-    # checks out that commit. An EXISTING tree is never moved — fetching/resetting
-    # here on every build would silently revert kernel/patches and any local work.
+    # Pinning: the monorepo commit is kernel/kernel-source.<device>.rev
+    # (`just pin_kernel_source`); with that file present a FRESH clone checks
+    # out that commit. An EXISTING tree is never moved — fetching/resetting here
+    # on every build would silently revert kernel/patches and any local work.
     if [ "$kind" = grapheneos ]; then
-        url=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_REPO_URL DEVICE={{ device }} | tail -1)
+        mkv() { {{ _make }} --no-print-directory -C {{ justfile_directory() }} print-$1 DEVICE={{ device }} | tail -1; }
+        url=$(mkv KERNEL_REPO_URL)
         pin={{ justfile_directory() }}/kernel/kernel-source.{{ device }}.rev
         if [ ! -e "$src/.git" ]; then
             mkdir -p "$src"
@@ -325,55 +323,47 @@ clone_kernel_source:
             echo "WARNING: $src is at $(git -C "$src" rev-parse --short HEAD), not the pinned" >&2
             echo "         $(cat "$pin") — leaving it alone (see the pinning note above)." >&2
         fi
-        cd "$src"
-        {{ _repo }} init --standalone-manifest \
-            -u "file://$PWD/aosp_manifest.xml" \
-            --groups=dependencies --partial-clone < /dev/null
-        # kernel/local-manifests/<device>.xml, if present, is layered on top of
-        # aosp_manifest.xml as a repo local manifest — this is how lynx-mainline
-        # swaps GrapheneOS's kernel_common-6.18 for AOSP android-mainline without
-        # editing the monorepo's own (tracked) manifest. Re-copied on every run so
-        # an edit to the override takes effect; removed if the override is gone,
-        # or a stale copy would keep steering the sync.
-        lm={{ justfile_directory() }}/kernel/local-manifests/{{ device }}.xml
-        #
-        # --force-sync: the override puts a DIFFERENTLY-NAMED project at a path
-        # the monorepo manifest already uses (common/: kernel_common-6.18 ->
-        # kernel/common; external/zlib: zlib -> zlib-madler). On a tree first
-        # synced without the override, repo otherwise refuses with "cannot
-        # overwrite a local work tree". Only dependency projects are affected;
-        # the monorepo itself is not a repo project, so kernel/patches content
-        # under private/ is untouched.
-        mkdir -p .repo/local_manifests
-        force=
-        if [ -f "$lm" ]; then
-            cp "$lm" .repo/local_manifests/junkyard.xml
-            force=--force-sync
-        else
-            rm -f .repo/local_manifests/junkyard.xml
-        fi
-        # Fetch, then check out: in between, tools/sparse-prebuilts.sh limits the
-        # clang/rust prebuilt checkouts to the versions this kernel uses
-        # (KERNEL_CLANG_VERSION / KERNEL_RUSTC_VERSION in devices/<device>.mk).
-        # Those repos hold every release side by side, and checking all of them
-        # out filled a 40 GB build host before the kernel build even started.
-        {{ _repo }} sync -n --current-branch --no-tags $force -j {{ num_cpus() }}
-        clang=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_CLANG_VERSION DEVICE={{ device }} | tail -1)
-        rustc=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_RUSTC_VERSION DEVICE={{ device }} | tail -1)
-        if [ -n "$clang" ]; then
-            {{ justfile_directory() }}/tools/sparse-prebuilts.sh "$PWD" "$clang" "$rustc"
-        fi
-        {{ _repo }} sync -l --current-branch --no-tags $force -j {{ num_cpus() }}
-        # The monorepo root is itself a git project, so tools/kernel-drift.sh
-        # sees anything untracked at its top as FATAL drift. These two are ours
-        # (the fragment symlink below) and bazel's (bzlmod lockfile), not
-        # kernel content; .git/info/exclude keeps them out of `ls-files -o`.
-        for x in /custom_defconfig_mod /MODULE.bazel.lock; do
-            grep -qxF "$x" .git/info/exclude 2>/dev/null || echo "$x" >> .git/info/exclude
-        done
-        if [ ! -e custom_defconfig_mod ]; then
-            ln -s ../custom_defconfig_mod ./
-        fi
+        # fetch_at <dir> <url> <ref> <commit> [sparse patterns...]: a shallow
+        # checkout of one commit, created once and then left alone like the
+        # monorepo. <ref> is what is fetched (a tag; or the commit itself, for a
+        # server that serves any SHA), and the result must BE <commit> — a moved
+        # tag fails loudly instead of building a different kernel. With patterns,
+        # a blob-less partial clone with a non-cone sparse checkout, so only the
+        # matching files are ever downloaded.
+        fetch_at() {
+            local dir=$1 u=$2 ref=$3 want=$4; shift 4
+            if [ -e "$dir/.git" ]; then
+                if [ "$(git -C "$dir" rev-parse HEAD)" != "$want" ]; then
+                    echo "WARNING: $dir is at $(git -C "$dir" rev-parse --short HEAD), not $want — leaving it alone." >&2
+                fi
+                return 0
+            fi
+            echo "Fetching $u $ref ($want) into $dir"
+            mkdir -p "$dir"
+            git -C "$dir" init -q
+            git -C "$dir" remote add origin "$u"
+            if [ $# -gt 0 ]; then
+                git -C "$dir" config remote.origin.promisor true
+                git -C "$dir" config remote.origin.partialclonefilter blob:none
+                git -C "$dir" sparse-checkout set --no-cone "$@"
+                git -C "$dir" fetch --depth=1 --filter=blob:none origin "$ref"
+            else
+                git -C "$dir" fetch --depth=1 origin "$ref"
+            fi
+            got=$(git -C "$dir" rev-parse 'FETCH_HEAD^{commit}')
+            if [ "$got" != "$want" ]; then
+                echo "ERROR: $u $ref is $got, but devices/{{ device }}.mk pins $want." >&2
+                rm -rf "$dir"
+                exit 1
+            fi
+            git -C "$dir" checkout -q --detach "$want"
+        }
+        fetch_at "$src/$(mkv KERNEL_TREE)" "$(mkv KERNEL_LINUX_URL)" \
+            "refs/tags/$(mkv KERNEL_LINUX_TAG)" "$(mkv KERNEL_LINUX_REV)"
+        clang=$(mkv KERNEL_CLANG_VERSION)
+        clang_rev=$(mkv KERNEL_CLANG_REV)
+        fetch_at "$src/prebuilts/clang/host/linux-x86" "$(mkv KERNEL_CLANG_URL)" "$clang_rev" "$clang_rev" \
+            '/*' '!/clang-*/' "/clang-$clang/"
         # See the matching note at the end of the AOSP path below.
         rm -f {{ justfile_directory() }}/build/{{ device }}/.apply_kernel_patches
         exit 0
@@ -410,10 +400,20 @@ clone_kernel_source:
           -b "$branch" \
           < /dev/null
     fi
-    {{ _repo }} sync -j {{ num_cpus() }}
-    if [ ! -e custom_defconfig_mod ]; then
-        ln -s ../custom_defconfig_mod ./
-    fi
+    # kernel/local-manifests/<device>.xml drops the projects only Kleaf/Bazel
+    # used (the make build needs aosp/, private/ and clang). Re-copied on every
+    # run so an edit takes effect; removed if the file is gone, or a stale copy
+    # would keep steering the sync.
+    mkdir -p .repo/local_manifests
+    lm={{ justfile_directory() }}/kernel/local-manifests/{{ device }}.xml
+    if [ -f "$lm" ]; then cp "$lm" .repo/local_manifests/junkyard.xml; else rm -f .repo/local_manifests/junkyard.xml; fi
+    # Fetch, then check out: in between, tools/sparse-prebuilts.sh limits the
+    # clang prebuilt checkout to KERNEL_CLANG_VERSION. That repo holds every
+    # release side by side.
+    {{ _repo }} sync -n -j {{ num_cpus() }}
+    clang=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_CLANG_VERSION DEVICE={{ device }} | tail -1)
+    {{ justfile_directory() }}/tools/sparse-prebuilts.sh "$PWD" "$clang"
+    {{ _repo }} sync -l -j {{ num_cpus() }}
     # A sync reverts everything under the tree, including the patches in
     # kernel/patches/. Drop their sentinel so the next build re-applies them
     # instead of trusting a stale "already done" marker and quietly building an
@@ -432,10 +432,11 @@ clone_kernel_source:
 # after an intentional kernel branch/version bump, then rebuild kernel + rootfs
 # modules in lockstep.
 #
-# For a GrapheneOS-monorepo device the lock is just the monorepo commit, written
-# to kernel/kernel-source.<device>.rev: its aosp_manifest.xml already pins every
-# dependency by SHA.
+# For a GrapheneOS-monorepo device the lock is the monorepo commit, written to
+# kernel/kernel-source.<device>.rev; the kernel tree and clang it builds with
+# are pinned by SHA in devices/<device>.mk (KERNEL_LINUX_REV, KERNEL_CLANG_REV).
 [group('kernel')]
+[doc("Record this device's kernel source revisions so a fresh clone matches")]
 pin_kernel_source:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -449,14 +450,14 @@ pin_kernel_source:
         echo "Wrote kernel/kernel-manifest.{{ device }}.xml — commit it to lock the kernel source."
     fi
 
-# Expunge the Bazel output and drop the kernel sentinels. Every device by
+# Delete the kernel build output and drop the kernel sentinels. Every device by
 # default, `device=<dev>` for one — same rule as `clean`.
 #
 # Not a dependency on clone_kernel_source any more: that resolves the tree path
 # at PARSE time from `device`, which is empty in the every-device case. Each
 # iteration re-enters just with the device set, so the path resolves per device.
 [group('kernel')]
-[doc('Expunge the Bazel output (every device, or device=<dev>)')]
+[doc('Delete the kernel build output (every device, or device=<dev>)')]
 clean_kernel:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -466,31 +467,28 @@ clean_kernel:
     done
 
 [private]
-_clean_kernel_one: clone_kernel_source
-    cd {{ _kernel_source_dir }} && {{ _bazel }} clean --expunge
+_clean_kernel_one:
+    {{ _make }} -C {{ justfile_directory() }} -f kernel/kbuild.mk DEVICE={{ device }} clean
     rm -f {{ justfile_directory() }}/build/{{ device }}/.build_kernel \
           {{ justfile_directory() }}/build/{{ device }}/.apply_kernel_patches
 
-# Print a diff showing what the custom fragment would change vs. gki_defconfig.
+# Run nconfig on the kernel config the build uses (base defconfig + every
+# fragment, see kernel/kbuild.mk), then print what changed as a defconfig diff.
+# Edits made here are NOT kept by the build, which regenerates .config from the
+# fragments: copy what you want into kernel/custom_defconfig_mod/custom_defconfig.
 [group('kernel')]
-config_kernel: clone_kernel_source
+[doc("nconfig on the build's kernel config, then print the defconfig diff")]
+config_kernel: clone_kernel_source apply_kernel_patches
     #!/usr/bin/env bash
     set -euo pipefail
-    target=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-BAZEL_TARGET DEVICE={{ device }} | tail -1)
-    cfg_target=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_CONFIG_TARGET DEVICE={{ device }} | tail -1)
-    # Same package as BAZEL_TARGET, but the :kernel_config rule rather than :dist,
-    # unless the device fragment names it (GrapheneOS: <device>/kernel_config).
-    cfg_target=${cfg_target:-${target%:*}:kernel_config}
-    cfg=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-BAZEL_CONFIG DEVICE={{ device }} | tail -1)
-    flags=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_BAZEL_FLAGS DEVICE={{ device }} | tail -1)
-    cd {{ _kernel_source_dir }}
-    cp ./aosp/arch/arm64/configs/gki_defconfig ./gki_defconfig_original
-    # Same flags as .build_kernel, so nconfig shows the config the build would use.
-    {{ _bazel }} run --config="$cfg" --defconfig_fragment=//custom_defconfig_mod:custom_defconfig_{{ device }} \
-        $flags "$cfg_target" -- nconfig
-    diff -up ./gki_defconfig_original aosp/arch/arm64/configs/gki_defconfig || [ $? -eq 1 ]
-    rm ./gki_defconfig_original
-    cd aosp && git checkout arch/arm64/configs/gki_defconfig
+    cd {{ justfile_directory() }}
+    {{ _make }} -f kernel/kbuild.mk DEVICE={{ device }} config
+    out=kernel/source-{{ device }}/out/{{ device }}/kernel
+    {{ _make }} -f kernel/kbuild.mk DEVICE={{ device }} savedefconfig
+    cp $out/defconfig $out/defconfig.before
+    {{ _make }} -f kernel/kbuild.mk DEVICE={{ device }} nconfig
+    {{ _make }} -f kernel/kbuild.mk DEVICE={{ device }} savedefconfig
+    diff -u $out/defconfig.before $out/defconfig || [ $? -eq 1 ]
 
 [group('kernel')]
 build_kernel: clone_kernel_source

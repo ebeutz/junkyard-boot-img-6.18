@@ -1,0 +1,14 @@
+{
+  "all_headers": {"kind": "alias", "actual": ":all_headers_aarch64"},
+  "all_headers_aarch64": {"kind": "ddk_headers",
+    "hdrs": [":all_headers_allowlist_aarch64", ":all_headers_unsafe"]},
+  "all_headers_allowlist_aarch64": {"kind": "ddk_headers",
+    "hdrs": [":xhci_headers"],
+    "linux_includes": ["arch/arm64/include", "arch/arm64/include/uapi",
+      "drivers/dma", "drivers/extcon", "drivers/opp", "drivers/pci",
+      "drivers/pci/controller/dwc", "drivers/thermal", "drivers/ufs",
+      "drivers/usb", "sound/usb", "include", "include/uapi"]},
+  "xhci_headers": {"kind": "ddk_headers",
+    "linux_includes": ["drivers/usb", "drivers/usb/host"]},
+  "all_headers_unsafe": {"kind": "ddk_headers", "includes": ["."]}
+}

@@ -1,49 +1,40 @@
 #!/usr/bin/env bash
-# Restrict the toolchain prebuilt checkouts of a kernel `repo` tree to the one
-# clang and one rustc version the build uses.
+# SPDX-License-Identifier: GPL-2.0
 #
-#   tools/sparse-prebuilts.sh <kernel-source-dir> <clang-version> [rustc-version]
+# Restrict a kernel `repo` tree's clang prebuilt checkout to the one release
+# the kernel builds with.
 #
-# e.g. tools/sparse-prebuilts.sh kernel/source-lynx r596125 1.96.0
+#   tools/sparse-prebuilts.sh <kernel-source-dir> <clang-version>
+#
+# e.g. tools/sparse-prebuilts.sh kernel/source-felix r487747c
 #
 # Run between `repo sync -n` (fetch only) and `repo sync -l` (checkout).
-# platform/prebuilts/clang/host/linux-x86 carries six full clang releases
-# (~2.5 GB each checked out) and rust-toolchain/linux-musl-x86 four rustc
-# releases (~3 GB each); a plain checkout of both filled a 40 GB build host
-# before the kernel build started. Only clang-<version>/ and <rustc-version>/
-# are read (kleaf picks them from common/bazel/constants.scl), so every other
-# release directory is excluded with a non-cone sparse-checkout pattern; the
-# repos' top-level files and helper directories (kleaf/, soong/, ...) stay.
-# platform/prebuilts/build-tools also loses darwin-x86/ and linux-arm64/.
+# platform/prebuilts/clang/host/linux-x86 carries several full clang releases
+# side by side (~2.5 GB each checked out), and kernel/kbuild.mk reads only
+# clang-<version>/, so every other release directory is excluded with a
+# non-cone sparse-checkout pattern; the repo's top-level files stay.
 #
-# Idempotent. A later `repo sync` keeps honouring the patterns, because they
-# live in the project's git dir (core.sparseCheckout + info/sparse-checkout).
+# Idempotent. A later `repo sync` keeps honouring the pattern, because it lives
+# in the project's git dir (core.sparseCheckout + info/sparse-checkout).
+#
+# (The GrapheneOS-monorepo device fetches clang with plain git and does the
+# same thing inline in clone_kernel_source.)
 set -euo pipefail
 
 src=${1:?kernel source dir}
-clang=${2:?clang version, e.g. r596125}
-rustc=${3:-}
+clang=${2:?clang version, e.g. r487747c}
+proj=prebuilts/clang/host/linux-x86
 
-sparse() {
-	local proj=$1; shift
-	local gd=$src/.repo/projects/$proj.git
-	if [ ! -d "$gd" ]; then
-		echo "sparse-prebuilts: $proj not in this tree, skipping" >&2
-		return 0
-	fi
-	git --git-dir="$gd" config core.sparseCheckout true
-	mkdir -p "$gd/info"
-	printf '%s\n' "$@" > "$gd/info/sparse-checkout"
-	# A tree that was already checked out in full shrinks on the next
-	# `repo sync -l`; re-read the patterns now if a work tree exists.
-	if [ -e "$src/$proj/.git" ]; then
-		git -C "$src/$proj" read-tree -mu HEAD
-	fi
-	echo "sparse-prebuilts: $proj -> $*"
-}
-
-sparse prebuilts/clang/host/linux-x86 '/*' '!/clang-*/' "/clang-$clang/"
-if [ -n "$rustc" ]; then
-	sparse prebuilts/rust-toolchain/linux-musl-x86 '/*' '!/[0-9]*/' "/$rustc/"
+gd=$src/.repo/projects/$proj.git
+if [ ! -d "$gd" ]; then
+	echo "sparse-prebuilts: $proj not in this tree, skipping" >&2
+	exit 0
 fi
-sparse prebuilts/build-tools '/*' '!/darwin-x86/' '!/linux-arm64/'
+git --git-dir="$gd" config core.sparseCheckout true
+mkdir -p "$gd/info"
+printf '%s\n' '/*' '!/clang-*/' "/clang-$clang/" > "$gd/info/sparse-checkout"
+# A tree that was already checked out in full shrinks now rather than on the
+# next `repo sync -l`.
+if [ -e "$src/$proj/.git" ]; then
+	git -C "$src/$proj" read-tree -mu HEAD
+fi

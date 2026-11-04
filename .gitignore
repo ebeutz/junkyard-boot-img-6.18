@@ -175,10 +175,10 @@ boot/vendor_boot.img
 # firmware all live under build/<device>/ (see BUILD_DIR in the Makefile).
 /build/
 
-# The Android template's unanchored `build/` above also matches the per-project
-# kernel patch directory for kleaf (kernel/patches-<device>/build/kernel/), and
-# silently kept lynx-mainline's kleaf patch out of git. Kernel patches are
-# tracked content, always.
+# The Android template's unanchored `build/` above also matches a per-project
+# kernel patch directory for a project under build/ (it once silently kept
+# lynx-mainline's kernel/patches-lynx/build/kernel/ patch out of git). Kernel
+# patches are tracked content, always.
 !/kernel/patches*/build/
 
 # Per-device kernel checkouts (kernel/source-felix, kernel/source-lynx). Each is
