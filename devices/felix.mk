@@ -26,6 +26,13 @@ KERNEL_EXTRA_KCONFIGS  :=
 KERNEL_GKI_MODULES     := kernel/kbuild/android14-6.1-gki-modules.txt
 # ACK's COMMON_KCFLAGS, which Kleaf built this kernel and its modules with.
 KERNEL_KCFLAGS         := -D__ANDROID_COMMON_KERNEL__
+# ACK's Makefile hands BRANCH and KMI_GENERATION to setlocalversion, which
+# turns them into the release's "-android14-11" part; Kleaf set both from the
+# tree's build.config files. Without them the release (and every
+# /lib/modules/<release>/ path on a felix) would drop to 6.1.124-g<sha>.
+KERNEL_MAKE_VARS        = \
+	BRANCH=$(shell sed -n 's/^BRANCH=//p' $(KTREE)/build.config.constants) \
+	KMI_GENERATION=$(shell sed -n 's/^KMI_GENERATION=//p' $(KTREE)/build.config.common)
 # Modules stay unsigned, as with Kleaf (gs201_defconfig turns
 # CONFIG_MODULE_SIG_ALL off and the 6.1 GKI does not force signatures).
 KERNEL_SIGN_MODULES    := 0

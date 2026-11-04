@@ -79,7 +79,7 @@ KCONFIG_WRAPPER := $(KOUT)/Kconfig.junkyard
 # whenever a Kconfig file changes, and would otherwise do it without the vendor
 # symbols and drop them from .config.
 KMAKE = $(MAKE) -C $(KTREE) O=$(KOUT) ARCH=arm64 LLVM=$(CLANG)/bin/ PAHOLE=$(PAHOLE) \
-	KBUILD_KCONFIG=$(KCONFIG_WRAPPER) $(KERNEL_KCONFIG_VARS)
+	KBUILD_KCONFIG=$(KCONFIG_WRAPPER) $(KERNEL_KCONFIG_VARS) $(KERNEL_MAKE_VARS)
 
 # pahole generates the BTF (CONFIG_DEBUG_INFO_BTF). It is the build host's, and
 # it has to be recent: 1.25 (Ubuntu 24.04) stops at 4096 per-CPU variables
