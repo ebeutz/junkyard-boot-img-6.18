@@ -27,6 +27,15 @@ drivers were written for.
 Linux 6.18 -> android-mainline (7.3):
 
   * in_irq() -> in_hardirq() (the alias is gone).
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * CONFIG_WCN_USE_DMA_DIRECT is off: dma_direct_alloc()/free() are exported
+    only by the Android GKIs, and pcie_1 has no sysmmu, so dma_alloc_attrs()
+    is dma-direct anyway.
+  * qrtr: SCHED_FIFO prio 1 via sched_set_fifo_low() (sched_setscheduler() is
+    not exported).
+  * pci_platform_google: strncpy() from <soc/google/linus-compat.h>.
 ---
 diff --git a/Kbuild b/Kbuild
 index 33b5824..8ff4f94 100644
@@ -40,6 +49,30 @@ index 33b5824..8ff4f94 100644
  ifeq ($(CONFIG_CNSS_OUT_OF_TREE),y)
  KBUILD_CPPFLAGS += -DCONFIG_CNSS_OUT_OF_TREE
  endif
+diff --git a/cnss2/Makefile b/cnss2/Makefile
+index 0b3c1b0..6885256 100644
+--- a/cnss2/Makefile
++++ b/cnss2/Makefile
+@@ -4,10 +4,18 @@ obj-$(CONFIG_CNSS2) += cnss2.o
+ 
+ ifeq ($(CONFIG_CNSS_OUT_OF_TREE),y)
+ ccflags-y += -I$(ROOT_DIR)/private/google-modules/soc/gs/include
++# junkyard (lynx-linus-mainline): compat headers (soc/gs linus_compat_headers).
++ccflags-y += -I$(ROOT_DIR)/private/google-modules/soc/gs/include/linus-compat
+ ccflags-y += -I$(WLAN_PLATFORM_ROOT)/inc
+ ccflags-y += -I$(WLAN_PLATFORM_ROOT)/cnss_utils
+ ccflags-y += -DCONFIG_WCN_GOOGLE
+-ccflags-y += -DCONFIG_WCN_USE_DMA_DIRECT
++# junkyard (lynx-linus-mainline): CONFIG_WCN_USE_DMA_DIRECT is not defined.
++# It made the driver call dma_direct_alloc()/dma_direct_free(), which Linus'
++# tree does not export (only the Android GKIs did). On gs201 the WLAN link
++# (pcie_1) has use-sysmmu = "false" and no iommu-map, so the endpoint has no
++# dma_map_ops and dma_alloc_attrs() resolves to dma_direct_alloc() anyway:
++# the firmware still gets physical addresses.
++# ccflags-y += -DCONFIG_WCN_USE_DMA_DIRECT
+ ccflags-y += -DCONFIG_QCOM_RAMDUMP -DCONFIG_QCOM_MEMORY_DUMP_V2
+ else
+ ccflags-y += -I$(srctree)/drivers/net/wireless/cnss_utils/
 diff --git a/cnss2/bus.c b/cnss2/bus.c
 index 58fd891..023df1d 100644
 --- a/cnss2/bus.c
@@ -301,7 +334,7 @@ index 5c72ee5..28c14ac 100644
  	default:
  		break;
 diff --git a/cnss2/pci_platform_google.c b/cnss2/pci_platform_google.c
-index 5da58b8..bcc96d5 100644
+index 5da58b8..8eb8272 100644
 --- a/cnss2/pci_platform_google.c
 +++ b/cnss2/pci_platform_google.c
 @@ -1,6 +1,7 @@
@@ -312,7 +345,16 @@ index 5da58b8..bcc96d5 100644
  #include <linux/of.h>
  #include <linux/of_gpio.h>
  #include <linux/of_reserved_mem.h>
-@@ -301,7 +302,6 @@ static struct sscd_platform_data sscd_pdata;
+@@ -9,6 +10,8 @@
+ #include "pci_platform.h"
+ #include "debug.h"
+ #include "bus.h"
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ #define PLT_PATH "/chosen/plat"
+ #define CDB_PATH "/chosen/config"
+@@ -301,7 +304,6 @@ static struct sscd_platform_data sscd_pdata;
  
  static struct platform_device sscd_dev = {
  	.name            = DEVICE_NAME,
@@ -320,7 +362,7 @@ index 5da58b8..bcc96d5 100644
  	.id              = -1,
  	.dev             = {
  		.platform_data = &sscd_pdata,
-@@ -314,11 +314,10 @@ void cnss_register_sscd(void)
+@@ -314,11 +316,10 @@ void cnss_register_sscd(void)
  	memset(&sscd_pdata, 0, sizeof(struct sscd_platform_data));
  	memset(&sscd_dev, 0, sizeof(struct platform_device));
  	sscd_dev.name = DEVICE_NAME;
@@ -469,6 +511,22 @@ index 2225c2b..4b688e5 100644
  		(in_softirq() ? "soft_irq" : current->comm))
  #define cnss_plat_ipc_err(_fmt, ...) \
  		cnss_plat_ipc_log_print(proc_name, __func__, \
+diff --git a/mhi/core/Makefile b/mhi/core/Makefile
+index 3c1b0ef..2548ae1 100644
+--- a/mhi/core/Makefile
++++ b/mhi/core/Makefile
+@@ -5,4 +5,10 @@ mhi-$(CONFIG_MHI_BUS_MISC) += misc.o
+ mhi-$(CONFIG_MHI_BUS_DEBUG) += debugfs.o
+ 
+ ccflags-y += -DCONFIG_WCN_GOOGLE
+-ccflags-y += -DCONFIG_WCN_USE_DMA_DIRECT
++# junkyard (lynx-linus-mainline): CONFIG_WCN_USE_DMA_DIRECT is not defined.
++# It made the driver call dma_direct_alloc()/dma_direct_free(), which Linus'
++# tree does not export (only the Android GKIs did). On gs201 the WLAN link
++# (pcie_1) has use-sysmmu = "false" and no iommu-map, so the endpoint has no
++# dma_map_ops and dma_alloc_attrs() resolves to dma_direct_alloc() anyway:
++# the firmware still gets physical addresses.
++# ccflags-y += -DCONFIG_WCN_USE_DMA_DIRECT
 diff --git a/mhi/core/init.c b/mhi/core/init.c
 index ee03bba..9bdb61b 100644
 --- a/mhi/core/init.c
@@ -483,7 +541,7 @@ index ee03bba..9bdb61b 100644
  	struct mhi_device *mhi_dev = to_mhi_device(dev);
  	struct mhi_driver *mhi_drv = to_mhi_driver(drv);
 diff --git a/qrtr/af_qrtr.c b/qrtr/af_qrtr.c
-index 21cb211..fc0b3f5 100644
+index 21cb211..727090c 100644
 --- a/qrtr/af_qrtr.c
 +++ b/qrtr/af_qrtr.c
 @@ -18,7 +18,7 @@
@@ -495,7 +553,22 @@ index 21cb211..fc0b3f5 100644
  #include <linux/version.h>
  #ifdef CONFIG_CNSS_OUT_OF_TREE
  #include "ipc_logging.h"
-@@ -1594,7 +1594,7 @@ static int qrtr_autobind(struct socket *sock)
+@@ -1225,8 +1225,13 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int net_id,
+ 		kfree(node);
+ 		return -ENOMEM;
+ 	}
++	/*
++	 * junkyard (lynx-linus-mainline): sched_setscheduler() is not exported
++	 * by Linus' tree; SCHED_FIFO at priority 1 is sched_set_fifo_low().
++	 */
+ 	if (rt)
+-		sched_setscheduler(node->task, SCHED_FIFO, &param);
++		sched_set_fifo_low(node->task);
++	(void)param;
+ 
+ 	xa_init(&node->no_wake_svc);
+ 	size = no_wake ? no_wake->size : 0;
+@@ -1594,7 +1599,7 @@ static int qrtr_autobind(struct socket *sock)
  }
  
  /* Bind socket to specified sockaddr. */
@@ -504,7 +577,7 @@ index 21cb211..fc0b3f5 100644
  {
  	DECLARE_SOCKADDR(struct sockaddr_qrtr *, addr, saddr);
  	struct qrtr_sock *ipc = qrtr_sk(sock->sk);
-@@ -1913,7 +1913,7 @@ out:
+@@ -1913,7 +1918,7 @@ out:
  	return rc;
  }
  
@@ -527,7 +600,7 @@ index bf62103..5010c3a 100644
  		pr_err("failed to bind to socket\n");
  		goto err_wq;
 diff --git a/qrtr/qrtr.c b/qrtr/qrtr.c
-index 8716d6f..b95075f 100644
+index 8716d6f..e73083e 100644
 --- a/qrtr/qrtr.c
 +++ b/qrtr/qrtr.c
 @@ -17,7 +17,7 @@
@@ -539,3 +612,18 @@ index 8716d6f..b95075f 100644
  #ifdef CONFIG_CNSS_OUT_OF_TREE
  #include "ipc_logging.h"
  #else
+@@ -1212,8 +1212,13 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int net_id,
+ 		kfree(node);
+ 		return -ENOMEM;
+ 	}
++	/*
++	 * junkyard (lynx-linus-mainline): sched_setscheduler() is not exported
++	 * by Linus' tree; SCHED_FIFO at priority 1 is sched_set_fifo_low().
++	 */
+ 	if (rt)
+-		sched_setscheduler(node->task, SCHED_FIFO, &param);
++		sched_set_fifo_low(node->task);
++	(void)param;
+ 
+ 	mutex_init(&node->qrtr_tx_lock);
+ 	INIT_RADIX_TREE(&node->qrtr_tx_flow, GFP_KERNEL);

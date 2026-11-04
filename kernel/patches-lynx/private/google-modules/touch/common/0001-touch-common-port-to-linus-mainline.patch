@@ -9,9 +9,14 @@ Linux 6.18 -> android-mainline (7.3):
     non-atomic .enable/.disable (-> .atomic_enable/.atomic_disable), and
     atomic_reset/drm_atomic_helper_bridge_reset became
     atomic_create_state/drm_atomic_helper_bridge_create_state.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * goog_touch_interface: strncpy() from <soc/google/linus-compat.h>.
+  * touch_bus_negotiator: sched_setscheduler() via <soc/google/sched-setscheduler.h>.
 ---
 diff --git a/v1/goog_touch_interface.c b/v1/goog_touch_interface.c
-index 3bb378e..b82f4d8 100644
+index 3bb378e..392e98e 100644
 --- a/v1/goog_touch_interface.c
 +++ b/v1/goog_touch_interface.c
 @@ -5,6 +5,7 @@
@@ -22,7 +27,16 @@ index 3bb378e..b82f4d8 100644
  #include <linux/delay.h>
  #include <linux/module.h>
  #include <linux/input/mt.h>
-@@ -2302,7 +2303,8 @@ static void panel_bridge_detach(struct drm_bridge *bridge)
+@@ -15,6 +16,8 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/seq_file.h>
+ #include <trace/hooks/systrace.h>
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ #if IS_ENABLED(CONFIG_GS_DRM_PANEL_UNIFIED)
+ #include <gs_drm/gs_drm_connector.h>
+@@ -2302,7 +2305,8 @@ static void panel_bridge_detach(struct drm_bridge *bridge)
  	}
  }
  
@@ -32,7 +46,7 @@ index 3bb378e..b82f4d8 100644
  {
  	struct goog_touch_interface *gti =
  		container_of(bridge, struct goog_touch_interface, panel_bridge);
-@@ -2315,7 +2317,8 @@ static void panel_bridge_enable(struct drm_bridge *bridge)
+@@ -2315,7 +2319,8 @@ static void panel_bridge_enable(struct drm_bridge *bridge)
  	goog_set_display_state(gti, GTI_DISPLAY_STATE_ON);
  }
  
@@ -42,7 +56,7 @@ index 3bb378e..b82f4d8 100644
  {
  	struct goog_touch_interface *gti =
  		container_of(bridge, struct goog_touch_interface, panel_bridge);
-@@ -2435,14 +2438,15 @@ static int panel_bridge_atomic_check(struct drm_bridge *bridge,
+@@ -2435,14 +2440,15 @@ static int panel_bridge_atomic_check(struct drm_bridge *bridge,
  }
  
  static const struct drm_bridge_funcs panel_bridge_funcs = {
@@ -74,3 +88,16 @@ index ac24f92..94a4a27 100644
  };
  
  static const struct vb2_queue heatmap_queue = {
+diff --git a/v1/touch_bus_negotiator.c b/v1/touch_bus_negotiator.c
+index ccc7513..1d03dcc 100644
+--- a/v1/touch_bus_negotiator.c
++++ b/v1/touch_bus_negotiator.c
+@@ -20,6 +20,8 @@
+ #if IS_ENABLED(CONFIG_TOUCHSCREEN_TBN_AOC_CHANNEL_MODE)
+ #include <uapi/linux/sched/types.h>
+ #include "aoc_tbn_service_dev.h"
++/* junkyard (lynx-linus-mainline): sched_setscheduler[_nocheck]() are not exported. */
++#include <soc/google/sched-setscheduler.h>
+ #endif
+ 
+ #define TBN_MODULE_NAME "touch_bus_negotiator"

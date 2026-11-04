@@ -1,0 +1,80 @@
+From: junkyard
+Subject: [PATCH] power/mitigation: port to Linux 6.18 (lynx)
+
+Port private/google-modules/power/mitigation to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - relax -Wmissing-prototypes (on by default since 6.8, fatal with CONFIG_WERROR) for this vendor code
+
+Files: BUILD.bazel, soc/gs/gs_bcl_qos.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * trace_clock_set_rate() (power:clock_set_rate, removed upstream) from
+    <soc/google/linus-compat.h>.
+  * google_bcl_core: power_supply_get_by_reference_array() from
+    <soc/google/psy-reference-array.h>.
+---
+diff --git a/BUILD.bazel b/BUILD.bazel
+index b320c37..4806405 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -54,6 +54,8 @@ ddk_module(
+         "ifpmic/max777x9.c",
+         "soc/userspace/userspace_bcl_qos.c",
+     ],
++    # junkyard (lynx, 6.18): vendor code predating default -Wmissing-prototypes (6.8)
++    copts = ["-Wno-error=missing-prototypes"],
+     out = "google_bcl.ko",
+     conditional_srcs = {
+         "CONFIG_SOC_RDO": {
+diff --git a/google_bcl_core.c b/google_bcl_core.c
+index aadcf68..d30522e 100644
+--- a/google_bcl_core.c
++++ b/google_bcl_core.c
+@@ -34,6 +34,8 @@
+ #include "ifpmic/max77779/max77779_irq.h"
+ #include "soc/soc_defs.h"
+ #include "soc/userspace/userspace_bcl_qos.h"
++/* junkyard (lynx-linus-mainline): ACK-only power_supply_get_by_reference_array(). */
++#include <soc/google/psy-reference-array.h>
+ 
+ static const struct platform_device_id google_id_table[] = {
+ 	{.name = "google_mitigation",},
+diff --git a/google_bcl_irq_mon.c b/google_bcl_irq_mon.c
+index 65023f0..a1ee937 100644
+--- a/google_bcl_irq_mon.c
++++ b/google_bcl_irq_mon.c
+@@ -16,6 +16,8 @@
+ #include "ifpmic/max77759/max77759_irq.h"
+ #include "ifpmic/max77779/max77779_irq.h"
+ #include "soc/soc_defs.h"
++/* junkyard (lynx-linus-mainline): trace_clock_set_rate, removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ static enum BCL_BATT_IRQ id_to_ind(int id)
+ {
+diff --git a/soc/gs/gs_bcl_qos.c b/soc/gs/gs_bcl_qos.c
+index c31ab7b..62ddc6d 100644
+--- a/soc/gs/gs_bcl_qos.c
++++ b/soc/gs/gs_bcl_qos.c
+@@ -6,6 +6,7 @@
+  *
+  */
+ 
++#include "../soc_defs.h"	/* declares the google_bcl_*_qos() it defines */
+ #include <linux/of.h>
+ #include <linux/cpu.h>
+ #include <linux/cpufreq.h>
+@@ -14,6 +15,8 @@
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/platform_device.h>
++/* junkyard (lynx-linus-mainline): trace_clock_set_rate, removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ #if IS_ENABLED(CONFIG_REGULATOR_S2MPG14)
+ #include <linux/mfd/samsung/s2mpg1415.h>
+ #include <linux/mfd/samsung/s2mpg1415-register.h>

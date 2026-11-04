@@ -29,6 +29,15 @@ Linux 6.18 -> android-mainline (7.3):
 
   * dma_fence::lock -> dma_fence_{lock_irqsave,unlock_irqrestore}().
   * thermal_of_cooling_device_register() gained a cdev_id argument (0).
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * gxp-mailbox: sched_setscheduler() via <soc/google/sched-setscheduler.h>,
+    included unconditionally (gs201 has no MCU, the block it was in).
+  * gcip-thermal: thermal_cdev_update() via <soc/google/gs_thermal_compat.h>
+    when not built against an ACK.
+  * gcip-iommu: dma_buf_attachment::dma_map_attrs is ACK-only; the attributes
+    go through samsung_dma_buf_attach_{attrs,set_attrs}() instead.
 ---
 diff --git a/amalthea-platform.c b/amalthea-platform.c
 index e37774d..09630c3 100644
@@ -111,10 +120,18 @@ index 882aa80..24047e5 100644
  			return NULL;
  		}
 diff --git a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
-index 7b57441..1d2a142 100644
+index 7b57441..5616ef2 100644
 --- a/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
 +++ b/gcip-kernel-driver/drivers/gcip/gcip-iommu.c
-@@ -754,7 +754,7 @@ static int _gcip_iommu_domain_pool_attach_domain(struct gcip_iommu_domain_pool *
+@@ -26,6 +26,7 @@
+ #include <gcip/gcip-domain-pool.h>
+ #include <gcip/gcip-iommu.h>
+ #include <gcip/gcip-mem-pool.h>
++#include <soc/google/samsung-dma-heap.h>
+ 
+ /* Macros for manipulating @gcip_map_flags parameter. */
+ #define GCIP_MAP_MASK(ATTR) \
+@@ -754,7 +755,7 @@ static int _gcip_iommu_domain_pool_attach_domain(struct gcip_iommu_domain_pool *
  	if (pasid < 0)
  		return pasid;
  
@@ -123,7 +140,24 @@ index 7b57441..1d2a142 100644
  	if (ret) {
  		ida_free(&pool->pasid_pool, pasid);
  		return ret;
-@@ -1331,4 +1331,4 @@ void gcip_iommu_unmap(struct gcip_iommu_domain *domain, dma_addr_t iova, size_t
+@@ -1230,7 +1231,15 @@ struct gcip_iommu_mapping *gcip_iommu_domain_map_dma_buf_to_iova(struct gcip_iom
+ 		return ERR_CAST(attachment);
+ 	}
+ 
+-	attachment->dma_map_attrs |= GCIP_MAP_FLAGS_GET_DMA_ATTR(gcip_map_flags);
++	/*
++	 * junkyard (lynx-linus-mainline): dma_buf_attachment::dma_map_attrs is an
++	 * Android Common Kernel field. The Samsung heaps (the exporters that read
++	 * it) keep the attributes themselves; the call does nothing for buffers
++	 * from any other exporter, which would ignore the field on an ACK too.
++	 */
++	samsung_dma_buf_attach_set_attrs(attachment,
++					 samsung_dma_buf_attach_attrs(attachment) |
++					 GCIP_MAP_FLAGS_GET_DMA_ATTR(gcip_map_flags));
+ 
+ 	/* Map the attachment into the default domain. */
+ 	dma_resv_lock(dmabuf->resv, NULL);
+@@ -1331,4 +1340,4 @@ void gcip_iommu_unmap(struct gcip_iommu_domain *domain, dma_addr_t iova, size_t
  			 size, unmapped);
  }
  
@@ -143,10 +177,24 @@ index 9259dd8..34b297d 100644
  				tel->fallback_fn(tel);
  			read_unlock_irqrestore(&tel->ctx_lock, ctx_lock_flags);
 diff --git a/gcip-kernel-driver/drivers/gcip/gcip-thermal.c b/gcip-kernel-driver/drivers/gcip/gcip-thermal.c
-index 939394e..ba277c0 100644
+index 939394e..3aab3e9 100644
 --- a/gcip-kernel-driver/drivers/gcip/gcip-thermal.c
 +++ b/gcip-kernel-driver/drivers/gcip/gcip-thermal.c
-@@ -396,7 +396,7 @@ static int gcip_thermal_cooling_register(struct gcip_thermal *thermal, const cha
+@@ -174,8 +174,13 @@ static const struct thermal_cooling_device_ops gcip_thermal_ops = {
+ 	.power2state = gcip_thermal_power2state,
+ };
+ 
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ /* This API was removed, but Android still uses it to update thermal request. */
+ void thermal_cdev_update(struct thermal_cooling_device *cdev);
++#else
++/* junkyard (lynx-linus-mainline): thermal_cdev_update() is not exported upstream. */
++#include <soc/google/gs_thermal_compat.h>
++#endif
+ 
+ static void gcip_thermal_update(struct gcip_thermal *thermal)
+ {
+@@ -396,7 +401,7 @@ static int gcip_thermal_cooling_register(struct gcip_thermal *thermal, const cha
  		dev_warn(thermal->dev, "Failed to find thermal cooling node: %s\n",
  			 node_name ? node_name : "");
  
@@ -320,4 +368,18 @@ index a61a7a5..cd670bd 100644
 +		eventfd_signal(eventfd->ctx);
  
  	gxp_eventfd_put(eventfd);
+ 
+diff --git a/gxp-mailbox.c b/gxp-mailbox.c
+index 3b5739c..d39857d 100644
+--- a/gxp-mailbox.c
++++ b/gxp-mailbox.c
+@@ -25,6 +25,9 @@
+ #include "gxp-pm.h"
+ #include "gxp.h"
+ 
++/* junkyard (lynx-linus-mainline): sched_setscheduler[_nocheck]() are not exported. */
++#include <soc/google/sched-setscheduler.h>
++
+ #if GXP_HAS_MCU
+ #include <gcip/gcip-kci.h>
  

@@ -24,7 +24,40 @@ Linux 6.18 -> android-mainline (7.3):
   * i3c: struct i3c_priv_xfer -> struct i3c_xfer and
     i3c_device_do_priv_xfers(dev, x, n) -> i3c_device_do_xfers(dev, x, n,
     I3C_SDR), as upstream renamed them (SDR is what priv xfers were).
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * lwis_buffer: no dma_buf_*_cpu_access_partial() (ACK-only); full-buffer sync.
+  * busan dma: samsung_dma_heap_find()/samsung_dma_heap_buffer_alloc().
+  * lwis_util: sched_setscheduler_nocheck() via <soc/google/sched-setscheduler.h>.
 ---
+diff --git a/lwis_buffer.c b/lwis_buffer.c
+index 2a9561f..aa1084a 100644
+--- a/lwis_buffer.c
++++ b/lwis_buffer.c
+@@ -398,10 +398,22 @@ int lwis_buffer_cpu_access(struct lwis_client *lwis_client, struct lwis_buffer_c
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * junkyard (lynx-linus-mainline): the *_cpu_access_partial() variants
++	 * exist only in the Android Common Kernels. Without them the whole
++	 * buffer is synced, which covers [offset, offset + len).
++	 */
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 	if (op->start)
+ 		ret = dma_buf_begin_cpu_access_partial(dma_buf, dma_direction, op->offset, op->len);
+ 	else
+ 		ret = dma_buf_end_cpu_access_partial(dma_buf, dma_direction, op->offset, op->len);
++#else
++	if (op->start)
++		ret = dma_buf_begin_cpu_access(dma_buf, dma_direction);
++	else
++		ret = dma_buf_end_cpu_access(dma_buf, dma_direction);
++#endif
+ 
+ 	dma_buf_put(dma_buf);
+ 	return ret;
 diff --git a/lwis_fence.c b/lwis_fence.c
 index 61a53c1..d014d75 100644
 --- a/lwis_fence.c
@@ -158,6 +191,19 @@ index 024531c..e7c8450 100644
  	LWIS_ATRACE_FUNC_INT_END(&(i3c_dev->base_dev), trace_name, get_xfers_len(xfers, nxfers));
  
  	for (i = 0, xfers_cursor = 0; i < entries_cnt; ++i) {
+diff --git a/lwis_util.c b/lwis_util.c
+index a80414c..03ecbac 100644
+--- a/lwis_util.c
++++ b/lwis_util.c
+@@ -12,6 +12,8 @@
+ #include <uapi/linux/sched/types.h>
+ #include "lwis_util.h"
+ #include "lwis_device.h"
++/* junkyard (lynx-linus-mainline): sched_setscheduler[_nocheck]() are not exported. */
++#include <soc/google/sched-setscheduler.h>
+ 
+ int lwis_device_single_register_write(struct lwis_device *lwis_dev, int bid, uint64_t offset,
+ 				      uint64_t value, int access_size)
 diff --git a/platform/busan/lwis_platform_busan.c b/platform/busan/lwis_platform_busan.c
 index ad1bf0f..174be7f 100644
 --- a/platform/busan/lwis_platform_busan.c
@@ -223,3 +269,53 @@ index ad1bf0f..174be7f 100644
  	}
  
  	/* Disable platform device */
+diff --git a/platform/busan/lwis_platform_busan_dma.c b/platform/busan/lwis_platform_busan_dma.c
+index 2a066ae..90f29dd 100644
+--- a/platform/busan/lwis_platform_busan_dma.c
++++ b/platform/busan/lwis_platform_busan_dma.c
+@@ -9,13 +9,21 @@
+ 
+ #include <linux/dma-buf.h>
+ #include <linux/dma-heap.h>
++/*
++ * junkyard (lynx-linus-mainline): dma_heap_find()/dma_heap_buffer_alloc()/
++ * dma_heap_put() are Android Common Kernel exports; Linus' tree has no
++ * in-kernel dma-heap API. The heaps used here are all registered by
++ * samsung_dma_heap.ko, which provides the same lookup and allocation over its
++ * own heaps (heaps are never removed, so there is nothing to put).
++ */
++#include <soc/google/samsung-dma-heap.h>
+ #include "lwis_commands.h"
+ #include "lwis_platform.h"
+ #include "lwis_platform_dma.h"
+ struct dma_buf *lwis_platform_dma_buffer_alloc(size_t len, unsigned int flags)
+ {
+ 	const char *heap_name;
+-	struct dma_heap *heap;
++	struct samsung_dma_heap *heap;
+ 	struct dma_buf *dmabuf;
+ 
+ 	if ((flags & LWIS_DMA_BUFFER_SECURE) && IS_ENABLED(CONFIG_EXYNOS_CONTENT_PATH_PROTECTION))
+@@ -25,20 +33,19 @@ struct dma_buf *lwis_platform_dma_buffer_alloc(size_t len, unsigned int flags)
+ 	else
+ 		heap_name = "system-uncached";
+ 
+-	heap = dma_heap_find(heap_name);
++	heap = samsung_dma_heap_find(heap_name);
+ 	if (!heap) {
+ 		pr_err("Could not find %s DMA-BUF heap\n", heap_name);
+ 		return NULL;
+ 	}
+ 
+-	dmabuf = dma_heap_buffer_alloc(heap, len, O_RDWR, 0);
++	dmabuf = samsung_dma_heap_buffer_alloc(heap, len, O_RDWR, 0);
+ 	if (IS_ERR_OR_NULL(dmabuf)) {
+ 		pr_err("DMA-BUF heap failed to alloc %#zx bytes. Error code %lu\n", len,
+ 		       PTR_ERR(dmabuf));
+ 		dmabuf = NULL;
+ 	}
+ 
+-	dma_heap_put(heap);
+ 
+ 	return dmabuf;
+ }

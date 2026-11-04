@@ -37,6 +37,21 @@ Linux 6.18 -> android-mainline (7.3):
 
   * in_irq() -> in_hardirq() (the alias is gone).
   * hex2bin()/hex_to_bin() live in <linux/hex.h>.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * qcacld: cpuidle_governor_latency_req() (ACK export) replaced by its
+    per-CPU device resume-latency half; sched_setscheduler(FIFO, 1) ->
+    sched_set_fifo_low(); cpumap_print_to_pagebuf() (removed upstream) ->
+    scnprintf("%*pb") bounded by the actual buffer.
+  * wlan_osif_features.h used __ANDROID_COMMON_KERNEL__ (no longer defined,
+    see device_build.bzl) to mean "cfg80211 has the MLO link_id APIs"; Linus'
+    cfg80211 has them since 6.0, so either now enables those switches. Same
+    feature set as on android-mainline.
+  * cfg80211 assigns the remain-on-channel / mgmt-tx cookies since v7.3 (u64
+    cookie; ACK keeps u64 *cookie): the ops wrap the existing handlers and
+    record driver id -> cfg80211 cookie, and os_if/p2p translates in the
+    ready-on-channel/expired/tx-status events and in the cancels.
 ---
 diff --git a/qca-wifi-host-cmn/hif/src/hif_runtime_pm.c b/qca-wifi-host-cmn/hif/src/hif_runtime_pm.c
 index d1cb7f1..fe35630 100644
@@ -91,6 +106,70 @@ index 6c1fc8e..65e6c7d 100644
  		IPA_RESOURCE_NAME_MAX);
  	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
  
+diff --git a/qca-wifi-host-cmn/os_if/linux/wlan_osif_features.h b/qca-wifi-host-cmn/os_if/linux/wlan_osif_features.h
+index b5a2810..c3f906c 100644
+--- a/qca-wifi-host-cmn/os_if/linux/wlan_osif_features.h
++++ b/qca-wifi-host-cmn/os_if/linux/wlan_osif_features.h
+@@ -26,18 +26,32 @@
+ 
+ #include <linux/version.h>
+ 
++/*
++ * junkyard (lynx-linus-mainline): the checks below used __ANDROID_COMMON_KERNEL__
++ * to mean "cfg80211 has the MLO (link_id) interfaces the Android 5.15 kernels
++ * backported". Linus' cfg80211 has had them natively since 6.0, and a non-ACK
++ * build no longer defines the macro (device_build.bzl), so accept either. The
++ * per-feature conditions (IEEE80211_MLD_MAX_NUM_LINKS, ...) still apply.
++ */
++#if defined(__ANDROID_COMMON_KERNEL__) || \
++	(LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0))
++#define WLAN_OSIF_ACK_CFG80211 1
++#else
++#define WLAN_OSIF_ACK_CFG80211 0
++#endif
++
+ /*
+  * CFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT
+  * Used to indicate the Linux Kernel contains support for single netdevice multi
+  * link support.
+  */
+-#if (defined(__ANDROID_COMMON_KERNEL__) && \
++#if (WLAN_OSIF_ACK_CFG80211 && \
+ 	(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)) && \
+ 	(defined  IEEE80211_MLD_MAX_NUM_LINKS))
+ #define CFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT 1
+ #endif
+ 
+-#if (defined(__ANDROID_COMMON_KERNEL__) && \
++#if (WLAN_OSIF_ACK_CFG80211 && \
+ 	(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 74)) || \
+ 	(defined IEEE80211_EHT_OPER_INFO_PRESENT))
+ #define CFG80211_TX_CONTROL_PORT_LINK_SUPPORT 1
+@@ -47,7 +61,7 @@
+  * WLAN_MLD_AP_STA_CONNECT_SUPPORT
+  * Used to indicate Linux Kernel supports ML connection on SAP.
+  */
+-#if (defined(__ANDROID_COMMON_KERNEL__) && \
++#if (WLAN_OSIF_ACK_CFG80211 && \
+ 	(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)) && \
+ 	(defined CFG80211_MLD_AP_STA_CONNECT_SUPPORT))
+ #define WLAN_MLD_AP_STA_CONNECT_SUPPORT 1
+@@ -58,13 +72,13 @@
+  * Used to indicate Linux Kernel supports ML OWE connection
+  * on SAP
+  */
+-#if (defined(__ANDROID_COMMON_KERNEL__) && \
++#if (WLAN_OSIF_ACK_CFG80211 && \
+ 	(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)) && \
+ 	(defined CFG80211_MLD_AP_OWE_INFO_SUPPORT))
+ #define WLAN_MLD_AP_OWE_INFO_SUPPORT 1
+ #endif
+ 
+-#if (defined(__ANDROID_COMMON_KERNEL__) && \
++#if (WLAN_OSIF_ACK_CFG80211 && \
+ 	(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)) && \
+ 	(defined CFG80211_MLD_AP_STA_CONNECT_UPSTREAM_SUPPORT))
+ #define WLAN_MLD_AP_STA_CONNECT_UPSTREAM_SUPPORT 1
 diff --git a/qca-wifi-host-cmn/qdf/inc/osdep.h b/qca-wifi-host-cmn/qdf/inc/osdep.h
 index b8456e6..8721868 100644
 --- a/qca-wifi-host-cmn/qdf/inc/osdep.h
@@ -524,6 +603,41 @@ index 7a77ab6..be379c4 100644
  		IPA_RESOURCE_NAME_MAX);
  	qdf_mem_copy(QDF_IPA_WLAN_MSG_MAC_ADDR(msg), mac_addr, QDF_NET_ETH_LEN);
  
+diff --git a/qcacld-3.0/core/cds/src/cds_sched.c b/qcacld-3.0/core/cds/src/cds_sched.c
+index b375824..7822eb3 100644
+--- a/qcacld-3.0/core/cds/src/cds_sched.c
++++ b/qcacld-3.0/core/cds/src/cds_sched.c
+@@ -136,8 +136,13 @@ static void cds_rx_thread_log_cpu_affinity_change(unsigned char core_affine_cnt,
+ 	qdf_mem_zero(new_mask_str, sizeof(new_mask_str));
+ 	qdf_mem_zero(new_mask_str, sizeof(old_mask_str));
+ 
+-	cpumap_print_to_pagebuf(false, old_mask_str, old_mask);
+-	cpumap_print_to_pagebuf(false, new_mask_str, new_mask);
++	/*
++	 * junkyard (lynx-linus-mainline): cpumap_print_to_pagebuf() is gone from
++	 * Linus' tree; it was a "%*pb" print bounded by the rest of the page,
++	 * not by this small buffer.
++	 */
++	scnprintf(old_mask_str, sizeof(old_mask_str), "%*pb\n", cpumask_pr_args(old_mask));
++	scnprintf(new_mask_str, sizeof(new_mask_str), "%*pb\n", cpumask_pr_args(new_mask));
+ 
+ 	cds_debug("num online cores %d, high tput req %d, Rx_thread old mask %s new mask %s",
+ 		  core_affine_cnt, tput_req, old_mask_str, new_mask_str);
+@@ -816,8 +821,12 @@ static int cds_ol_rx_thread(void *arg)
+ #ifdef RX_THREAD_PRIORITY
+ 	struct sched_param scheduler_params = {0};
+ 
+-	scheduler_params.sched_priority = 1;
+-	sched_setscheduler(current, SCHED_FIFO, &scheduler_params);
++	/*
++	 * junkyard (lynx-linus-mainline): sched_setscheduler() is not exported
++	 * by Linus' tree; SCHED_FIFO at priority 1 is sched_set_fifo_low().
++	 */
++	(void)scheduler_params;
++	sched_set_fifo_low(current);
+ #else
+ 	set_user_nice(current, -1);
+ #endif
 diff --git a/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c b/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c
 index 3431050..a427dbc 100644
 --- a/qcacld-3.0/core/dp/txrx/ol_txrx_ipa.c
@@ -556,10 +670,24 @@ index 3431050..a427dbc 100644
  		tx_intf.num_props++;
  	}
 diff --git a/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c b/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c
-index 0fd24c2..de45cf0 100644
+index 0fd24c2..dc32231 100644
 --- a/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c
 +++ b/qcacld-3.0/core/dp/txrx3.0/dp_rx_thread.c
-@@ -779,11 +779,21 @@ static int dp_rx_tm_thread_napi_poll(struct napi_struct *napi, int budget)
+@@ -88,7 +88,12 @@ dp_rx_refill_thread_set_affinity(struct dp_rx_refill_thread *refill_thread)
+ 
+ 	qdf_thread_set_cpus_allowed_mask(refill_thread->task, &new_mask);
+ 
+-	cpumap_print_to_pagebuf(false, new_mask_str, &new_mask);
++	/*
++	 * junkyard (lynx-linus-mainline): cpumap_print_to_pagebuf() is gone from
++	 * Linus' tree; it was a "%*pb" print bounded by the rest of the page,
++	 * not by this small buffer.
++	 */
++	scnprintf(new_mask_str, sizeof(new_mask_str), "%*pb\n", cpumask_pr_args(&new_mask));
+ 	dp_debug("Refill Thread CPU mask  %s", new_mask_str);
+ }
+ #else
+@@ -779,11 +784,21 @@ static int dp_rx_tm_thread_napi_poll(struct napi_struct *napi, int budget)
  static void dp_rx_tm_thread_napi_init(struct dp_rx_thread *rx_thread)
  {
  	/* Todo - optimize to use only one dummy netdev for all thread napis */
@@ -582,7 +710,7 @@ index 0fd24c2..de45cf0 100644
  	netif_napi_add(&rx_thread->netdev, &rx_thread->napi,
  		       dp_rx_tm_thread_napi_poll, 64);
  #endif
-@@ -798,7 +808,15 @@ static void dp_rx_tm_thread_napi_init(struct dp_rx_thread *rx_thread)
+@@ -798,7 +813,15 @@ static void dp_rx_tm_thread_napi_init(struct dp_rx_thread *rx_thread)
   */
  static void dp_rx_tm_thread_napi_deinit(struct dp_rx_thread *rx_thread)
  {
@@ -660,7 +788,7 @@ index c2244a8..3923706 100644
  #include <linux/string.h>
  #include <wlan_hdd_includes.h>
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
-index 62cf368..5091688 100644
+index 62cf368..47fef80 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
 +++ b/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
 @@ -7003,7 +7003,7 @@ __wlan_hdd_cfg80211_get_wifi_info(struct wiphy *wiphy,
@@ -693,7 +821,7 @@ index 62cf368..5091688 100644
  	defined(CFG80211_TX_CONTROL_PORT_LINK_SUPPORT))
  static int wlan_hdd_cfg80211_tx_control_port(struct wiphy *wiphy,
  					     struct net_device *dev,
-@@ -24500,40 +24512,192 @@ bool wlan_hdd_cfg80211_rx_control_port(struct net_device *dev,
+@@ -24500,40 +24512,229 @@ bool wlan_hdd_cfg80211_rx_control_port(struct net_device *dev,
   * @key_mgmt_set_pmk = Set pmk key management
   * @update_connect_params = Update connect params
   */
@@ -849,6 +977,43 @@ index 62cf368..5091688 100644
 +#define jy618_wlan_hdd_cfg80211_get_chainmask wlan_hdd_cfg80211_get_chainmask
 +#endif
 +
++/*
++ * junkyard (lynx-linus-mainline): Linus' v7.3 cfg80211 assigns the
++ * remain-on-channel and mgmt-tx cookies and hands them to the driver (u64
++ * cookie); the Android Common Kernels keep the u64 *cookie the driver fills
++ * in. Run the existing handlers, which produce this driver's own id, and record
++ * which cfg80211 cookie it stands for; os_if/p2p translates ids back to that
++ * cookie in the ready-on-channel / expired / tx-status events and in cancels.
++ */
++#include "wlan_cfg80211_p2p.h"
++#ifdef WLAN_CFG80211_CORE_COOKIE
++static int jy73_wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy, struct wireless_dev *wdev, struct ieee80211_channel *chan, unsigned int duration, u64 cookie, const u8 *rx_addr)
++{
++	u64 drv_cookie = 0;
++	int ret;
++
++	ret = jy618_wlan_hdd_cfg80211_remain_on_channel(wiphy, wdev, chan, duration, &drv_cookie, rx_addr);
++	if (!ret)
++		wlan_cfg80211_p2p_map_cookie(drv_cookie, cookie);
++	return ret;
++}
++
++static int jy73_wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev, struct cfg80211_mgmt_tx_params *params, u64 cookie)
++{
++	u64 drv_cookie = 0;
++	int ret;
++
++	ret = wlan_hdd_mgmt_tx(wiphy, wdev, params, &drv_cookie);
++	/* id 0: dont_wait_for_ack, no tx status will be reported */
++	if (!ret && drv_cookie)
++		wlan_cfg80211_p2p_map_cookie(drv_cookie, cookie);
++	return ret;
++}
++#else
++#define jy73_wlan_hdd_cfg80211_remain_on_channel jy618_wlan_hdd_cfg80211_remain_on_channel
++#define jy73_wlan_hdd_mgmt_tx wlan_hdd_mgmt_tx
++#endif
++
  static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
  	.add_virtual_intf = wlan_hdd_add_virtual_intf,
  	.del_virtual_intf = wlan_hdd_del_virtual_intf,
@@ -877,9 +1042,10 @@ index 62cf368..5091688 100644
 +	.set_wiphy_params = jy618_wlan_hdd_cfg80211_set_wiphy_params,
 +	.set_tx_power = jy618_wlan_hdd_cfg80211_set_txpower,
 +	.get_tx_power = jy618_wlan_hdd_cfg80211_get_txpower,
-+	.remain_on_channel = jy618_wlan_hdd_cfg80211_remain_on_channel,
++	.remain_on_channel = jy73_wlan_hdd_cfg80211_remain_on_channel,
  	.cancel_remain_on_channel = wlan_hdd_cfg80211_cancel_remain_on_channel,
- 	.mgmt_tx = wlan_hdd_mgmt_tx,
+-	.mgmt_tx = wlan_hdd_mgmt_tx,
++	.mgmt_tx = jy73_wlan_hdd_mgmt_tx,
  	.mgmt_tx_cancel_wait = wlan_hdd_cfg80211_mgmt_tx_cancel_wait,
 -	.set_default_mgmt_key = wlan_hdd_set_default_mgmt_key,
 +	.set_default_mgmt_key = jy618_wlan_hdd_set_default_mgmt_key,
@@ -901,7 +1067,7 @@ index 62cf368..5091688 100644
  	.set_pmksa = wlan_hdd_cfg80211_set_pmksa,
  	.del_pmksa = wlan_hdd_cfg80211_del_pmksa,
  	.flush_pmksa = wlan_hdd_cfg80211_flush_pmksa,
-@@ -24569,7 +24733,7 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+@@ -24569,7 +24770,7 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
  	.channel_switch = wlan_hdd_cfg80211_channel_switch,
  #endif
  #ifdef FEATURE_MONITOR_MODE_SUPPORT
@@ -910,7 +1076,7 @@ index 62cf368..5091688 100644
  #endif
  #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) || \
  	defined(CFG80211_ABORT_SCAN)
-@@ -24592,8 +24756,8 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
+@@ -24592,8 +24793,8 @@ static struct cfg80211_ops wlan_hdd_cfg80211_ops = {
  	.del_nan_func = wlan_hdd_cfg80211_del_nan_func,
  	.nan_change_conf = wlan_hdd_cfg80211_nan_change_conf,
  #endif
@@ -1080,6 +1246,39 @@ index 82bd622..316f243 100644
  		OEM_TARGET_SIGNATURE_LEN);
  	data_cap->oem_target_type = hdd_ctx->target_type;
  	data_cap->oem_fw_version = hdd_ctx->target_fw_version;
+diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_power.c b/qcacld-3.0/core/hdd/src/wlan_hdd_power.c
+index 0bec34d..66c956e 100644
+--- a/qcacld-3.0/core/hdd/src/wlan_hdd_power.c
++++ b/qcacld-3.0/core/hdd/src/wlan_hdd_power.c
+@@ -89,6 +89,28 @@
+ #include <linux/igmp.h>
+ #include "qdf_types.h"
+ #include <linux/cpuidle.h>
++#include <linux/cpu.h>
++#include <linux/pm_qos.h>
++
++#if !IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
++/*
++ * junkyard (lynx-linus-mainline): cpuidle_governor_latency_req() is exported
++ * only by the Android Common Kernels, and so are the global CPU latency QoS
++ * readers it combines (cpu_latency_qos_limit() and the wakeup variant). This
++ * keeps its per-CPU device resume-latency half, which needs only inline and
++ * exported helpers (dev_pm_qos_read_value(); the inline
++ * dev_pm_qos_raw_resume_latency() reads through the unexported
++ * pm_qos_read_value()); a global /dev/cpu_dma_latency vote is not seen here.
++ */
++static s64 jy_cpuidle_governor_latency_req(unsigned int cpu)
++{
++	struct device *device = get_cpu_device(cpu);
++
++	return (s64)dev_pm_qos_read_value(device, DEV_PM_QOS_RESUME_LATENCY) *
++	       NSEC_PER_USEC;
++}
++#define cpuidle_governor_latency_req jy_cpuidle_governor_latency_req
++#endif
+ #include <cdp_txrx_ctrl.h>
+ 
+ /* Preprocessor definitions and constants */
 diff --git a/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c b/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c
 index 07e95ae..8725a7c 100644
 --- a/qcacld-3.0/core/hdd/src/wlan_hdd_sysfs.c
@@ -1251,3 +1450,171 @@ index dcdde4d..813342e7 100644
  		sizeof(info->fw_build_timestamp));
  
  	return 0;
+diff --git a/qcacld-3.0/os_if/p2p/inc/wlan_cfg80211_p2p.h b/qcacld-3.0/os_if/p2p/inc/wlan_cfg80211_p2p.h
+index 9e7a947..02b81c0 100644
+--- a/qcacld-3.0/os_if/p2p/inc/wlan_cfg80211_p2p.h
++++ b/qcacld-3.0/os_if/p2p/inc/wlan_cfg80211_p2p.h
+@@ -23,6 +23,7 @@
+ #ifndef _WLAN_CFG80211_P2P_H_
+ #define _WLAN_CFG80211_P2P_H_
+ 
++#include <linux/version.h>
+ #include <qdf_types.h>
+ 
+ struct wlan_objmgr_psoc;
+@@ -49,6 +50,19 @@ QDF_STATUS p2p_psoc_enable(struct wlan_objmgr_psoc *psoc);
+  */
+ QDF_STATUS p2p_psoc_disable(struct wlan_objmgr_psoc *psoc);
+ 
++/*
++ * junkyard (lynx-linus-mainline): since Linus' v7.3 cfg80211 assigns the
++ * remain-on-channel and mgmt-tx cookies itself and passes them to the driver
++ * (u64 cookie, not u64 *cookie); the Android Common Kernels keep the old
++ * driver-assigned scheme. This driver identifies its ROC/TX contexts by its
++ * own idr id, so the cfg80211 ops record which cfg80211 cookie each id
++ * stands for, and the events and cancels below translate between the two.
++ */
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)) && !defined(__ANDROID_COMMON_KERNEL__)
++#define WLAN_CFG80211_CORE_COOKIE 1
++void wlan_cfg80211_p2p_map_cookie(uint64_t drv_cookie, uint64_t cfg_cookie);
++#endif
++
+ /**
+  * wlan_cfg80211_roc() - API to process cfg80211 roc request
+  * @vdev: Pointer to vdev object
+diff --git a/qcacld-3.0/os_if/p2p/src/wlan_cfg80211_p2p.c b/qcacld-3.0/os_if/p2p/src/wlan_cfg80211_p2p.c
+index 0985995..f486b91 100644
+--- a/qcacld-3.0/os_if/p2p/src/wlan_cfg80211_p2p.c
++++ b/qcacld-3.0/os_if/p2p/src/wlan_cfg80211_p2p.c
+@@ -34,6 +34,91 @@
+ #include "wlan_cfg80211.h"
+ #include "wlan_cfg80211_p2p.h"
+ 
++#ifdef WLAN_CFG80211_CORE_COOKIE
++#include <linux/spinlock.h>
++/*
++ * junkyard (lynx-linus-mainline): driver id <-> cfg80211 cookie, see the
++ * header. A small table is enough: entries live from the request until the
++ * ROC expires or the frame's tx status is reported, and the oldest entry is
++ * reused if requests ever outrun completions. A lookup miss reports the
++ * driver's own id, as before.
++ */
++#define WLAN_CFG80211_COOKIE_SLOTS 32
++static struct {
++	bool used;
++	uint64_t drv;
++	uint64_t cfg;
++} wlan_cfg80211_cookies[WLAN_CFG80211_COOKIE_SLOTS];
++static unsigned int wlan_cfg80211_cookie_next;
++static DEFINE_SPINLOCK(wlan_cfg80211_cookie_lock);
++
++void wlan_cfg80211_p2p_map_cookie(uint64_t drv_cookie, uint64_t cfg_cookie)
++{
++	unsigned long flags;
++	int i, slot = -1;
++
++	spin_lock_irqsave(&wlan_cfg80211_cookie_lock, flags);
++	for (i = 0; i < WLAN_CFG80211_COOKIE_SLOTS; i++) {
++		if (wlan_cfg80211_cookies[i].used &&
++		    wlan_cfg80211_cookies[i].drv == drv_cookie) {
++			slot = i;
++			break;
++		}
++		if (slot < 0 && !wlan_cfg80211_cookies[i].used)
++			slot = i;
++	}
++	if (slot < 0) {
++		slot = wlan_cfg80211_cookie_next;
++		wlan_cfg80211_cookie_next = (slot + 1) % WLAN_CFG80211_COOKIE_SLOTS;
++	}
++	wlan_cfg80211_cookies[slot].used = true;
++	wlan_cfg80211_cookies[slot].drv = drv_cookie;
++	wlan_cfg80211_cookies[slot].cfg = cfg_cookie;
++	spin_unlock_irqrestore(&wlan_cfg80211_cookie_lock, flags);
++}
++
++static uint64_t wlan_cfg80211_cookie_to_cfg(uint64_t drv_cookie, bool release)
++{
++	unsigned long flags;
++	uint64_t cfg = drv_cookie;
++	int i;
++
++	spin_lock_irqsave(&wlan_cfg80211_cookie_lock, flags);
++	for (i = 0; i < WLAN_CFG80211_COOKIE_SLOTS; i++) {
++		if (wlan_cfg80211_cookies[i].used &&
++		    wlan_cfg80211_cookies[i].drv == drv_cookie) {
++			cfg = wlan_cfg80211_cookies[i].cfg;
++			if (release)
++				wlan_cfg80211_cookies[i].used = false;
++			break;
++		}
++	}
++	spin_unlock_irqrestore(&wlan_cfg80211_cookie_lock, flags);
++	return cfg;
++}
++
++static uint64_t wlan_cfg80211_cookie_to_drv(uint64_t cfg_cookie)
++{
++	unsigned long flags;
++	uint64_t drv = cfg_cookie;
++	int i;
++
++	spin_lock_irqsave(&wlan_cfg80211_cookie_lock, flags);
++	for (i = 0; i < WLAN_CFG80211_COOKIE_SLOTS; i++) {
++		if (wlan_cfg80211_cookies[i].used &&
++		    wlan_cfg80211_cookies[i].cfg == cfg_cookie) {
++			drv = wlan_cfg80211_cookies[i].drv;
++			break;
++		}
++	}
++	spin_unlock_irqrestore(&wlan_cfg80211_cookie_lock, flags);
++	return drv;
++}
++#else
++#define wlan_cfg80211_cookie_to_cfg(drv, release) (drv)
++#define wlan_cfg80211_cookie_to_drv(cfg) (cfg)
++#endif
++
+ #define MAX_NO_OF_2_4_CHANNELS 14
+ #define MAX_OFFCHAN_TIME_FOR_DNBS 150
+ 
+@@ -145,7 +230,7 @@ static void wlan_p2p_action_tx_cnf_callback(void *user_data,
+ 	is_success = tx_cnf->status ? false : true;
+ 	cfg80211_mgmt_tx_status(
+ 		wdev,
+-		tx_cnf->action_cookie,
++		wlan_cfg80211_cookie_to_cfg(tx_cnf->action_cookie, true),
+ 		tx_cnf->buf, tx_cnf->buf_len,
+ 		is_success, GFP_KERNEL);
+ fail:
+@@ -291,11 +376,12 @@ static void wlan_p2p_event_callback(void *user_data,
+ 
+ 	if (p2p_event->roc_event == ROC_EVENT_READY_ON_CHAN) {
+ 		cfg80211_ready_on_channel(wdev,
+-			p2p_event->cookie, chan,
++			wlan_cfg80211_cookie_to_cfg(p2p_event->cookie, false), chan,
+ 			p2p_event->duration, GFP_KERNEL);
+ 	} else if (p2p_event->roc_event == ROC_EVENT_COMPLETED) {
+ 		cfg80211_remain_on_channel_expired(wdev,
+-			p2p_event->cookie, chan, GFP_KERNEL);
++			wlan_cfg80211_cookie_to_cfg(p2p_event->cookie, true),
++			chan, GFP_KERNEL);
+ 	} else {
+ 		osif_err("Invalid p2p event");
+ 	}
+@@ -401,7 +487,7 @@ int wlan_cfg80211_cancel_roc(struct wlan_objmgr_vdev *vdev,
+ 	}
+ 
+ 	return qdf_status_to_os_return(
+-		ucfg_p2p_roc_cancel_req(psoc, cookie));
++		ucfg_p2p_roc_cancel_req(psoc, wlan_cfg80211_cookie_to_drv(cookie)));
+ }
+ 
+ int wlan_cfg80211_mgmt_tx(struct wlan_objmgr_vdev *vdev,
+@@ -484,5 +570,5 @@ int wlan_cfg80211_mgmt_tx_cancel(struct wlan_objmgr_vdev *vdev,
+ 	}
+ 
+ 	return qdf_status_to_os_return(
+-		ucfg_p2p_mgmt_tx_cancel(psoc, vdev, cookie));
++		ucfg_p2p_mgmt_tx_cancel(psoc, vdev, wlan_cfg80211_cookie_to_drv(cookie)));
+ }

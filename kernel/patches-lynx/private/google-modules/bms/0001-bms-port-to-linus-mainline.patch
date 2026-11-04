@@ -28,12 +28,77 @@ Linux 6.18 -> android-mainline (7.3):
     every in-tree caller passes).
   * misc/logbuffer.c: register_syscore_ops() -> register_syscore() with a
     struct syscore; syscore callbacks take a void *data.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * gbms_power_supply.h: POWER_SUPPLY_CHARGE_TYPE_TAPER_EXT (50), an ACK
+    addition to enum power_supply_charge_type, defined with the same value.
+  * power_supply_get_by_reference_array() (ACK-only) from
+    <soc/google/psy-reference-array.h> (soc/gs linus-compat), rebuilt on
+    power_supply_for_each_psy() + power_supply_get_by_name().
+  * CRC8: GOOGLE_BMS_CRC8 (misc/Kconfig) selects it, so the device build
+    makes lib/crc/crc8.ko; Linus' GKI does not build CRC8 in.
+  * max1720x_battery, max77779_fg: strncpy() from <soc/google/linus-compat.h>.
+  * google_dc_pps: PPS sink-PDO updates need GrapheneOS's
+    tcpm_update_sink_capabilities(), which Linus' TCPM lacks; -EOPNOTSUPP,
+    charging stays on the device-tree sink PDOs.
 ---
+diff --git a/gbms_power_supply.h b/gbms_power_supply.h
+index 8d32b46..2b058be 100644
+--- a/gbms_power_supply.h
++++ b/gbms_power_supply.h
+@@ -20,6 +20,17 @@
+ 
+ #include <linux/power_supply.h>
+ 
++#if !IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
++/*
++ * junkyard (lynx-linus-mainline): the Android Common Kernels add this value to
++ * enum power_supply_charge_type ("charging in CV phase", pinned at 50 to stay
++ * clear of upstream's); Linus' tree does not have it. Same value, so the
++ * chargers and google_battery still agree. The core's charge_type sysfs file
++ * has no text for it.
++ */
++#define POWER_SUPPLY_CHARGE_TYPE_TAPER_EXT 50
++#endif
++
+ enum {
+ 	GBMS_TAPER_CONTROL_OFF = 0,
+ 	GBMS_TAPER_CONTROL_ON,
 diff --git a/google_charger.c b/google_charger.c
-index d7ba934..3600471 100644
+index d7ba934..106aea5 100644
 --- a/google_charger.c
 +++ b/google_charger.c
-@@ -1231,8 +1231,8 @@ static void chg_termination_work(struct work_struct *work)
+@@ -46,6 +46,8 @@
+ #if IS_ENABLED(CONFIG_GOOGLE_CRASH_DEBUG_DUMP)
+ #include <soc/google/google-cdd.h>
+ #endif
++/* junkyard (lynx-linus-mainline): ACK-only power_supply_get_by_reference_array(). */
++#include <soc/google/psy-reference-array.h>
+ 
+ #define CHG_DELAY_INIT_MS		250
+ #define CHG_DELAY_INIT_DETECT_MS	1000
+@@ -706,8 +708,19 @@ static int chg_update_capability(struct power_supply *tcpm_psy, unsigned int nr_
+ 		return -EINVAL;
+ 
+ 	port = chg_get_tcpm_port(tcpm_psy);
++	/*
++	 * junkyard (lynx-linus-mainline): tcpm_update_sink_capabilities() is
++	 * GrapheneOS's TCPM extension; Linus' TCPM cannot change the sink
++	 * capabilities after registration, so the DT sink PDOs stay in effect.
++	 */
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 	if (port)
+ 		ret = tcpm_update_sink_capabilities(port, pdo, nr_pdo, OP_SNK_MW);
++#else
++	if (port)
++		ret = -EOPNOTSUPP;
++	(void)pdo;
++#endif
+ 
+ 	return ret;
+ }
+@@ -1231,8 +1244,8 @@ static void chg_termination_work(struct work_struct *work)
  			pr_info("Get CHARGE_COUNTER fail, try_cnt=%d, rc=%d\n",
  				chg_term->retry_cnt, rc);
  			/* try again and keep the pm_stay_awake */
@@ -44,7 +109,7 @@ index d7ba934..3600471 100644
  			return;
  		} else {
  			goto error;
-@@ -1264,7 +1264,7 @@ static void chg_termination_work(struct work_struct *work)
+@@ -1264,7 +1277,7 @@ static void chg_termination_work(struct work_struct *work)
  	pr_info("Prevent overcharge data: cc: %d, cc_full_ref: %d, delay: %d\n",
  		cc, chg_term->cc_full_ref, delay);
  
@@ -53,7 +118,7 @@ index d7ba934..3600471 100644
  
  	pm_relax(chg_drv->device);
  	return;
-@@ -1317,8 +1317,8 @@ static void chg_eval_chg_termination(struct chg_termination *chg_term)
+@@ -1317,8 +1330,8 @@ static void chg_eval_chg_termination(struct chg_termination *chg_term)
  	 * battery. Trigger the function once charging is completed
  	 * to prevent overcharing.
  	 */
@@ -64,7 +129,7 @@ index d7ba934..3600471 100644
  	chg_term->alarm_start = true;
  	chg_term->cc_full_ref = 0;
  	chg_term->retry_cnt = 0;
-@@ -4911,8 +4911,8 @@ static int msc_update_charger_cb(struct gvotable_election *el,
+@@ -4911,8 +4924,8 @@ static int msc_update_charger_cb(struct gvotable_election *el,
  
  msc_reschedule:
  	alarm_try_to_cancel(&chg_drv->chg_wakeup_alarm);
@@ -75,7 +140,7 @@ index d7ba934..3600471 100644
  
  	pr_debug("MSC_CHG fv_uv=%d, cc_max=%d, rerun in %d ms (%d)\n",
  		 fv_uv, cc_max, update_interval, rc);
-@@ -5957,7 +5957,7 @@ chg_thermal_device_register(const char *of_name,
+@@ -5957,7 +5970,7 @@ chg_thermal_device_register(const char *of_name,
  		return -EINVAL;
  	}
  
@@ -97,6 +162,41 @@ index da94302..adb4ece 100644
  							tcd_name,
  							ctdev,
  							ops);
+diff --git a/google_dc_pps.c b/google_dc_pps.c
+index f076f18..81dc557 100644
+--- a/google_dc_pps.c
++++ b/google_dc_pps.c
+@@ -29,6 +29,8 @@
+ #include <linux/debugfs.h>
+ #include <linux/seq_file.h>
+ #endif
++/* junkyard (lynx-linus-mainline): ACK-only power_supply_get_by_reference_array(). */
++#include <soc/google/psy-reference-array.h>
+ 
+ #define PPS_UPDATE_DELAY_MS		2000
+ 
+@@ -923,9 +925,21 @@ int pps_request_pdo(struct pd_pps_data *pps_data, unsigned int ta_idx,
+ 
+ 	/* tcpm pport */
+ 	port = chg_get_tcpm_port(pps_data->pps_psy);
++	/*
++	 * junkyard (lynx-linus-mainline): tcpm_update_sink_capabilities() is
++	 * GrapheneOS's TCPM extension; Linus' TCPM cannot re-advertise sink
++	 * PDOs after registration. PPS (direct charging) cannot be requested
++	 * this way, so charging stays on the sink PDOs from the device tree.
++	 */
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 	if (port)
+ 		ret = tcpm_update_sink_capabilities(port, pps_data->snk_pdo,
+ 						    ta_idx, max_mw);
++#else
++	if (port)
++		ret = -EOPNOTSUPP;
++	(void)max_mw;
++#endif
+ 
+ 
+ 	return ret;
 diff --git a/google_dock.c b/google_dock.c
 index 7d6ff56..395e2b5 100644
 --- a/google_dock.c
@@ -138,6 +238,19 @@ index 371b23b..43b954f 100644
  	ret = devm_gpiochip_add_data(&client->dev, &ln8411_charger->gpio, ln8411_charger);
  	dev_info(&client->dev, "%d GPIOs registered ret: %d\n", ln8411_charger->gpio.ngpio, ret);
  #endif
+diff --git a/max1720x_battery.c b/max1720x_battery.c
+index cd79624..376494b 100644
+--- a/max1720x_battery.c
++++ b/max1720x_battery.c
+@@ -37,6 +37,8 @@
+ #include "max1720x_battery.h"
+ 
+ #include <linux/debugfs.h>
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ #define MAX17X0X_TPOR_MS 150
+ 
 diff --git a/max20339.c b/max20339.c
 index 4f10cbe..c82f4b9 100644
 --- a/max20339.c
@@ -199,6 +312,19 @@ index 56f0d27..737d756 100644
  	of_node_put(dp);
  	ret = devm_gpiochip_add_data(dev, &data->gpio, data);
  	dev_dbg(dev, "%d GPIOs registered ret: %d\n", data->gpio.ngpio, ret);
+diff --git a/max77779_fg.c b/max77779_fg.c
+index af6b556..d142e69 100644
+--- a/max77779_fg.c
++++ b/max77779_fg.c
+@@ -27,6 +27,8 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+ #include "max77779_fg.h"
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ /* sync from google/logbuffer.c */
+ #define LOG_BUFFER_ENTRY_SIZE	256
 diff --git a/max77779_pmic_irq.c b/max77779_pmic_irq.c
 index 46a91fc..fba7b07 100644
 --- a/max77779_pmic_irq.c
@@ -239,6 +365,24 @@ index b04fdc4..41a9186 100644
 +
  obj-$(CONFIG_GOOGLE_VOTABLE) += gvotable.o
  obj-$(CONFIG_GOOGLE_LOGBUFFER)	+= logbuffer.o
+diff --git a/misc/Kconfig b/misc/Kconfig
+index 6ce185e..197ac3f 100644
+--- a/misc/Kconfig
++++ b/misc/Kconfig
+@@ -18,3 +18,13 @@ config GOOGLE_LOGBUFFER
+ 
+ 	  To compile this driver as a module, choose M here: the module will be
+ 	  called logbuffer.
++
++# junkyard (lynx-linus-mainline): the fuel gauge and wireless charger modules
++# (max1720x-battery, max77779-fg, p9221) call crc8()/crc8_populate_msb(). The
++# Android GKIs happen to build CRC8 into vmlinux; Linus' tree with the same
++# defconfig does not, and CRC8 has no prompt. Select it from here so the
++# device build produces lib/crc/crc8.ko (GS201_MODULE_OUTS) next to GBMS.
++config GOOGLE_BMS_CRC8
++	tristate
++	default GOOGLE_LOGBUFFER
++	select CRC8
 diff --git a/misc/gvotable.c b/misc/gvotable.c
 index f079a4d..c745aa9 100644
 --- a/misc/gvotable.c
@@ -293,10 +437,19 @@ index 0c4dd57..2363835 100644
  early_initcall(logbuffer_dev_init);
  module_exit(logbuffer_dev_exit);
 diff --git a/p9221_charger.c b/p9221_charger.c
-index a83ed86..28fb10a 100644
+index a83ed86..6035984 100644
 --- a/p9221_charger.c
 +++ b/p9221_charger.c
-@@ -977,7 +977,7 @@ static int feature_set_dc_icl(struct p9221_charger_data *charger, u32 ilim_ua)
+@@ -29,6 +29,8 @@
+ #include "google_bms.h"
+ #include "google_psy.h"
+ #include <linux/debugfs.h>
++/* junkyard (lynx-linus-mainline): ACK-only power_supply_get_by_reference_array(). */
++#include <soc/google/psy-reference-array.h>
+ 
+ #define P9221R5_OVER_CHECK_NUM		3
+ #define MFG_CHK_COUNT_MAX		30
+@@ -977,7 +979,7 @@ static int feature_set_dc_icl(struct p9221_charger_data *charger, u32 ilim_ua)
  	dev_info(&charger->client->dev, "ICL ramp set alarm %dms, %dua, ramp=%d\n",
  		 delay, charger->icl_ramp_alt_ua, charger->icl_ramp);
  
@@ -305,7 +458,7 @@ index a83ed86..28fb10a 100644
  	return 0;
  }
  
-@@ -3608,8 +3608,8 @@ static void p9221_icl_ramp_start(struct p9221_charger_data *charger)
+@@ -3608,8 +3610,8 @@ static void p9221_icl_ramp_start(struct p9221_charger_data *charger)
  		 charger->pdata->icl_ramp_delay_ms, charger->icl_ramp_ua,
  		 charger->icl_ramp);
  
@@ -316,7 +469,7 @@ index a83ed86..28fb10a 100644
  }
  
  static void p9221_set_online(struct p9221_charger_data *charger)
-@@ -6006,7 +6006,7 @@ static ssize_t authstart_store(struct device *dev,
+@@ -6006,7 +6008,7 @@ static ssize_t authstart_store(struct device *dev,
  	if (ret == 0) {
  		charger->set_auth_icl = true;
  		pm_stay_awake(charger->dev);
@@ -325,7 +478,7 @@ index a83ed86..28fb10a 100644
  		schedule_delayed_work(&charger->auth_dc_icl_work,
  				      msecs_to_jiffies(WLCDC_AUTH_CHECK_INIT_DELAY_MS));
  	} else if (ret < 0) {
-@@ -8509,7 +8509,7 @@ static int p9221_charger_probe(struct i2c_client *client)
+@@ -8509,7 +8511,7 @@ static int p9221_charger_probe(struct i2c_client *client)
  		if(!dn)
  			dev_err(&client->dev, "Failed to find %s DT node\n",
  				charger->gpio.label);

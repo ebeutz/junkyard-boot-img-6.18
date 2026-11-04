@@ -32,6 +32,10 @@ Linux 6.18 -> android-mainline (7.3):
     android-mainline. Their registrations are fenced off; they kept a USB
     device awake while AOC offloads audio, which the Debian image does not
     use. The handlers stay, __maybe_unused.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * aoc_channel_dev: sched_setscheduler() via <soc/google/sched-setscheduler.h>
 ---
 diff --git a/BUILD.bazel b/BUILD.bazel
 index 2fe1e09..e9bee63 100644
@@ -220,6 +224,19 @@ index afe9d4d..237d0c9 100644
  };
  
  static int aoc_pcm_probe(struct platform_device *pdev)
+diff --git a/aoc_channel_dev.c b/aoc_channel_dev.c
+index ecab804..a0c3484 100644
+--- a/aoc_channel_dev.c
++++ b/aoc_channel_dev.c
+@@ -22,6 +22,8 @@
+ 
+ #include "aoc.h"
+ #include "uapi/aoc_channel_dev.h"
++/* junkyard (lynx-linus-mainline): sched_setscheduler[_nocheck]() are not exported. */
++#include <soc/google/sched-setscheduler.h>
+ 
+ #define AOCC_CHARDEV_NAME "aoc_chan"
+ #define AOCC_WAKELOCK_PREFIX "aocc_"
 diff --git a/aoc_uwb_platform_drv.c b/aoc_uwb_platform_drv.c
 index f71b132..e7e0650 100644
 --- a/aoc_uwb_platform_drv.c

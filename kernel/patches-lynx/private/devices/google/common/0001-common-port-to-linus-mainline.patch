@@ -12,12 +12,28 @@ kleaf/device glue for an android-mainline (7.3) GKI:
   * build.config.common: android-mainline replaced
     common/build.config.constants with common/bazel/constants.scl, which kleaf
     exports itself; only source the old file where it still exists.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3):
+  * kleaf/device_build.bzl: kcflags = [] instead of COMMON_KCFLAGS, so
+    -D__ANDROID_COMMON_KERNEL__ is no longer defined; mali, qcacld and others
+    test it to choose ACK-only code paths, and the base kernel is not an ACK.
+  * kleaf/device_build.bzl: ddk_module_headers =
+    //private/google-modules/soc/gs:linus_compat_headers, so every DDK module
+    sees the headers standing in for ACK-only kernel headers/interfaces.
 ---
 diff --git a/kleaf/device_build.bzl b/kleaf/device_build.bzl
-index 88afaa0..2dcf1bd 100644
+index 88afaa0..92befd1 100644
 --- a/kleaf/device_build.bzl
 +++ b/kleaf/device_build.bzl
-@@ -233,11 +233,10 @@ def device_build(
+@@ -24,7 +24,6 @@ load(
+ load("@rules_pkg//pkg:install.bzl", "pkg_install")
+ load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
+ load("@rules_pkg//pkg:pkg.bzl", "pkg_zip")
+-load("//build/kernel/kleaf:constants.bzl", "COMMON_KCFLAGS")
+ load("//private/devices/google/common:constants.bzl", "PIXEL_GKI_MODULES_PATHS")
+ load("//private/devices/google/common/kleaf:create_file.bzl", "create_file")
+ load("//private/devices/google/common/kleaf:image_props.bzl", "image_props")
+@@ -233,11 +232,10 @@ def device_build(
              visibility = ["//visibility:private"],
          )
  
@@ -33,19 +49,27 @@ index 88afaa0..2dcf1bd 100644
  
      kernel_build(
          name = target_kernel,
-@@ -254,8 +253,10 @@ def device_build(
+@@ -254,8 +252,17 @@ def device_build(
          kconfig_ext = target_kconfig_ext,
          make_goals = ["modules", "dtbs"],
          makefile = "//common:Makefile",
+-        kcflags = COMMON_KCFLAGS,
+-        kmi_symbol_list = target_kmi_symbol_list,
 +        # junkyard (lynx-mainline): kleaf main made `pahole` a required
 +        # kernel_build() argument; use the tool common/ builds for its own GKI.
 +        pahole = "//common:pahole",
-         kcflags = COMMON_KCFLAGS,
--        kmi_symbol_list = target_kmi_symbol_list,
++        # junkyard (lynx-linus-mainline): no -D__ANDROID_COMMON_KERNEL__
++        # (COMMON_KCFLAGS): the base kernel is Linus' tree, and mali, qcacld
++        # and others test the macro to choose ACK-only code paths.
++        kcflags = [],
++        # junkyard (lynx-linus-mainline): the compatibility headers that stand
++        # in for ACK-only headers and interfaces, for every DDK module built
++        # against this kernel (see the target).
++        ddk_module_headers = ["//private/google-modules/soc/gs:linus_compat_headers"],
          module_outs = module_outs,
          strip_modules = True,
          visibility = ["//visibility:private"],
-@@ -500,7 +501,6 @@ def device_build(
+@@ -500,7 +507,6 @@ def device_build(
          target_kernel_images,
          target_kernel_modules_install,
          target_kernel_unstripped_modules_archive,

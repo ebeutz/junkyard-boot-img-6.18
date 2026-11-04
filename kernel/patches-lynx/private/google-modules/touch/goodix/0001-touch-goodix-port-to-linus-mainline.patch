@@ -11,6 +11,12 @@ Files: goodix_brl_fwupdate.c, goodix_ts_core.h, goodix_ts_proc.c
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * strncpy() from <soc/google/linus-compat.h>.
+  * goodix_ts_core: irq_info sysfs prints "disable-depth:n/a"; irq_to_desc()
+    is exported only by the Android Common Kernels.
 ---
 diff --git a/goodix_brl_fwupdate.c b/goodix_brl_fwupdate.c
 index b467607..4b1857f 100644
@@ -26,10 +32,40 @@ index b467607..4b1857f 100644
  
  	ret = goodix_fw_sysfs_init(core_data, &core_data->update_ctrl);
 diff --git a/goodix_ts_core.c b/goodix_ts_core.c
-index 33637fb..5867619 100644
+index 33637fb..983585d 100644
 --- a/goodix_ts_core.c
 +++ b/goodix_ts_core.c
-@@ -3137,7 +3137,7 @@ err_out:
+@@ -21,6 +21,8 @@
+ #include <linux/uaccess.h>
+ #include <linux/version.h>
+ #include <drm/drm_panel.h>
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ #if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 38)
+ #include <linux/input/mt.h>
+@@ -473,10 +475,19 @@ static ssize_t goodix_ts_irq_info_show(
+ 	if (r < 0)
+ 		return -EINVAL;
+ 
+-	desc = irq_to_desc(core_data->irq);
+ 	offset += r;
++	/*
++	 * junkyard (lynx-linus-mainline): irq_to_desc() is exported only by the
++	 * Android Common Kernels; the disable depth is not reachable otherwise.
++	 */
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
++	desc = irq_to_desc(core_data->irq);
+ 	r = snprintf(&buf[offset], PAGE_SIZE - offset, "disable-depth:%d\n",
+ 		desc->depth);
++#else
++	(void)desc;
++	r = snprintf(&buf[offset], PAGE_SIZE - offset, "disable-depth:n/a\n");
++#endif
+ 	if (r < 0)
+ 		return -EINVAL;
+ 
+@@ -3137,7 +3148,7 @@ err_out:
  	return ret;
  }
  
@@ -38,7 +74,7 @@ index 33637fb..5867619 100644
  {
  	struct goodix_ts_core *core_data = platform_get_drvdata(pdev);
  	struct goodix_ts_hw_ops *hw_ops = core_data->hw_ops;
-@@ -3183,8 +3183,6 @@ static int goodix_ts_remove(struct platform_device *pdev)
+@@ -3183,8 +3194,6 @@ static int goodix_ts_remove(struct platform_device *pdev)
  	goodix_set_pinctrl_state(core_data, PINCTRL_MODE_SUSPEND);
  	mutex_destroy(&core_data->gesture_data_lock);
  	mutex_destroy(&core_data->cmd_lock);
@@ -60,6 +96,19 @@ index 5a25249..5042b37 100644
  #include <linux/vmalloc.h>
  #include <linux/kthread.h>
  #include <linux/delay.h>
+diff --git a/goodix_ts_inspect.c b/goodix_ts_inspect.c
+index 03c68c9..70e7531 100644
+--- a/goodix_ts_inspect.c
++++ b/goodix_ts_inspect.c
+@@ -21,6 +21,8 @@
+ #include <linux/rtc.h>
+ #include <linux/timer.h>
+ #include <linux/version.h>
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ /* test config */
+ #define TOTAL_FRAME_NUM 1      /* rawdata test frames */
 diff --git a/goodix_ts_proc.c b/goodix_ts_proc.c
 index b08fb78..05443f5 100644
 --- a/goodix_ts_proc.c
