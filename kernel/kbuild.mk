@@ -177,10 +177,13 @@ define build_ddk
 endef
 
 # make: the package's own Makefile, invoked the way Kleaf's kernel_module did
-# (it finds its deps' Module.symvers under COMMON_OUT_DIR itself).
+# (it finds its deps' Module.symvers under COMMON_OUT_DIR itself). M is relative
+# to the kernel tree, as Kleaf passed it: soc/gs's Makefile includes
+# $(KERNEL_SRC)/$(M)/Makefile.preinstall.
+ext_rel = $(shell realpath -m --relative-to=$(KTREE) $(SRC)/$(1))
 define build_make
 	$(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ \
-		M=$(SRC)/$($(1).dir) O=$(KOUT) MO=$(call ext_mo,$(1)) KERNEL_SRC=$(KTREE) \
+		M=$(call ext_rel,$($(1).dir)) O=$(KOUT) MO=$(call ext_mo,$(1)) KERNEL_SRC=$(KTREE) \
 		ROOT_DIR=$(SRC) COMMON_OUT_DIR=$(MOUT) OUT_DIR=$(KOUT) KERNEL_DIR=$(KERNEL_TREE) \
 		modules
 endef
