@@ -216,65 +216,93 @@ MODINST = INSTALL_MOD_PATH=$(STAGE) INSTALL_MOD_STRIP=1 DEPMOD=true \
 INSTALLED_EXT := $(foreach m,$(EXT_MODULES),$(if $($(m).install),$(m)))
 INTREE_KEEP   := $(KERNEL_VENDOR_INTREE_MODULES) $(shell grep -v '^\#' $(REPO)/$(KERNEL_GKI_MODULES))
 
-dist: kernel modules dtbs
-	+@set -e; \
-	kver=$$(cat $(KOUT)/include/config/kernel.release); \
-	mod=$(STAGE)/lib/modules/$$kver; \
-	rm -rf $(STAGE) $(DIST) $(OUT)/vendor_dlkm $(OUT)/system_dlkm $(OUT)/kernel-headers; \
-	mkdir -p $(DIST); \
-	echo "  INSTALL in-tree modules"; \
-	$(KMAKE) $(MODINST) >/dev/null; \
-	keep=$$(mktemp); printf '%s\n' $(INTREE_KEEP) | sed 's|^|kernel/|' | sort -u > $$keep; \
-	(cd $$mod && find kernel -name '*.ko' | sort) | comm -23 - $$keep | (cd $$mod && xargs -r rm -f); \
-	: "GKI modules are shipped if built (Kleaf's module_implicit_outs); the device's own are required (module_outs)"; \
+# The kernel release, read when a recipe runs (it exists once `kernel` ran).
+KVER_SH := $$(cat $(KOUT)/include/config/kernel.release)
+
+# Each step is its own rule, so no shell command grows with the module count
+# (one command for all of lynx's modules overflowed ARG_MAX).
+.PHONY: stage install-intree install-ext assemble
+stage: kernel modules dtbs
+	rm -rf $(STAGE) $(DIST) $(OUT)/vendor_dlkm $(OUT)/system_dlkm $(OUT)/kernel-headers $(OUT)/order
+	mkdir -p $(DIST)
+
+# In-tree modules: install all, keep the GKI list and the device's own. GKI
+# modules ship if built (Kleaf's module_implicit_outs); the device's in-tree
+# ones are required (module_outs).
+install-intree: stage
+	@echo "  INSTALL in-tree modules"
+	+@$(KMAKE) $(MODINST) >/dev/null
+	@mod=$(STAGE)/lib/modules/$(KVER_SH); \
+	printf '%s\n' $(INTREE_KEEP) | sed 's|^|kernel/|' | sort -u > $(OUT)/intree.keep; \
+	(cd $$mod && find kernel -name '*.ko' | sort) | comm -23 - $(OUT)/intree.keep | (cd $$mod && xargs -r rm -f); \
 	for m in $(KERNEL_VENDOR_INTREE_MODULES); do \
 	  test -f $$mod/kernel/$$m || { echo "ERROR: KERNEL_VENDOR_INTREE_MODULES: kernel/$$m was not built (config?)"; exit 1; }; \
-	done; \
-	$(foreach m,$(INSTALLED_EXT), \
-	  echo "  INSTALL $(m)"; \
-	  $(KMAKE) M=$(SRC)/$($(m).dir) MO=$(call ext_mo,$(m)) INSTALL_MOD_DIR=extra/$($(m).dir) \
-	    $(MODINST) >/dev/null; \
-	  for o in $($(m).outs); do \
-	    test -f $$mod/extra/$($(m).dir)/$$o || { echo "ERROR: $(m) did not build $$o (compiled out by its config?)"; exit 1; }; \
-	  done;) \
+	done
+
+# External modules, one install per module. Each declared out must have been
+# installed. Like Kleaf, an out may be a basename or a path under the package
+# (trusty's are basenames for drivers/trusty/*.ko), so it is matched by path
+# suffix; the installed paths, in declaration order, go to $(OUT)/order/<id>.
+order_file = $(OUT)/order/$(subst /,_,$(1))
+define install_rule
+.PHONY: install/$(1)
+install/$(1): install-intree
+	@echo "  INSTALL $(1)"
+	+@$$(KMAKE) M=$(SRC)/$($(1).dir) MO=$(call ext_mo,$(1)) INSTALL_MOD_DIR=extra/$($(1).dir) $$(MODINST) >/dev/null
+	@mkdir -p $(OUT)/order; : > $(call order_file,$(1)); \
+	for o in $($(1).outs); do \
+	  f=$$$$(cd $(STAGE)/lib/modules/$$(KVER_SH) && find extra/$($(1).dir) -path "*/$$$$o" | sort | head -n 1); \
+	  test -n "$$$$f" || { echo "ERROR: $(1) did not build $$$$o (compiled out by its config?)"; exit 1; }; \
+	  echo "$$$$f" >> $(call order_file,$(1)); \
+	done
+endef
+$(foreach m,$(INSTALLED_EXT),$(eval $(call install_rule,$(m))))
+
+install-ext: $(addprefix install/,$(INSTALLED_EXT))
+
+# vendor_dlkm = the device's in-tree modules + the external ones, in build
+# order; system_dlkm = the GKI modules.
+assemble: install-ext
+	printf 'kernel/%s\n' $(KERNEL_VENDOR_INTREE_MODULES) > $(OUT)/vendor.order
+	cat $(foreach m,$(INSTALLED_EXT),$(call order_file,$(m))) >> $(OUT)/vendor.order
+	@set -e; kver=$(KVER_SH); mod=$(STAGE)/lib/modules/$$kver; \
 	echo "  DEPMOD  $$kver"; \
 	depmod -b $(STAGE) -e -F $(KOUT)/System.map $$kver 2>$(OUT)/depmod.log || { cat $(OUT)/depmod.log; exit 1; }; \
 	if grep -q 'needs unknown symbol' $(OUT)/depmod.log; then cat $(OUT)/depmod.log; echo "ERROR: modules need unknown symbols"; exit 1; fi; \
-	: "vendor_dlkm = external modules + the device's in-tree ones; system_dlkm = the rest"; \
-	vorder=$(OUT)/vendor.order; : > $$vorder; \
-	for m in $(KERNEL_VENDOR_INTREE_MODULES); do echo kernel/$$m >> $$vorder; done; \
-	$(foreach m,$(INSTALLED_EXT),for o in $($(m).outs); do echo extra/$($(m).dir)/$$o >> $$vorder; done;) \
 	for a in vendor_dlkm system_dlkm; do mkdir -p $(OUT)/$$a/lib/modules/$$kver; done; \
 	(cd $(STAGE) && find lib -name '*.ko' | sort) > $(OUT)/all.list; \
-	sed "s|^|lib/modules/$$kver/|" $$vorder | sort > $(OUT)/vendor.list; \
+	sed "s|^|lib/modules/$$kver/|" $(OUT)/vendor.order | sort > $(OUT)/vendor.list; \
 	comm -23 $(OUT)/all.list $(OUT)/vendor.list > $(OUT)/system.list; \
 	rsync -a --files-from=$(OUT)/vendor.list $(STAGE)/ $(OUT)/vendor_dlkm/; \
 	rsync -a --files-from=$(OUT)/system.list $(STAGE)/ $(OUT)/system_dlkm/; \
-	cp $$vorder $(OUT)/vendor_dlkm/lib/modules/$$kver/modules.order; \
+	cp $(OUT)/vendor.order $(OUT)/vendor_dlkm/lib/modules/$$kver/modules.order; \
 	grep -v '^#' $(REPO)/$(KERNEL_GKI_MODULES) | sed 's|^|kernel/|' \
-	  | while read m; do test -f $$mod/$$m && echo $$m; done > $(OUT)/system_dlkm/lib/modules/$$kver/modules.order; \
+	  | while read m; do if [ -f $$mod/$$m ]; then echo $$m; fi; done > $(OUT)/system_dlkm/lib/modules/$$kver/modules.order; \
 	for a in vendor_dlkm system_dlkm; do \
 	  tar czf $(DIST)/$${a}_staging_archive.tar.gz -C $(OUT)/$$a .; done; \
 	python3 $(REPO)/tools/modules-load-lists.py --moddir $$mod \
 	  $(addprefix --ramdisk-list $(SRC)/,$(KERNEL_VENDOR_RAMDISK_LISTS)) \
-	  --vendor-order $$vorder --gki-list $(REPO)/$(KERNEL_GKI_MODULES) --out $(DIST); \
-	: "kernel image and build products"; \
+	  --vendor-order $(OUT)/vendor.order --gki-list $(REPO)/$(KERNEL_GKI_MODULES) --out $(DIST)
+	@echo "  DIST    kernel, headers, device tree"
 	cp $(KOUT)/arch/arm64/boot/Image $(KOUT)/arch/arm64/boot/Image.lz4 $(KOUT)/vmlinux \
-	   $(KOUT)/System.map $(KOUT)/vmlinux.symvers $(KOUT)/modules.builtin \
-	   $(KOUT)/modules.builtin.modinfo $(DIST)/; \
-	cp $(KOUT)/Module.symvers $(DIST)/kernel_aarch64_Module.symvers; \
-	cp $(KOUT)/.config $(DIST)/kernel_aarch64_dot_config; \
-	: "headers: the tree's arch/ and include/, plus everything the build generated"; \
-	mkdir -p $(OUT)/kernel-headers; \
-	(cd $(KTREE) && find arch include -name '*.h' -not -type d -print0 | cpio -0pdm --quiet $(OUT)/kernel-headers); \
-	(cd $(KOUT) && find . -name '*.h' -not -type d -print0 | cpio -0pdm --quiet $(OUT)/kernel-headers); \
-	tar czf $(DIST)/kernel-headers.tar.gz -C $(OUT) kernel-headers; \
-	: "device tree"; \
-	for d in $(KERNEL_DTBS); do cp $(DTS_OUT)/$$d $(DIST)/; done; \
-	(cd $(DIST) && cat $(notdir $(KERNEL_DTBS)) > dtb.img); \
-	for d in $(KERNEL_DTBOS); do cp $(DTS_OUT)/$$d $(DIST)/; done; \
-	(cd $(DIST) && python3 $(REPO)/tools/mkdtboimg.py dtbo.img $(KERNEL_DTBOS)); \
-	echo "kernel $$kver: $$(find $$mod -name '*.ko' | wc -l) modules -> $(DIST)"
+	   $(KOUT)/System.map $(KOUT)/modules.builtin \
+	   $(KOUT)/modules.builtin.modinfo $(DIST)/
+	cp $(KOUT)/Module.symvers $(DIST)/kernel_aarch64_Module.symvers
+	@# vmlinux.symvers (vmlinux's own exports) is an intermediate kbuild does
+	@# not keep; Kleaf's dist had it. It is Module.symvers' vmlinux lines.
+	awk -F'\t' '$$3 == "vmlinux"' $(KOUT)/Module.symvers > $(DIST)/vmlinux.symvers
+	cp $(KOUT)/.config $(DIST)/kernel_aarch64_dot_config
+	@# headers: the tree's arch/ and include/, plus everything the build generated
+	mkdir -p $(OUT)/kernel-headers
+	cd $(KTREE) && find arch include -name '*.h' -not -type d -print0 | cpio -0pdm --quiet $(OUT)/kernel-headers
+	cd $(KOUT) && find . -name '*.h' -not -type d -print0 | cpio -0pdm --quiet $(OUT)/kernel-headers
+	tar czf $(DIST)/kernel-headers.tar.gz -C $(OUT) kernel-headers
+	cp $(addprefix $(DTS_OUT)/,$(KERNEL_DTBS) $(KERNEL_DTBOS)) $(DIST)/
+	cd $(DIST) && cat $(notdir $(KERNEL_DTBS)) > dtb.img
+	cd $(DIST) && python3 $(REPO)/tools/mkdtboimg.py dtbo.img $(KERNEL_DTBOS)
+	@echo "kernel $(KVER_SH): $$(find $(STAGE) -name '*.ko' | wc -l) modules -> $(DIST)"
+
+dist: assemble
 
 clean:
 	rm -rf $(OUT)
