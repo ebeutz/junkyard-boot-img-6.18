@@ -180,9 +180,16 @@ endef
 # (it finds its deps' Module.symvers under COMMON_OUT_DIR itself). M is relative
 # to the kernel tree, as Kleaf passed it: soc/gs's Makefile includes
 # $(KERNEL_SRC)/$(M)/Makefile.preinstall.
+#
+# KCFLAGS is exported (empty) in the ENVIRONMENT, as Kleaf's kernel_env did.
+# These Makefiles add their include paths with `KCFLAGS += ...` (e.g.
+# soc/gs/Makefile.include, which mali includes), and make passes a makefile
+# variable on to kbuild's sub-make only if it came from the environment. Unset,
+# the additions are silently dropped; on the make command line they would
+# override the `+=` instead.
 ext_rel = $(shell realpath -m --relative-to=$(KTREE) $(SRC)/$(1))
 define build_make
-	$(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ \
+	KCFLAGS= $(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ \
 		M=$(call ext_rel,$($(1).dir)) O=$(KOUT) MO=$(call ext_mo,$(1)) KERNEL_SRC=$(KTREE) \
 		ROOT_DIR=$(SRC) COMMON_OUT_DIR=$(MOUT) OUT_DIR=$(KOUT) KERNEL_DIR=$(KERNEL_TREE) \
 		modules

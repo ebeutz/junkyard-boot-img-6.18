@@ -455,6 +455,22 @@ class Analysis:
             return out
         return []
 
+    def hdr_files(self, text, pkg, seen=None):
+        """Header files a dep makes available: ddk_headers/ddk_module hdrs, transitively."""
+        seen = set() if seen is None else seen
+        lab = Label.parse(text, pkg)
+        if lab.external or lab in seen:
+            return []
+        seen.add(lab)
+        lab, r = self.ws.resolve(lab)
+        if r is None:
+            return [f"{lab.pkg}/{lab.name}"]
+        out = []
+        if r.kind in ("ddk_headers", "ddk_module", "filegroup"):
+            for h in as_list(r.attrs.get("hdrs")) + (as_list(r.attrs.get("srcs")) if r.kind == "filegroup" else []):
+                out += self.hdr_files(h, r.pkg, seen)
+        return out
+
     # -- headers (DdkHeadersInfo.include_infos, preorder) -----------------
     def hdr_node(self, text, pkg):
         """(direct_infos, children) for a dep/hdr label, or None if it has no
@@ -640,6 +656,25 @@ class Analysis:
         for d in as_list(r.attrs.get("deps")):
             symvers += [p for p in self.module_symvers(d, pkg) if p not in symvers]
         files_of_attr = lambda a: [f for x in as_list(r.attrs.get(a)) for f in self.files_of(x, pkg)]
+        # Headers Kleaf's sandbox would not have contained: under one of this
+        # module's own-package include dirs, but declared by nothing it uses.
+        # A plain build sees the whole tree, so such a file can shadow the
+        # header the module really means (edgetpu's #error stubs did).
+        declared = set()
+        for _, _, files in items:
+            declared.update(files)
+        for t in as_list(r.attrs.get("deps")) + as_list(r.attrs.get("hdrs")) + as_list(r.attrs.get("srcs")):
+            declared.update(self.files_of(t, pkg))
+            declared.update(self.hdr_files(t, pkg))
+        undeclared = []
+        for inc in includes:
+            if not (inc == pkg or inc.startswith(pkg + "/")):
+                continue
+            base = self.ws.root / inc
+            for h in sorted(base.rglob("*.h")) if base.is_dir() else []:
+                rel = str(h.relative_to(self.ws.root))
+                if rel not in declared and rel not in undeclared:
+                    undeclared.append(rel)
         return {
             "kind": "ddk",
             "label": r.label,
@@ -659,6 +694,7 @@ class Analysis:
             "symvers_out": f"{pkg}/{r.name}_Module.symvers",
             "kconfig": files_of_attr("kconfig"),
             "defconfig": files_of_attr("defconfig"),
+            "undeclared_headers": undeclared,
         }
 
 
@@ -890,6 +926,10 @@ def main():
         pathlib.Path(args.dump).write_text(json.dumps(
             {str(k): v for k, v in an.modules.items()}, default=enc, indent=1))
 
+    for m in an.modules.values():
+        for h in m.get("undeclared_headers", []):
+            print(f"WARNING: {m['label']}: {h} is on its include path but declared by "
+                  f"nothing it uses; Kleaf's sandbox hid it, a plain build does not", file=sys.stderr)
     for (pkg, keys), hit in sorted(ws.select_log.items()):
         print(f"select() in {pkg}: took {hit}", file=sys.stderr)
     nd = sum(1 for m in an.modules.values() if m["kind"] == "ddk")

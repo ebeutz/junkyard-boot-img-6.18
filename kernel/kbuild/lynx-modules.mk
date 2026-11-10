@@ -5,8 +5,9 @@
 # module <id>: .kind (ddk = Kbuild written by bazel2kbuild, make = the
 # package's own Makefile), .dir (package built with M=), .name, .outs
 # (.ko files it installs), .needs (modules that must be built first),
-# .symvers (its Module.symvers, under KBUILD_MOD_OUT) and .extra_symbols
-# (its deps' Module.symvers, passed as KBUILD_EXTRA_SYMBOLS for ddk).
+# .install (shipped, or only built for other modules' sake), .symvers
+# (where its Module.symvers is kept, under kernel/kbuild.mk's $(MOUT)) and
+# .extra_symbols (its deps' Module.symvers, KBUILD_EXTRA_SYMBOLS for ddk).
 #
 # Roots:
 #   //private/devices/google/gs201:gs201_soc
