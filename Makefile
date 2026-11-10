@@ -533,7 +533,7 @@ $(S_PATCH): $(PATCH_FILES) | $(BUILD_DIR)
 # kernel/kbuild.mk (see the header there). kbuild is incremental, so a rerun
 # after a source change rebuilds only what changed; this sentinel only decides
 # whether to ask it at all.
-KERNEL_BUILD_INPUTS := kernel/kbuild.mk $(wildcard kernel/kbuild/*) \
+KERNEL_BUILD_INPUTS := kernel/kbuild.mk $(wildcard kernel/kbuild/*) devices/$(DEVICE).mk \
 	kernel/custom_defconfig_mod/custom_defconfig kernel/custom_defconfig_mod/$(DEVICE)_cmdline_defconfig \
 	tools/kconfig-check-fragments.sh tools/modules-load-lists.py tools/mkdtboimg.py
 
