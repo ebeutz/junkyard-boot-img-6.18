@@ -117,6 +117,14 @@ Both SSH paths **require** `DEVICE=`, and the device's own `/etc/image-device` s
 
 Because the rootfs half is not rollback-safe, a run is **canaried and waved**: `--canary 3` units go first and must come back on the new version or the run stops with the rest untouched, then `--wave 25` batches, each verified by re-scanning and matching serials (a reflashed device may take a new DHCP lease). `--max-fail 10` trips a circuit breaker. Devices already on the target version are skipped, so re-running the same command converges the fleet. Logs and the inventory land in `out/flash-nmap/<timestamp>/`.
 
+## Releases
+
+[.github/workflows/release.yml](.github/workflows/release.yml) builds every device from scratch and publishes the images as a GitHub release. It runs on a pushed `v*` tag, on a published release (to which it adds the assets), or by hand from the Actions tab (pick the branch, a tag, the runner and the devices).
+
+Each device's assets come from [tools/release-assets.sh](tools/release-assets.sh): `boot.img`, `vendor_boot.img` and `dtbo.img`, zstd-compressed `rootfs.img` and `super.img`, the image version, and `SHA256SUMS` covering both the uncompressed images and every asset. A file at or over GitHub's 2 GiB asset limit is split into `.partNN` pieces. The release notes give the steps to rejoin, verify and flash them.
+
+A device build takes hours and ~30 GB of disk, which is near the limits of a GitHub-hosted runner. Use a self-hosted one where you can: the manual run's `runner` input, or the repository variable `RELEASE_RUNNER` for tag runs. Release images never contain the ARM NDA GPU blobs: the workflow points `ARM_BLOBS_ENC` at a path that does not exist, and fails if the build log shows them being installed.
+
 ## rootfs A/B
 
 `super` is a single 8136 MiB partition with no A/B twin — the GPT has no free space to carve one from. So it is split in software: two 4068 MiB halves, each holding a complete rootfs, with the initramfs' `90rootfs-slot` module mapping one at a time as `/dev/mapper/rootfs` via dm-linear. `boot.img`'s cmdline is `root=/dev/mapper/rootfs`, so the half that gets mapped is the one that gets mounted.

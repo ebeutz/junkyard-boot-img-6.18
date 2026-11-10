@@ -1,0 +1,264 @@
+# Builds the full image trio for every device and publishes it as a GitHub release.
+#
+# Triggers:
+#   - push of a tag vX.Y.Z (release-please's tags count only if it runs with a
+#     PAT, RELEASE_PLEASE_TOKEN: tags and releases made with GITHUB_TOKEN do not
+#     trigger other workflows).
+#   - a published release, e.g. one release-please created. Its assets are added
+#     to that release.
+#   - manually (Actions tab → release → Run workflow): pick the branch, the tag
+#     to publish under, the runner and the devices. The tag is created at the
+#     commit that was built if it does not exist yet.
+#
+# One job per device builds `just <device>` from scratch (kernel, rootfs, boot
+# images, super.img), and tools/release-assets.sh turns the result into assets:
+# boot/vendor_boot/dtbo images, zstd-compressed rootfs.img and super.img
+# (split into .partNN pieces if over GitHub's 2 GiB asset limit) and SHA256SUMS.
+# A final job creates or updates the release.
+#
+# ★ Runner. A device build needs ~30 GB of disk and runs the kernel plus ~340
+#   modules, then a debootstrap from rate-limited snapshot.debian.org, so it takes
+#   hours. A GitHub-hosted runner (6 h job limit, ~14 GB free on / until the
+#   preinstalled toolchains are deleted) is borderline; the job reclaims disk and
+#   builds on /mnt, like build-kernel.yml. Pick a self-hosted runner where one
+#   exists: the manual run's `runner` input, or the repository variable
+#   RELEASE_RUNNER for tag and release runs.
+#
+# ★ The ARM NDA GPU blobs are NEVER in a release. `just <device>` installs them
+#   when the builder can decrypt secrets/arm-mali-blobs.tar.age, which a
+#   self-hosted runner holding a recipient's SSH key could. ARM_BLOBS_ENC points
+#   at a path that does not exist, so tools/arm-blobs.sh skips them.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (created at the built commit if it does not exist)"
+        type: string
+        required: true
+      runner:
+        description: "Where to run the device builds"
+        type: choice
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - x86-kernel-builder-atkinson
+      devices:
+        description: "Devices to build (JSON list)"
+        type: string
+        default: '["felix", "lynx"]'
+      prerelease:
+        description: "Mark the release as a pre-release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# One release per tag at a time; a second run for the same tag waits.
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.device }}
+    runs-on: ${{ inputs.runner || vars.RELEASE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      matrix:
+        device: ${{ fromJSON(inputs.devices || '["felix", "lynx"]') }}
+    env:
+      # See the NDA note at the top. Must stay a path that does not exist.
+      ARM_BLOBS_ENC: /nonexistent/arm-mali-blobs.tar.age
+    steps:
+      # Same reclaim as build-kernel.yml: ubuntu-latest has ~14 GB free on / and a
+      # large ephemeral disk at /mnt.
+      - name: Free up disk space on the root volume
+        if: runner.environment == 'github-hosted'
+        run: |
+          echo "Before:"; df -h / /mnt
+          sudo rm -rf \
+            /opt/hostedtoolcache \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/local/.ghcup \
+            /opt/ghc \
+            /usr/local/share/boost \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "After:"; df -h / /mnt
+
+      # Put the workspace (kernel trees, build/, rootfs.img) on /mnt.
+      - name: Mount the workspace on /mnt
+        if: runner.environment == 'github-hosted'
+        run: |
+          mkdir -p a
+          sudo mkdir -p /mnt/overlay/upper /mnt/overlay/work
+          sudo chown "$(id -u):$(id -g)" /mnt/overlay/upper /mnt/overlay/work
+          sudo mount -t overlay overlay \
+            -o lowerdir="$PWD/a",upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work,volatile \
+            "$PWD"
+
+      - uses: actions/checkout@v5
+        with:
+          # pixel-bootctl, pixel-ota and mkbootimg are submodules the image needs.
+          submodules: recursive
+          # The tag on tag/release runs, the chosen branch on manual runs.
+          ref: ${{ github.event.release.tag_name || github.ref }}
+          # IMAGE_VERSION is version.txt + `git describe`-style revision.
+          fetch-depth: 0
+
+      # `repo init` (felix's kernel checkout) wants a git identity.
+      - name: Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install just
+        if: runner.environment == 'github-hosted'
+        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/bin
+
+      # Build-host prerequisites (CLAUDE.md "Build-host prerequisites"). age is
+      # required by the justfile even though no secret is decrypted here.
+      - name: Install build dependencies
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get update
+          sudo eatmydata apt-get install -y \
+            repo age debootstrap systemd-container qemu-user-static binfmt-support \
+            e2fsprogs kmod rsync curl unzip xxd zstd util-linux \
+            flex bison bc perl python3 cpio lz4 libssl-dev libelf-dev libdw-dev \
+            zlib1g-dev cmake eatmydata
+          # The rootfs stages run aarch64 binaries in the sysroot.
+          test -e /proc/sys/fs/binfmt_misc/qemu-aarch64 || sudo systemctl restart systemd-binfmt
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+      # kernel/kbuild.mk needs pahole >= 1.27 for BTF; ubuntu-24.04 ships 1.25.
+      - name: Build pahole
+        if: runner.environment == 'github-hosted'
+        run: |
+          git clone --depth 1 --branch v1.30 --recurse-submodules --shallow-submodules \
+            https://git.kernel.org/pub/scm/devel/pahole/pahole.git "$RUNNER_TEMP/pahole"
+          cmake -S "$RUNNER_TEMP/pahole" -B "$RUNNER_TEMP/pahole/build" \
+            -DCMAKE_BUILD_TYPE=Release -D__LIB=lib -DCMAKE_INSTALL_PREFIX=/usr/local
+          make -C "$RUNNER_TEMP/pahole/build" -j"$(nproc)"
+          sudo make -C "$RUNNER_TEMP/pahole/build" install
+          sudo ldconfig
+          /usr/local/bin/pahole --version
+
+      # pixel-bootctl / pixel-ota are static aarch64-musl binaries linked with
+      # rust-lld (see .build_pixel_bootctl in the Makefile).
+      - name: Rust target
+        run: |
+          command -v rustup >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-musl
+
+      - name: Build ${{ matrix.device }}
+        run: |
+          export PAHOLE=$(command -v /usr/local/bin/pahole || command -v pahole)
+          $(command -v eatmydata || true) just ${{ matrix.device }} 2>&1 | tee build.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Package release assets
+        run: tools/release-assets.sh ${{ matrix.device }} release-assets
+
+      # Last line of defence for the NDA note at the top.
+      - name: Check the rootfs has no ARM NDA blobs
+        run: |
+          if grep -qE 'installing [0-9]+ ARM NDA|ARM NDA GPU drivers installed' build.log; then
+            echo "ERROR: the ARM NDA GPU blobs were installed; refusing to publish this image." >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.device }}
+          path: release-assets/
+          retention-days: 3
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: build-log-${{ matrix.device }}
+          path: build.log
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          {
+            echo "Images built by \`just <device>\` at ${GITHUB_SHA::12}."
+            echo
+            echo "| Device | Image version |"
+            echo "| --- | --- |"
+            for v in release-assets/*-image-version; do
+              d=$(basename "$v" -image-version)
+              echo "| $d | \`$(cat "$v")\` |"
+            done
+            echo
+            echo "### Flashing with fastboot"
+            echo
+            echo "Download one device's assets into a directory, then:"
+            echo
+            echo '```bash'
+            echo 'd=lynx   # or felix'
+            echo 'for p in $d-*.part00; do [ -e "$p" ] && cat "${p%.part00}".part* > "${p%.part00}"; done'
+            echo 'zstd -d $d-rootfs.img.zst $d-super.img.zst'
+            echo 'sha256sum -c --ignore-missing $d-SHA256SUMS'
+            echo 'mkdir -p images'
+            echo 'for f in boot vendor_boot dtbo rootfs super; do mv $d-$f.img images/$f.img; done'
+            echo 'DEVICE=$d IMAGE_DIR=images DTBO=images/dtbo.img ./flash-fastboot.sh <serial>'
+            echo '```'
+            echo
+            echo "\`flash-fastboot.sh\` is in this repository at the tagged commit. It erases \`super\`."
+            echo "\`*-SHA256SUMS\` lists both the uncompressed images (as \`<device>-<name>.img\`) and every asset."
+            echo
+            echo "Not included: the ARM NDA GPU (Mali Vulkan/OpenCL) blobs."
+          } > notes.md
+          cat notes.md
+          ls -l release-assets
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Manual runs: the input. Tag and release runs: a tag with a suffix
+          # (v1.8.0-rc1) is a pre-release.
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && (inputs.prerelease && 'true' || 'false') || (contains(env.TAG, '-') && 'true' || 'false') }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            flags=()
+            [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+            gh release create "$TAG" release-assets/* \
+              --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md "${flags[@]}"
+          fi
