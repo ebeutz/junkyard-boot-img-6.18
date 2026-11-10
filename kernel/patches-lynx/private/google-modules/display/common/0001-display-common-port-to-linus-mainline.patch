@@ -15,6 +15,11 @@ Linux 6.18 -> android-mainline (7.3):
     field setup plus kref_init() with no container, so drm_panel_add()/
     drm_panel_remove() balance their get/put and never free the embedding
     struct -- the 6.18 lifetime model.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * gs_panel: sched_setscheduler_nocheck() via <soc/google/sched-setscheduler.h>;
+    drm_mode_convert_to_umode() (declared, not exported) copied locally.
 ---
 diff --git a/gs_drm/gs_drm_connector.c b/gs_drm/gs_drm_connector.c
 index 7fc43d7..ef8ad4d 100644
@@ -96,7 +101,7 @@ index 92167d0..c139570 100644
  	.mode_set = gs_panel_bridge_mode_set,
  #endif
 diff --git a/gs_panel/gs_panel.c b/gs_panel/gs_panel.c
-index 87ad3be..8fd49ad 100644
+index 87ad3be..4a3f4e5 100644
 --- a/gs_panel/gs_panel.c
 +++ b/gs_panel/gs_panel.c
 @@ -8,6 +8,8 @@
@@ -108,10 +113,13 @@ index 87ad3be..8fd49ad 100644
  #include "gs_panel/gs_panel.h"
  
  #include <linux/delay.h>
-@@ -31,6 +33,29 @@
+@@ -30,6 +32,31 @@
+ #include "gs_drm/gs_fault_event.h"
  #include "gs_panel_internal.h"
  #include "gs_panel/gs_panel_funcs_defaults.h"
- 
++/* junkyard (lynx-linus-mainline): sched_setscheduler[_nocheck]() are not exported. */
++#include <soc/google/sched-setscheduler.h>
++
 +/*
 + * junkyard (lynx-mainline): drm_panel_init() is static upstream now; panels are
 + * meant to come from devm_drm_panel_alloc(), which kzallocs a refcounted
@@ -134,11 +142,10 @@ index 87ad3be..8fd49ad 100644
 +	panel->container = NULL;
 +	kref_init(&panel->refcount);
 +}
-+
+ 
  /* CONSTANTS */
  
- /* ext_info registers */
-@@ -1634,7 +1659,7 @@ static void gs_panel_common_work(struct work_struct *work)
+@@ -1634,7 +1661,7 @@ static void gs_panel_common_work(struct work_struct *work)
  			      msecs_to_jiffies(ctx->common_work.delay_ms));
  }
  
@@ -147,7 +154,7 @@ index 87ad3be..8fd49ad 100644
  					   bool enabled,
  					   enum gs_drm_connector_lhbm_hist_roi_type roi_type,
  					   int circle_d, int circle_r)
-@@ -1686,7 +1711,7 @@ int gs_panel_allocate_color_data(struct gs_panel *ctx, enum color_data_type opti
+@@ -1686,7 +1713,7 @@ int gs_panel_allocate_color_data(struct gs_panel *ctx, enum color_data_type opti
  	} else if (option > COLOR_DATA_TYPE_MAX) {
  		mutex_lock(&ctx->mode_lock);
  		ctx->color_data.size = 0;
@@ -156,7 +163,7 @@ index 87ad3be..8fd49ad 100644
  		kfree(ctx->color_data.data);
  		ctx->color_data.data = NULL;
  		mutex_unlock(&ctx->mode_lock);
-@@ -2444,7 +2469,7 @@ int gs_dsi_panel_common_init(struct mipi_dsi_device *dsi, struct gs_panel *ctx)
+@@ -2444,7 +2471,7 @@ int gs_dsi_panel_common_init(struct mipi_dsi_device *dsi, struct gs_panel *ctx)
  	mutex_init(&ctx->bl_state_lock);
  
  	/* Initialize panel */
@@ -166,10 +173,66 @@ index 87ad3be..8fd49ad 100644
  	/* Add the panel officially */
  	drm_panel_add(&ctx->base);
 diff --git a/gs_panel/gs_panel_connector_funcs.c b/gs_panel/gs_panel_connector_funcs.c
-index 897df2c..fbdb3fb 100644
+index 897df2c..05f4025 100644
 --- a/gs_panel/gs_panel_connector_funcs.c
 +++ b/gs_panel/gs_panel_connector_funcs.c
-@@ -65,7 +65,7 @@ static void gs_panel_connector_attach_touch(struct gs_panel *ctx,
+@@ -20,6 +20,55 @@
+ #include "gs_panel/gs_panel.h"
+ #include "trace/panel_trace.h"
+ 
++/*
++ * junkyard (lynx-linus-mainline): drm_mode_convert_to_umode() is declared in
++ * <drm/drm_modes.h> but exported only by the Android Common Kernels. This is
++ * Linus' v7.3 drm_modes.c version, under a local name.
++ */
++static void jy_drm_mode_convert_to_umode(struct drm_mode_modeinfo *out,
++					 const struct drm_display_mode *in)
++{
++	out->clock = in->clock;
++	out->hdisplay = in->hdisplay;
++	out->hsync_start = in->hsync_start;
++	out->hsync_end = in->hsync_end;
++	out->htotal = in->htotal;
++	out->hskew = in->hskew;
++	out->vdisplay = in->vdisplay;
++	out->vsync_start = in->vsync_start;
++	out->vsync_end = in->vsync_end;
++	out->vtotal = in->vtotal;
++	out->vscan = in->vscan;
++	out->vrefresh = drm_mode_vrefresh(in);
++	out->flags = in->flags;
++	out->type = in->type;
++
++	switch (in->picture_aspect_ratio) {
++	case HDMI_PICTURE_ASPECT_4_3:
++		out->flags |= DRM_MODE_FLAG_PIC_AR_4_3;
++		break;
++	case HDMI_PICTURE_ASPECT_16_9:
++		out->flags |= DRM_MODE_FLAG_PIC_AR_16_9;
++		break;
++	case HDMI_PICTURE_ASPECT_64_27:
++		out->flags |= DRM_MODE_FLAG_PIC_AR_64_27;
++		break;
++	case HDMI_PICTURE_ASPECT_256_135:
++		out->flags |= DRM_MODE_FLAG_PIC_AR_256_135;
++		break;
++	default:
++		WARN(1, "Invalid aspect ratio (0%x) on mode\n",
++		     in->picture_aspect_ratio);
++		fallthrough;
++	case HDMI_PICTURE_ASPECT_NONE:
++		out->flags |= DRM_MODE_FLAG_PIC_AR_NONE;
++		break;
++	}
++
++	strscpy_pad(out->name, in->name, sizeof(out->name));
++}
++#define drm_mode_convert_to_umode jy_drm_mode_convert_to_umode
++
+ /* drm_connector_helper_funcs */
+ 
+ static int gs_panel_connector_modes(struct drm_connector *connector)
+@@ -65,7 +114,7 @@ static void gs_panel_connector_attach_touch(struct gs_panel *ctx,
   * connector state (without adjusted mode), or to decide if modeset may be required
   */
  static int gs_panel_connector_atomic_check(struct drm_connector *connector,
@@ -190,6 +253,19 @@ index 749b2a6..d01e125 100644
  #include <linux/delay.h>
  
  #include <linux/delay.h>
+diff --git a/gs_panel/gs_panel_lhbm.c b/gs_panel/gs_panel_lhbm.c
+index 9d8101f..c26be1e 100644
+--- a/gs_panel/gs_panel_lhbm.c
++++ b/gs_panel/gs_panel_lhbm.c
+@@ -16,6 +16,8 @@
+ #include "gs_panel/gs_panel.h"
+ #include "gs_panel_internal.h"
+ #include "trace/panel_trace.h"
++/* junkyard (lynx-linus-mainline): sched_setscheduler[_nocheck]() are not exported. */
++#include <soc/google/sched-setscheduler.h>
+ 
+ /**
+  * panel_update_lhbm_notimeout - Updates lhbm state to match requested state
 diff --git a/include/gs_drm/gs_drm_connector.h b/include/gs_drm/gs_drm_connector.h
 index 7ab8653..f1d551b 100644
 --- a/include/gs_drm/gs_drm_connector.h

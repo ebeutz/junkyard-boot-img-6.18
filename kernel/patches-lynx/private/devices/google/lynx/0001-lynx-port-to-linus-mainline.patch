@@ -1,0 +1,48 @@
+From: junkyard
+Subject: [PATCH] lynx: build against android-mainline
+
+  * Kconfig.ext.lynx: drop the radio/samsung/s5300 and touch/common sources.
+    gs201's Kconfig.ext already sources both and device_build() concatenates
+    the two; android-mainline's kconfig rejects the repeat ("repeated
+    inclusion of ..."), so the lynx kernel_config failed.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3):
+  * dts/gs201-lynx-usecases.dtsi: max77759,extbst-ctl gets its "-gpios"
+    suffix. The charger asks gpiolib for con_id "max77759,extbst-ctl"; the
+    Android Common Kernels resolve that through a gpiolib-of rename quirk
+    for this exact property, which Linus' gpiolib does not have.
+---
+diff --git a/Kconfig.ext.lynx b/Kconfig.ext.lynx
+index 6060313..66ef8d9 100644
+--- a/Kconfig.ext.lynx
++++ b/Kconfig.ext.lynx
+@@ -1,5 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+-source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/radio/samsung/s5300/Kconfig"
+-
+-source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/touch/common/Kconfig"
++# junkyard (lynx-mainline): radio/samsung/s5300 and touch/common used to be
++# sourced here too, but gs201's Kconfig.ext.gs201 already sources both and
++# device_build() concatenates the two files. 6.18's kconfig tolerated the
++# repeat; android-mainline's rejects it ("repeated inclusion of ..."), and the
++# lynx kernel_config fails. Nothing lynx-specific remains to source.
+diff --git a/dts/gs201-lynx-usecases.dtsi b/dts/gs201-lynx-usecases.dtsi
+index f5cf64b..3e16c1e 100644
+--- a/dts/gs201-lynx-usecases.dtsi
++++ b/dts/gs201-lynx-usecases.dtsi
+@@ -10,7 +10,13 @@
+ &max77759_chg {
+ 	/* external boost */
+ 	max77759,bst-on = <&max777x9_gpio 4 GPIO_ACTIVE_HIGH>; /* MW: OTG_BOOST_EN */
+-	max77759,extbst-ctl = <&max77759_tcpc_gpio 0 GPIO_ACTIVE_HIGH>;
++	/*
++	 * junkyard (lynx-linus-mainline): "-gpios" suffix added. The driver
++	 * asks for devm_gpiod_get(dev, "max77759,extbst-ctl"); the Android
++	 * Common Kernels add a gpiolib-of rename quirk mapping that con_id to
++	 * this unsuffixed property, which Linus' gpiolib does not have.
++	 */
++	max77759,extbst-ctl-gpios = <&max77759_tcpc_gpio 0 GPIO_ACTIVE_HIGH>;
+ 	max77759,extbst-mode = <&s2mpg12_gpio 4 GPIO_ACTIVE_HIGH>;
+ 	max77759,cpout-ctl =  <&p9xxx_gpio 3 GPIO_ACTIVE_HIGH>;
+ 

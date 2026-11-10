@@ -8,6 +8,12 @@ Linux 6.18 -> android-mainline (7.3):
     pointer page_to_virt(page) + offset was.
 
 strncpy() in trusty-ipc.c is left alone: aosp/0003 restores it.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * trusty-ipc: strncpy()+NUL -> strscpy_pad() (strncpy is gone upstream).
+  * trusty: kthread_set_per_cpu() (ACK export) dropped; kthread_create_on_cpu()
+    already binds the nop threads and the cpuhp callbacks park them.
 ---
 diff --git a/Kbuild b/Kbuild
 index bb075c5..57f9891 100644
@@ -23,6 +29,35 @@ index bb075c5..57f9891 100644
 +subdir-ccflags-y += $(EXTRA_CFLAGS)
  
  obj-y += drivers/trusty/
+diff --git a/drivers/trusty/trusty-ipc.c b/drivers/trusty/trusty-ipc.c
+index 41ac451..b402c3d 100644
+--- a/drivers/trusty/trusty-ipc.c
++++ b/drivers/trusty/trusty-ipc.c
+@@ -828,8 +828,11 @@ int tipc_chan_connect(struct tipc_chan *chan, const char *name)
+ 	msg->type = TIPC_CTRL_MSGTYPE_CONN_REQ;
+ 	msg->body_len  = sizeof(*body);
+ 
+-	strncpy(body->name, name, sizeof(body->name));
+-	body->name[sizeof(body->name)-1] = '\0';
++	/*
++	 * junkyard (lynx-linus-mainline): was strncpy() + explicit NUL, which is
++	 * strscpy_pad() (Linus' tree removed strncpy()). Still zero padded.
++	 */
++	strscpy_pad(body->name, name, sizeof(body->name));
+ 
+ 	mutex_lock(&chan->lock);
+ 	switch (chan->state) {
+@@ -2165,8 +2168,8 @@ static int tipc_virtio_probe(struct virtio_device *vdev)
+ 	vdev->config->get(vdev, 0, &config, sizeof(config));
+ 
+ 	/* copy dev name */
+-	strncpy(vds->cdev_name, config.dev_name, sizeof(vds->cdev_name));
+-	vds->cdev_name[sizeof(vds->cdev_name)-1] = '\0';
++	/* junkyard (lynx-linus-mainline): strncpy() + NUL == strscpy_pad(). */
++	strscpy_pad(vds->cdev_name, config.dev_name, sizeof(vds->cdev_name));
+ 
+ 	/* find tx virtqueues (rx and tx and in this order) */
+ 	err = virtio_find_vqs(vdev, 2, vqs, vqs_info, NULL);
 diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
 index 7334cd3..a78a80c 100644
 --- a/drivers/trusty/trusty-virtio.c
@@ -66,3 +101,24 @@ index 7334cd3..a78a80c 100644
  };
  
  static int trusty_virtio_probe(struct platform_device *pdev)
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index c185c76..3a5ddcf 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -1191,7 +1191,16 @@ static int trusty_probe(struct platform_device *pdev)
+ 					__func__, cpu, tw->nop_thread);
+ 			goto err_thread_create;
+ 		}
++		/*
++		 * junkyard (lynx-linus-mainline): kthread_set_per_cpu() is
++		 * exported only by the Android Common Kernels. The thread is
++		 * already bound by kthread_create_on_cpu() (which also records
++		 * the CPU for rebinding on unpark), and the cpuhp callbacks
++		 * below park it before its CPU goes down.
++		 */
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 		kthread_set_per_cpu(tw->nop_thread, cpu);
++#endif
+ 		kthread_park(tw->nop_thread);
+ 	}
+ 

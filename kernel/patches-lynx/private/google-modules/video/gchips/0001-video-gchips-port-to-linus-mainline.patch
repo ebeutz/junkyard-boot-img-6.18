@@ -13,6 +13,12 @@ Files: bigo.c, bigo_iommu.c, bigo_iommu.h
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * bigo_iommu: no dma_buf_*_cpu_access_partial() (ACK-only); full-buffer sync.
+  * bigo_iommu: DMA_ATTR_SKIP_CPU_SYNC via samsung_dma_buf_attach_set_attrs()
+    (no dma_buf_attachment::dma_map_attrs upstream).
 ---
 diff --git a/bigo.c b/bigo.c
 index 1f295c5..1f75405 100644
@@ -91,10 +97,56 @@ index 1f295c5..1f75405 100644
 -MODULE_IMPORT_NS(DMA_BUF);
 +MODULE_IMPORT_NS("DMA_BUF");
 diff --git a/bigo_iommu.c b/bigo_iommu.c
-index f15f167..dd32c9b 100644
+index f15f167..825505b 100644
 --- a/bigo_iommu.c
 +++ b/bigo_iommu.c
-@@ -198,7 +198,9 @@ int bigo_dma_sync(struct bigo_buf_sync *sync)
+@@ -15,6 +15,7 @@
+ #include <uapi/linux/dma-buf.h>
+ 
+ #include "bigo_iommu.h"
++#include <soc/google/samsung-dma-heap.h>
+ 
+ static void bigo_unmap_one(struct bufinfo *binfo)
+ {
+@@ -85,7 +86,10 @@ static int add_to_mapped_list(struct bigo_core *core, struct bigo_inst *inst,
+ 
+ #if IS_ENABLED(CONFIG_SOC_ZUMA)
+ 	if (mapping->skip_cmo)
+-		binfo->attachment->dma_map_attrs |= DMA_ATTR_SKIP_CPU_SYNC;
++		/* junkyard (lynx-linus-mainline): no dma_buf_attachment::dma_map_attrs upstream. */
++		samsung_dma_buf_attach_set_attrs(binfo->attachment,
++				samsung_dma_buf_attach_attrs(binfo->attachment) |
++				DMA_ATTR_SKIP_CPU_SYNC);
+ #endif
+ 
+ 	binfo->sgt = dma_buf_map_attachment_unlocked(binfo->attachment,
+@@ -180,16 +184,25 @@ int bigo_dma_sync(struct bigo_buf_sync *sync)
+ 	ret = -1;
+ 
+ 	/* TODO: remove dependency on dmabuf internal API, see b/244200482 */
++	/*
++	 * junkyard (lynx-linus-mainline): the partial variants exist only in
++	 * the Android Common Kernels; without them the full-buffer fallback
++	 * below always runs.
++	 */
+ 	if (flags & DMA_BUF_SYNC_END) {
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 		if (dmabuf->ops->end_cpu_access_partial)
+ 			ret = dma_buf_end_cpu_access_partial(dmabuf, direction,
+ 						sync->offset, sync->size);
++#endif
+ 		if (ret < 0)
+ 			ret = dma_buf_end_cpu_access(dmabuf, direction);
+ 	} else {
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 		if (dmabuf->ops->begin_cpu_access_partial)
+ 			ret = dma_buf_begin_cpu_access_partial(dmabuf, direction,
+ 						sync->offset, sync->size);
++#endif
+ 		if (ret < 0)
+ 			ret = dma_buf_begin_cpu_access(dmabuf, direction);
+ 	}
+@@ -198,7 +211,9 @@ int bigo_dma_sync(struct bigo_buf_sync *sync)
  	return ret;
  }
  

@@ -41,6 +41,17 @@ Linux 6.18 -> android-mainline (7.3):
     mk_vma_flags(VMA_NORESERVE_BIT).
   * dma_fence_signal() returns void; the "already signalled" result was
     treated as success anyway.
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * mali_kbase: vm_unmapped_area() (ACK export) rebuilt on the exported maple
+    tree API for the top-down searches kbase does (stack guard gap not kept).
+  * mali_kbase/platform/pixel: strncpy()/trace_clock_set_rate() from
+    <soc/google/linus-compat.h>.
+  * mali_pixel: the protected-memory allocator uses samsung_dma_heap_find()/
+    samsung_dma_heap_buffer_alloc() instead of ACK's dma_heap_find() & co.
+  * __ANDROID_COMMON_KERNEL__ is no longer defined (device_build.bzl), so the
+    non-ACK paths of version_compat_defs.h / mem_migrate are used.
 ---
 diff --git a/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c b/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c
 index 22fdeb1..a6ecf2e 100644
@@ -585,11 +596,37 @@ index eb6911e..d0e16cd 100644
  	INIT_WORK(&vctx->dump_work, kbasep_vinstr_dump_worker);
  
  	*out_vctx = vctx;
+diff --git a/mali_kbase/platform/pixel/pixel_gpu_dvfs.c b/mali_kbase/platform/pixel/pixel_gpu_dvfs.c
+index ceb46f4..ba439b8 100644
+--- a/mali_kbase/platform/pixel/pixel_gpu_dvfs.c
++++ b/mali_kbase/platform/pixel/pixel_gpu_dvfs.c
+@@ -8,6 +8,8 @@
+ /* Linux includes */
+ #ifdef CONFIG_OF
+ #include <linux/of.h>
++/* junkyard (lynx-linus-mainline): trace_clock_set_rate, removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ #endif
+ #include <trace/events/power.h>
+ 
+diff --git a/mali_kbase/platform/pixel/pixel_gpu_dvfs_governor.c b/mali_kbase/platform/pixel/pixel_gpu_dvfs_governor.c
+index bd2d1cd..5555a0f 100644
+--- a/mali_kbase/platform/pixel/pixel_gpu_dvfs_governor.c
++++ b/mali_kbase/platform/pixel/pixel_gpu_dvfs_governor.c
+@@ -8,6 +8,8 @@
+ /* Mali core includes */
+ #include <mali_kbase.h>
+ #include <trace/events/power.h>
++/* junkyard (lynx-linus-mainline): trace_clock_set_rate, removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ /* Pixel integration includes */
+ #include "mali_kbase_config_platform.h"
 diff --git a/mali_kbase/platform/pixel/pixel_gpu_sscd.c b/mali_kbase/platform/pixel/pixel_gpu_sscd.c
-index cb487a1..92e55dc 100644
+index cb487a1..64ae1b4 100644
 --- a/mali_kbase/platform/pixel/pixel_gpu_sscd.c
 +++ b/mali_kbase/platform/pixel/pixel_gpu_sscd.c
-@@ -6,6 +6,7 @@
+@@ -6,11 +6,14 @@
   */
  
  /* Mali core includes */
@@ -597,7 +634,14 @@ index cb487a1..92e55dc 100644
  #include <mali_kbase.h>
  #include <csf/mali_kbase_csf_trace_buffer.h>
  #include <csf/mali_kbase_csf_firmware.h>
-@@ -29,8 +30,8 @@ static void sscd_release(struct device *dev)
+ #include <csf/mali_kbase_csf_firmware_cfg.h>
+ #include <csf/mali_kbase_csf_firmware_core_dump.h>
++/* junkyard (lynx-linus-mainline): strncpy(), removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ /* Pixel integration includes */
+ #include "mali_kbase_config_platform.h"
+@@ -29,8 +32,8 @@ static void sscd_release(struct device *dev)
  }
  
  static struct sscd_platform_data sscd_pdata;
@@ -607,7 +651,7 @@ index cb487a1..92e55dc 100644
  						      .id = -1,
  						      .dev = {
  							      .platform_data = &sscd_pdata,
-@@ -723,7 +724,7 @@ int gpu_sscd_fw_log_init(struct kbase_device *kbdev, u32 level)
+@@ -723,7 +726,7 @@ int gpu_sscd_fw_log_init(struct kbase_device *kbdev, u32 level)
  int gpu_sscd_init(struct kbase_device *kbdev)
  {
  	sscd_dev = sscd_dev_init;
@@ -617,10 +661,19 @@ index cb487a1..92e55dc 100644
  
  /**
 diff --git a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c b/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
-index a6ab91d..6aa18c9 100644
+index a6ab91d..1166246 100644
 --- a/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
 +++ b/mali_kbase/platform/pixel/pixel_gpu_sysfs.c
-@@ -738,7 +738,7 @@ static ssize_t hint_power_on_store(struct device *dev, struct device_attribute *
+@@ -9,6 +9,8 @@
+ #include <mali_kbase.h>
+ #include <trace/events/power.h>
+ #include <linux/seq_file.h>
++/* junkyard (lynx-linus-mainline): trace_clock_set_rate, removed from Linus' tree. */
++#include <soc/google/linus-compat.h>
+ 
+ /* Pixel integration includes */
+ #include "mali_kbase_config_platform.h"
+@@ -738,7 +740,7 @@ static ssize_t hint_power_on_store(struct device *dev, struct device_attribute *
  	if (!pc)
  		return -ENODEV;
  
@@ -628,6 +681,86 @@ index a6ab91d..6aa18c9 100644
 +	ret = kstrtobool(buf, &enabled);
  	if (ret)
  		return -EINVAL;
+ 
+diff --git a/mali_kbase/thirdparty/mali_kbase_mmap.c b/mali_kbase/thirdparty/mali_kbase_mmap.c
+index 7d1e3aa..aead861 100644
+--- a/mali_kbase/thirdparty/mali_kbase_mmap.c
++++ b/mali_kbase/thirdparty/mali_kbase_mmap.c
+@@ -14,6 +14,49 @@
+ #include <mali_kbase.h>
+ #include <mali_kbase_reg_track.h>
+ 
++#if !IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
++#include <linux/maple_tree.h>
++#include <linux/minmax.h>
++#include <linux/sched/mm.h>
++
++/*
++ * junkyard (lynx-linus-mainline): vm_unmapped_area() is exported only by the
++ * Android Common Kernels, and both of this file's code paths need it. This is
++ * the top-down search of mm/vma.c:unmapped_area_topdown() (the only mode used
++ * here) on the exported maple-tree API, the same way the non-ACK path below
++ * already looks for gaps. Two simplifications, both because the symbols are
++ * not exported: the stack guard gap around VM_GROWSDOWN/UP mappings is not
++ * kept clear, and mmap_min_addr is approximated by PAGE_SIZE (callers pass a
++ * low_limit far above both). Called with the mmap lock held, as
++ * get_unmapped_area always is.
++ */
++static unsigned long jy_vm_unmapped_area(struct vm_unmapped_area_info *info)
++{
++	MA_STATE(mas, &current->mm->mm_mt, 0, 0);
++	unsigned long length, low_limit, high_limit, gap;
++
++	WARN_ON_ONCE(!(info->flags & VM_UNMAPPED_AREA_TOPDOWN));
++
++	/* Adjust search length to account for worst case alignment overhead */
++	length = info->length + info->align_mask + info->start_gap;
++	if (length < info->length)
++		return -ENOMEM;
++
++	low_limit = max(info->low_limit, (unsigned long)PAGE_SIZE);
++	high_limit = info->high_limit;
++	if (high_limit <= low_limit || high_limit - low_limit < length)
++		return -ENOMEM;
++
++	if (mas_empty_area_rev(&mas, low_limit, high_limit - 1, length))
++		return -ENOMEM;
++
++	gap = mas.last + 1 - info->length;
++	gap -= (gap - info->align_offset) & info->align_mask;
++	return gap;
++}
++#define vm_unmapped_area jy_vm_unmapped_area
++#endif /* !CONFIG_ANDROID_VENDOR_HOOKS */
++
+ /* mali_kbase_mmap.c
+  *
+  * This file contains Linux specific implementation of
+@@ -102,7 +145,8 @@ static bool align_4gb_no_straddle(unsigned long *gap_end, struct vm_unmapped_are
+ 	return true;
+ }
+ 
+-#if (KERNEL_VERSION(6, 1, 0) > LINUX_VERSION_CODE) || !defined(__ANDROID_COMMON_KERNEL__)
++/* junkyard (lynx-linus-mainline): only the pre-6.1 path uses this now (see below). */
++#if (KERNEL_VERSION(6, 1, 0) > LINUX_VERSION_CODE)
+ /**
+  * align_and_check() - Align the specified pointer to the provided alignment and
+  *                     check that it is still in range. For Kernel versions below
+@@ -271,7 +315,14 @@ check_current:
+ 		}
+ 	}
+ #else /* KERNEL_VERSION(6, 1, 0) > LINUX_VERSION_CODE */
+-#ifdef __ANDROID_COMMON_KERNEL__
++/*
++ * junkyard (lynx-linus-mainline): the !__ANDROID_COMMON_KERNEL__ branch below
++ * is incomplete (it uses tmp_info and mas without declaring them) and has
++ * never compiled. The ACK branch works on any kernel with vm_unmapped_area(),
++ * which the top of this file provides where the kernel does not export it,
++ * so it is used on Linus' tree too.
++ */
++#if defined(__ANDROID_COMMON_KERNEL__) || !IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 	struct vm_unmapped_area_info tmp_info = *info;
+ 	unsigned long length;
  
 diff --git a/mali_kbase/tl/mali_kbase_timeline.c b/mali_kbase/tl/mali_kbase_timeline.c
 index d315c81..8cb1ad0 100644
@@ -697,10 +830,25 @@ index 4fa20d3..dbc7610 100644
  
  static const struct of_device_id priority_control_manager_dt_ids[] = {
 diff --git a/mali_pixel/protected_memory_allocator.c b/mali_pixel/protected_memory_allocator.c
-index f4798c1..1417dc7 100644
+index f4798c1..6e16e15 100644
 --- a/mali_pixel/protected_memory_allocator.c
 +++ b/mali_pixel/protected_memory_allocator.c
-@@ -15,7 +15,7 @@
+@@ -8,6 +8,14 @@
+ 
+ #include <linux/dma-buf.h>
+ #include <linux/dma-heap.h>
++/*
++ * junkyard (lynx-linus-mainline): dma_heap_find()/dma_heap_buffer_alloc()/
++ * dma_heap_put() are Android Common Kernel exports; Linus' tree has no
++ * in-kernel dma-heap API. The heaps used here are all registered by
++ * samsung_dma_heap.ko, which provides the same lookup and allocation over its
++ * own heaps (heaps are never removed, so there is nothing to put).
++ */
++#include <soc/google/samsung-dma-heap.h>
+ #include <linux/of.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+@@ -15,7 +23,7 @@
  #include <linux/slab.h>
  #include <linux/version.h>
  
@@ -709,7 +857,16 @@ index f4798c1..1417dc7 100644
  
  #define MALI_PMA_DMA_HEAP_NAME "vframe-secure"
  #define MALI_PMA_SLAB_SIZE (1 << 16)
-@@ -113,7 +113,7 @@ static void mali_pma_slab_remove(
+@@ -37,7 +45,7 @@ MODULE_IMPORT_NS(DMA_BUF);
+ struct mali_pma_dev {
+ 	struct protected_memory_allocator_device pma_dev;
+ 	struct device *dev;
+-	struct dma_heap *dma_heap;
++	struct samsung_dma_heap *dma_heap;
+ 	struct list_head slab_list;
+ 	struct mutex slab_mutex;
+ };
+@@ -113,7 +121,7 @@ static void mali_pma_slab_remove(
  
  static int protected_memory_allocator_probe(struct platform_device *pdev);
  
@@ -718,7 +875,40 @@ index f4798c1..1417dc7 100644
  
  /**
   * mali_pma_alloc_page - Allocate protected memory pages
-@@ -546,7 +546,7 @@ out:
+@@ -393,7 +401,7 @@ static struct mali_pma_slab *mali_pma_slab_add(
+ 	INIT_LIST_HEAD(&(slab->list_entry));
+ 
+ 	/* Allocate a DMA buffer. */
+-	dma_buf = dma_heap_buffer_alloc(
++	dma_buf = samsung_dma_heap_buffer_alloc(
+ 		mali_pma_dev->dma_heap, MALI_PMA_SLAB_SIZE, O_RDWR, 0);
+ 	if (IS_ERR(dma_buf)) {
+ 		dev_err(mali_pma_dev->dev,
+@@ -490,13 +498,13 @@ static void mali_pma_slab_remove(
+  */
+ static int protected_memory_allocator_probe(struct platform_device *pdev)
+ {
+-	struct dma_heap *pma_heap;
++	struct samsung_dma_heap *pma_heap;
+ 	struct mali_pma_dev *mali_pma_dev;
+ 	struct protected_memory_allocator_device *pma_dev;
+ 	int ret = 0;
+ 
+ 	/* Try locating a PMA heap, defer if not present (yet). */
+-	pma_heap = dma_heap_find(MALI_PMA_DMA_HEAP_NAME);
++	pma_heap = samsung_dma_heap_find(MALI_PMA_DMA_HEAP_NAME);
+ 	if (!pma_heap) {
+ 		dev_warn(&(pdev->dev),
+ 			"Failed to find \"%s\" DMA buffer heap. Deferring.\n",
+@@ -511,7 +519,6 @@ static int protected_memory_allocator_probe(struct platform_device *pdev)
+ 		dev_err(&(pdev->dev),
+ 			"Failed to create a Mali protected memory allocator "
+ 			"device record\n");
+-		dma_heap_put(pma_heap);
+ 		ret = -ENOMEM;
+ 		goto out;
+ 	}
+@@ -546,7 +553,7 @@ out:
   *
   * @pdev: The protected memory allocator platform device to remove.
   */
@@ -727,7 +917,7 @@ index f4798c1..1417dc7 100644
  {
  	struct protected_memory_allocator_device *pma_dev;
  	struct mali_pma_dev *mali_pma_dev;
-@@ -554,7 +554,7 @@ static int protected_memory_allocator_remove(struct platform_device *pdev)
+@@ -554,7 +561,7 @@ static int protected_memory_allocator_remove(struct platform_device *pdev)
  	/* Get the Mali protected memory allocator device record. */
  	pma_dev = platform_get_drvdata(pdev);
  	if (!pma_dev) {
@@ -736,8 +926,15 @@ index f4798c1..1417dc7 100644
  	}
  	mali_pma_dev = container_of(pma_dev, struct mali_pma_dev, pma_dev);
  
-@@ -571,8 +571,6 @@ static int protected_memory_allocator_remove(struct platform_device *pdev)
+@@ -564,15 +571,8 @@ static int protected_memory_allocator_remove(struct platform_device *pdev)
+ 			"Some protected memory has been left allocated\n");
+ 	}
  
+-	/* Release the DMA buffer heap. */
+-	if (mali_pma_dev->dma_heap) {
+-		dma_heap_put(mali_pma_dev->dma_heap);
+-	}
+-
  	/* Free the Mali protected memory allocator device record. */
  	kfree(mali_pma_dev);
 -

@@ -1,0 +1,56 @@
+From: junkyard
+Subject: [PATCH] reset: port to Linus' mainline (v7.3)
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3; ACK-only interfaces are
+handled here rather than restored in the kernel, see kernel/patches/README.md):
+  * pixel-reboot: android_rvh_hw_protection_shutdown (ACK hook) compiled out;
+    the shutdown still happens, its reason is not recorded in the GBMS reboot mode.
+---
+diff --git a/pixel-reboot.c b/pixel-reboot.c
+index c1819ab..976297a 100644
+--- a/pixel-reboot.c
++++ b/pixel-reboot.c
+@@ -18,7 +18,15 @@
+ #endif
+ #include <soc/google/exynos-pmu-if.h>
+ 
++/*
++ * junkyard (lynx-linus-mainline): android_rvh_hw_protection_shutdown is an
++ * ACK vendor hook. Without it a hw_protection_shutdown() (thermal trip,
++ * regulator failure) still powers the device off, but its reason is not
++ * recorded in the GBMS reboot mode for the bootloader.
++ */
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ #include <trace/hooks/reboot.h>
++#endif
+ 
+ #include "../../bms/google_bms.h"
+ 
+@@ -208,6 +216,7 @@ static int pixel_restart_handler(struct sys_off_data *data)
+ 	return NOTIFY_DONE;
+ }
+ 
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ static void pixel_reboot_hw_protection_shutdown(void *ignore, const char *reason)
+ {
+ 	pr_emerg("detect hw_protection_shutdown: %s.\n", reason);
+@@ -225,6 +234,7 @@ static void pixel_reboot_hw_protection_shutdown(void *ignore, const char *reason
+ 		pixel_reboot_mode_set_gbms(REBOOT_MODE_UNKNOWN_HW_PROTECTION_SHUTDOWN);
+ 	}
+ }
++#endif
+ 
+ static int pixel_reboot_probe(struct platform_device *pdev)
+ {
+@@ -248,9 +258,11 @@ static int pixel_reboot_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 	if (register_trace_android_rvh_hw_protection_shutdown(pixel_reboot_hw_protection_shutdown,
+ 	    NULL))
+ 		dev_err(dev, "failed to register pixel reboot hw protection shutdown VH\n");
++#endif
+ 
+ 	if (!ctx->reboot_data || ctx->reboot_data->version >= PIXEL_REBOOT_VER_02_00)
+ 		goto exit;

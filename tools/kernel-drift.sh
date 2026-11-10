@@ -274,7 +274,14 @@ for tgt in "${PROJECTS[@]}"; do
 		want=$(patch_apply "$p" --numstat 2>/dev/null \
 			| awk -v new="$newf" 'BEGIN{n=split(new,a,"\n"); for(i=1;i<=n;i++) skip[a[i]]=1}
 			                     !($3 in skip){print $1" "$2" "$3}' | sort)
-		got=$(cd "$tgt" && git diff --numstat -- $pfiles 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
+		# A patch that only CREATES files (lynx's kleaf glue) leaves $pfiles
+		# empty, and the bare `--` would then diff the whole project, charging
+		# every other patch's edits to this one. Nothing pre-existing to compare.
+		if [ -n "$pfiles" ]; then
+			got=$(cd "$tgt" && git diff --numstat -- $pfiles 2>/dev/null | awk '{print $1" "$2" "$3}' | sort)
+		else
+			got=""
+		fi
 		if [ "$want" != "$got" ]; then
 			say "DRIFT ($proj): $(basename "$p") is applied, but its files carry EXTRA edits"
 			say "        expected: $(printf '%s' "$want" | tr '\n' ';')"

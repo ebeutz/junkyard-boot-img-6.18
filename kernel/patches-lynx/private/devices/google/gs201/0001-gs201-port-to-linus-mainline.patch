@@ -38,9 +38,18 @@ lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree.
     Android ioctls -- none of which android-mainline has. They are
     Android-performance, -statistics or -compliance features; nothing else
     lynx builds depends on their exports (checked at modpost).
+
+lynx-linus-mainline (android-mainline -> Linus' v7.3):
+  * debug-snapshot-debug-kinfo.ko is not built (gs201_defconfig, BUILD.bazel
+    module list, vendor_ramdisk.modules.gs201): it extends the Android Common
+    Kernel's debug_kinfo (drivers/android/debug_kinfo.h), which Linus' tree
+    does not have.
+  * constants.bzl: lib/crc/crc8.ko is a device-built in-tree module (GBMS
+    needs CRC8; Linus' GKI does not build it in), listed first in
+    vendor_ramdisk.modules.gs201 because the GBMS modules load from there.
 ---
 diff --git a/BUILD.bazel b/BUILD.bazel
-index e4880b3..e58fcc2 100644
+index e4880b3..de8892c 100644
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
 @@ -41,7 +41,6 @@ kernel_module(
@@ -51,7 +60,17 @@ index e4880b3..e58fcc2 100644
          "drivers/iommu/samsung-iommu-group.ko",
          "drivers/iommu/samsung-secure-iova.ko",
          "drivers/iommu/samsung_iommu.ko",
-@@ -116,30 +115,28 @@ kernel_module(
+@@ -81,7 +80,8 @@ kernel_module(
+         "drivers/soc/google/bcm_dbg.ko",
+         "drivers/soc/google/cal-if/cmupmucal.ko",
+         "drivers/soc/google/dbgcore-dump.ko",
+-        "drivers/soc/google/debug/debug-snapshot-debug-kinfo.ko",
++        # junkyard (lynx-linus-mainline): debug-snapshot-debug-kinfo.ko is not
++        # built; it needs the ACK-only debug_kinfo (see gs201_defconfig).
+         "drivers/soc/google/debug/dss.ko",
+         "drivers/soc/google/debug/ehld.ko",
+         "drivers/soc/google/debug/etm2dram.ko",
+@@ -116,30 +116,28 @@ kernel_module(
          "drivers/soc/google/modemctl/google_modemctl.ko",
          "drivers/soc/google/pixel_stat/mm/pixel_stat_mm.ko",
          "drivers/soc/google/pixel_stat/pixel_stat_sysfs.ko",
@@ -91,7 +110,7 @@ index e4880b3..e58fcc2 100644
          "drivers/usb/dwc3/dwc3-exynos-usb.ko",
          "drivers/usb/dwc3/google-role-sw.ko",
          "drivers/usb/gadget/function/usb_f_dm.ko",
-@@ -208,9 +205,10 @@ device_build(
+@@ -208,9 +206,10 @@ device_build(
          "//private/google-modules/misc/sscoredump",
          "//private/google-modules/power/mitigation:bcl",
          "//private/google-modules/power/reset",
@@ -106,10 +125,10 @@ index e4880b3..e58fcc2 100644
          "//private/google-modules/soc/gs/drivers/soc/google/eh",
          "//private/google-modules/soc/gs/drivers/soc/google/gsa",
 diff --git a/constants.bzl b/constants.bzl
-index 3724394..c6c491e 100644
+index 3724394..eea14f0 100644
 --- a/constants.bzl
 +++ b/constants.bzl
-@@ -15,13 +15,17 @@ GS201_MODULE_OUTS = [
+@@ -15,13 +15,20 @@ GS201_MODULE_OUTS = [
      # keep sorted
      "drivers/gpu/drm/display/drm_display_helper.ko",
      "drivers/i2c/i2c-dev.ko",
@@ -122,6 +141,9 @@ index 3724394..c6c491e 100644
      "drivers/watchdog/softdog.ko",
 -    "net/mac80211/mac80211.ko",
 -    "net/wireless/cfg80211.ko",
++    # junkyard (lynx-linus-mainline): CRC8 for GBMS, which Linus' GKI does not
++    # build in (see GOOGLE_BMS_CRC8 in bms/misc/Kconfig).
++    "lib/crc/crc8.ko",
 +    # junkyard (lynx-mainline): net/mac80211/mac80211.ko and
 +    # net/wireless/cfg80211.ko are GKI modules on android-mainline
 +    # (common/bazel/modules_private.bzl), so //common:kernel_aarch64 builds them
@@ -131,7 +153,7 @@ index 3724394..c6c491e 100644
  
  GS201_DEVICE_MODULE_OUTS = [
 diff --git a/gs201_defconfig b/gs201_defconfig
-index 357e823..77ec316 100644
+index 357e823..1415228 100644
 --- a/gs201_defconfig
 +++ b/gs201_defconfig
 @@ -55,7 +55,7 @@ CONFIG_KEYBOARD_S2MPG12=m
@@ -143,7 +165,18 @@ index 357e823..77ec316 100644
  
  # private/google-modules/soc/gs/drivers/media/platform/Kconfig
  CONFIG_VIDEO_EXYNOS_MFC=m
-@@ -154,28 +154,36 @@ CONFIG_PIXEL_BOOT_METRICS=m
+@@ -138,7 +138,9 @@ CONFIG_EXYNOS_SECURE_LOG=m
+ CONFIG_EXYNOS_CONTENT_PATH_PROTECTION=m
+ CONFIG_GOOGLE_MODEMCTL=m
+ CONFIG_DEBUG_SNAPSHOT=m
+-CONFIG_DEBUG_SNAPSHOT_DEBUG_KINFO=m
++# junkyard (lynx-linus-mainline): off -- it extends the Android Common Kernel's
++# debug_kinfo (drivers/android/debug_kinfo.h), which Linus' tree does not have.
++# CONFIG_DEBUG_SNAPSHOT_DEBUG_KINFO is not set
+ CONFIG_EXYNOS_EHLD=m
+ CONFIG_EXYNOS_DEBUG_TEST=m
+ CONFIG_PIXEL_DEBUG_TEST=m
+@@ -154,28 +156,36 @@ CONFIG_PIXEL_BOOT_METRICS=m
  CONFIG_PIXEL_SUSPEND_DIAG=m
  CONFIG_GS_SJTAG=m
  CONFIG_ETM2DRAM=m
@@ -190,7 +223,7 @@ index 357e823..77ec316 100644
  CONFIG_GSA_GSC=m
  # FIXME: Not needed. It's here to prevent kleaf build error.
  CONFIG_TZ_PROT=m
-@@ -196,7 +204,9 @@ CONFIG_SERIAL_EXYNOS=m
+@@ -196,7 +206,9 @@ CONFIG_SERIAL_EXYNOS=m
  # private/google-modules/soc/gs/drivers/ufs/Kconfig
  CONFIG_SCSI_UFS_EXYNOS_GS=m
  CONFIG_SCSI_UFS_CRYPTO_SW_KEYS_MODE=y
@@ -202,10 +235,11 @@ index 357e823..77ec316 100644
  # private/google-modules/soc/gs/drivers/usb/Kconfig
  CONFIG_GOOGLE_USB_ROLE_SW=m
 diff --git a/vendor_ramdisk.modules.gs201 b/vendor_ramdisk.modules.gs201
-index b57e01a..a5d56b4 100644
+index b57e01a..a23fe71 100644
 --- a/vendor_ramdisk.modules.gs201
 +++ b/vendor_ramdisk.modules.gs201
-@@ -1,6 +1,6 @@
+@@ -1,6 +1,7 @@
++kernel/lib/crc/crc8.ko
  kernel/mm/zsmalloc.ko
  kernel/drivers/gpu/drm/display/drm_display_helper.ko
 -kernel/drivers/misc/eeprom/at24.ko
@@ -213,6 +247,14 @@ index b57e01a..a5d56b4 100644
  kernel/drivers/scsi/sg.ko
  kernel/drivers/spi/spidev.ko
  kernel/drivers/i2c/i2c-dev.ko
+@@ -16,7 +17,6 @@ extra/private/google-modules/soc/gs/drivers/clk/gs/clk_exynos_gs.ko
+ extra/private/google-modules/soc/gs/drivers/dma/pl330.ko
+ extra/private/google-modules/soc/gs/drivers/dma/samsung-dma.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/dss.ko
+-extra/private/google-modules/soc/gs/drivers/soc/google/debug/debug-snapshot-debug-kinfo.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/ehld.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/exynos-debug-test.ko
+ extra/private/google-modules/soc/gs/drivers/soc/google/debug/pixel-debug-test.ko
 @@ -30,16 +30,8 @@ extra/private/google-modules/soc/gs/drivers/soc/google/debug/pixel-boot-metrics.
  extra/private/google-modules/soc/gs/drivers/soc/google/debug/pixel-suspend-diag.ko
  extra/private/google-modules/soc/gs/drivers/soc/google/debug/sjtag-driver.ko
