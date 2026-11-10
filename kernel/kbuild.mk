@@ -89,6 +89,14 @@ KMAKE = $(MAKE) -C $(KTREE) O=$(KOUT) ARCH=arm64 LLVM=$(CLANG)/bin/ PAHOLE=$(PAH
 PAHOLE ?= pahole
 PAHOLE_MIN := 127
 
+# KCFLAGS for the kernel and every module: Kleaf's kernel_build `kcflags`.
+# ACK kernels were built with COMMON_KCFLAGS (-D__ANDROID_COMMON_KERNEL__),
+# which vendor code tests to pick ACK-only paths (mali's version_compat_defs.h
+# redefines vm_flags_set() without it); Linus' tree is not an ACK and gets
+# none. Exported, so it is in the environment of every make below -- see
+# build_make for why that, and not the command line, matters.
+export KCFLAGS := $(KERNEL_KCFLAGS)
+
 # Base defconfig, then the device's fragments, the DDK modules' defconfigs, then
 # this repo's (last, so they win). All but the base are checked afterwards.
 CONFIG_FRAGMENTS := \
@@ -201,15 +209,15 @@ endef
 # its default goal (some name it `all`, some `modules`), and it finds its deps'
 # Module.symvers under COMMON_OUT_DIR itself.
 #
-# KCFLAGS is exported (empty) in the ENVIRONMENT, as Kleaf's kernel_env did.
-# These Makefiles add their include paths with `KCFLAGS += ...` (e.g.
-# soc/gs/Makefile.include, which mali includes), and make passes a makefile
-# variable on to kbuild's sub-make only if it came from the environment. Unset,
-# the additions are silently dropped; on the make command line they would
-# override the `+=` instead. PAHOLE, conversely, must be on the command line:
-# the kernel's Makefile assigns it, which beats the environment.
+# KCFLAGS reaches them through the ENVIRONMENT (exported above), as Kleaf's
+# kernel_env did. These Makefiles add their include paths with `KCFLAGS += ...`
+# (e.g. soc/gs/Makefile.include, which mali includes), and make passes a
+# makefile variable on to kbuild's sub-make only if it came from the
+# environment; on the make command line it would override the `+=` instead.
+# PAHOLE, conversely, must be on the command line: the kernel's Makefile
+# assigns it, which beats the environment.
 define build_make
-	KCFLAGS= $(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ PAHOLE=$(PAHOLE) \
+	$(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ PAHOLE=$(PAHOLE) \
 		M=$(call ext_m,$(1)) O=$(KOUT) $(call ext_mo_arg,$(1)) KERNEL_SRC=$(KTREE) \
 		ROOT_DIR=$(SRC) COMMON_OUT_DIR=$(MOUT) OUT_DIR=$(KOUT) KERNEL_DIR=$(KERNEL_TREE)
 endef
