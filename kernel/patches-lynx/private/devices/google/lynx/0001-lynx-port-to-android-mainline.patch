@@ -1,0 +1,23 @@
+From: junkyard
+Subject: [PATCH] lynx: build against android-mainline
+
+  * Kconfig.ext.lynx: drop the radio/samsung/s5300 and touch/common sources.
+    gs201's Kconfig.ext already sources both and device_build() concatenates
+    the two; android-mainline's kconfig rejects the repeat ("repeated
+    inclusion of ..."), so the lynx kernel_config failed.
+---
+diff --git a/Kconfig.ext.lynx b/Kconfig.ext.lynx
+index 6060313..66ef8d9 100644
+--- a/Kconfig.ext.lynx
++++ b/Kconfig.ext.lynx
+@@ -1,5 +1,7 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+-source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/radio/samsung/s5300/Kconfig"
+-
+-source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/touch/common/Kconfig"
++# junkyard (lynx-mainline): radio/samsung/s5300 and touch/common used to be
++# sourced here too, but gs201's Kconfig.ext.gs201 already sources both and
++# device_build() concatenates the two files. 6.18's kconfig tolerated the
++# repeat; android-mainline's rejects it ("repeated inclusion of ..."), and the
++# lynx kernel_config fails. Nothing lynx-specific remains to source.

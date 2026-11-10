@@ -329,7 +329,30 @@ clone_kernel_source:
         {{ _repo }} init --standalone-manifest \
             -u "file://$PWD/aosp_manifest.xml" \
             --groups=dependencies --partial-clone < /dev/null
-        {{ _repo }} sync --current-branch --no-tags -j {{ num_cpus() }}
+        # kernel/local-manifests/<device>.xml, if present, is layered on top of
+        # aosp_manifest.xml as a repo local manifest — this is how lynx-mainline
+        # swaps GrapheneOS's kernel_common-6.18 for AOSP android-mainline without
+        # editing the monorepo's own (tracked) manifest. Re-copied on every run so
+        # an edit to the override takes effect; removed if the override is gone,
+        # or a stale copy would keep steering the sync.
+        lm={{ justfile_directory() }}/kernel/local-manifests/{{ device }}.xml
+        #
+        # --force-sync: the override puts a DIFFERENTLY-NAMED project at a path
+        # the monorepo manifest already uses (common/: kernel_common-6.18 ->
+        # kernel/common; external/zlib: zlib -> zlib-madler). On a tree first
+        # synced without the override, repo otherwise refuses with "cannot
+        # overwrite a local work tree". Only dependency projects are affected;
+        # the monorepo itself is not a repo project, so kernel/patches content
+        # under private/ is untouched.
+        mkdir -p .repo/local_manifests
+        force=
+        if [ -f "$lm" ]; then
+            cp "$lm" .repo/local_manifests/junkyard.xml
+            force=--force-sync
+        else
+            rm -f .repo/local_manifests/junkyard.xml
+        fi
+        {{ _repo }} sync --current-branch --no-tags $force -j {{ num_cpus() }}
         # The monorepo root is itself a git project, so tools/kernel-drift.sh
         # sees anything untracked at its top as FATAL drift. These two are ours
         # (the fragment symlink below) and bazel's (bzlmod lockfile), not

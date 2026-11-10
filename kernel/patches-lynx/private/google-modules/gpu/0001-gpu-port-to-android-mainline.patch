@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] gpu: port to Linux 6.18 (lynx)
+Subject: [PATCH] gpu: port mali_kbase to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(gpu: port to Linux 6.18 (lynx))
 
 Port private/google-modules/gpu to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 API migrations. Mostly mechanical; entries that change behaviour say so:
@@ -18,6 +24,23 @@ API migrations. Mostly mechanical; entries that change behaviour say so:
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * Kbuild: kbuild no longer appends $(EXTRA_CFLAGS) to compiles, and the
+    mali Makefile passes every -DCONFIG_MALI_* switch that way -- so on
+    android-mainline they were silently dropped from the C code (first
+    visible as trace_mali_pm_*_state being undeclared, because
+    CONFIG_MALI_GATOR_SUPPORT vanished; CONFIG_MALI_REAL_HW etc. went with
+    it). ccflags-y += $(EXTRA_CFLAGS) restores exactly what kbuild used to do.
+  * mm_get_unmapped_area() lost its mm argument (always current->mm, which
+    is what kbase passes).
+  * shmem_file_setup() takes vma_flags_t: VM_NORESERVE ->
+    mk_vma_flags(VMA_NORESERVE_BIT).
+  * dma_fence_signal() returns void; the "already signalled" result was
+    treated as success anyway.
 ---
 diff --git a/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c b/borr_mali_kbase/csf/mali_kbase_csf_kcpu.c
 index 22fdeb1..a6ecf2e 100644
@@ -176,11 +199,44 @@ index b4ffdaf..055bb88 100644
  
  	atomic_set(timeline->timeline_flags, 0);
  }
+diff --git a/common/include/linux/version_compat_defs.h b/common/include/linux/version_compat_defs.h
+index 88e2840..a688fb4 100644
+--- a/common/include/linux/version_compat_defs.h
++++ b/common/include/linux/version_compat_defs.h
+@@ -623,7 +623,16 @@ static inline unsigned long
+ kbase_mm_get_unmapped_area_helper(struct mm_struct *mm, struct file *filp, unsigned long addr,
+ 				  unsigned long len, unsigned long pgoff, unsigned long flags)
+ {
+-#if (KERNEL_VERSION(6, 10, 0) <= LINUX_VERSION_CODE)
++#if (KERNEL_VERSION(7, 0, 0) <= LINUX_VERSION_CODE)
++	/*
++	 * junkyard (lynx-mainline): mm_get_unmapped_area() dropped its mm argument
++	 * and always works on current->mm, which is the only mm the caller passes.
++	 * (The cut-over is in the 6.19..7.3 window; 7.0 is a safe lower bound for
++	 * the only tree this is built against.)
++	 */
++	(void)mm;
++	return mm_get_unmapped_area(filp, addr, len, pgoff, flags);
++#elif (KERNEL_VERSION(6, 10, 0) <= LINUX_VERSION_CODE)
+ 	return mm_get_unmapped_area(mm, filp, addr, len, pgoff, flags);
+ #else
+ 	return mm->get_unmapped_area(filp, addr, len, pgoff, flags);
 diff --git a/mali_kbase/Kbuild b/mali_kbase/Kbuild
-index 0b63ac6..0e2b27e 100644
+index 0b63ac6..eecaa31 100644
 --- a/mali_kbase/Kbuild
 +++ b/mali_kbase/Kbuild
-@@ -153,8 +153,6 @@ endif
+@@ -130,6 +130,10 @@ endif
+ #
+ # ccflags
+ #
++# junkyard (lynx-mainline): kbuild no longer appends $(EXTRA_CFLAGS) to every
++# compile (scripts/Makefile.build dropped EXTRA_*FLAGS support), so the flags
++# the Makefile passes that way were silently lost. Restore exactly that.
++ccflags-y += $(EXTRA_CFLAGS)
+ ccflags-y += \
+     -DMALI_CUSTOMER_RELEASE=$(MALI_CUSTOMER_RELEASE) \
+     -DMALI_USE_CSF=$(MALI_USE_CSF) \
+@@ -153,8 +157,6 @@ endif
  ccflags-y += \
      -I$(src) \
      -I$(src)/platform/$(MALI_PLATFORM_DIR) \
@@ -232,8 +288,30 @@ index 6057a04..cafdff4 100644
  	kbdev->pm.backend.metrics.initialized = true;
  	atomic_set(&kbdev->pm.backend.metrics.timer_state, TIMER_OFF);
  	kbase_pm_metrics_start(kbdev);
+diff --git a/mali_kbase/csf/mali_kbase_csf.c b/mali_kbase/csf/mali_kbase_csf.c
+index c7af091..d01e061 100644
+--- a/mali_kbase/csf/mali_kbase_csf.c
++++ b/mali_kbase/csf/mali_kbase_csf.c
+@@ -3898,7 +3898,7 @@ int kbase_csf_doorbell_mapping_init(struct kbase_device *kbdev)
+ 	struct file *filp;
+ 	int ret;
+ 
+-	filp = shmem_file_setup("mali csf db", MAX_LFS_FILESIZE, VM_NORESERVE);
++	filp = shmem_file_setup("mali csf db", MAX_LFS_FILESIZE, mk_vma_flags(VMA_NORESERVE_BIT));	/* android-mainline: vma_flags_t */
+ 	if (IS_ERR(filp))
+ 		return PTR_ERR(filp);
+ 
+@@ -3963,7 +3963,7 @@ int kbase_csf_setup_dummy_user_reg_page(struct kbase_device *kbdev)
+ 
+ 	kbdev->csf.user_reg.filp = NULL;
+ 
+-	filp = shmem_file_setup("mali csf user_reg", MAX_LFS_FILESIZE, VM_NORESERVE);
++	filp = shmem_file_setup("mali csf user_reg", MAX_LFS_FILESIZE, mk_vma_flags(VMA_NORESERVE_BIT));	/* android-mainline: vma_flags_t */
+ 	if (IS_ERR(filp)) {
+ 		dev_err(kbdev->dev, "failed to get an unlinked file for user_reg");
+ 		return PTR_ERR(filp);
 diff --git a/mali_kbase/csf/mali_kbase_csf_kcpu.c b/mali_kbase/csf/mali_kbase_csf_kcpu.c
-index e815ff2..c41d9cc 100644
+index e815ff2..64f0b67 100644
 --- a/mali_kbase/csf/mali_kbase_csf_kcpu.c
 +++ b/mali_kbase/csf/mali_kbase_csf_kcpu.c
 @@ -1390,7 +1390,7 @@ static void kbase_csf_fence_wait_callback(struct dma_fence *fence, struct dma_fe
@@ -254,7 +332,19 @@ index e815ff2..c41d9cc 100644
  #endif
  		if (removed)
  			KBASE_KTRACE_ADD_CSF_KCPU(kctx->kbdev, KCPU_FENCE_WAIT_END, kcpu_queue,
-@@ -1720,11 +1720,11 @@ static void kcpu_force_signal_fence(struct kbase_kcpu_command_queue *kcpu_queue)
+@@ -1641,7 +1641,10 @@ static int kbase_kcpu_fence_force_signal_process(struct kbase_kcpu_command_queue
+ 	if (WARN_ON(!fence_info->fence))
+ 		return -EINVAL;
+ 
+-	ret = dma_fence_signal(fence_info->fence);
++	/* android-mainline: dma_fence_signal() returns void now; the "already
++	 * signalled" case below was treated as success anyway. */
++	dma_fence_signal(fence_info->fence);
++	ret = 0;
+ 	if (unlikely(ret < 0)) {
+ 		dev_warn(kctx->kbdev->dev, "dma_fence(%d) has been signalled already\n", ret);
+ 		/* Treated as a success */
+@@ -1720,11 +1723,11 @@ static void kcpu_force_signal_fence(struct kbase_kcpu_command_queue *kcpu_queue)
  	 */
  	atomic_set(&kcpu_queue->fence_signal_pending_cnt, 0);
  #ifdef CONFIG_MALI_FENCE_DEBUG
@@ -268,7 +358,19 @@ index e815ff2..c41d9cc 100644
  #endif
  }
  
-@@ -1799,13 +1799,13 @@ static int kbasep_kcpu_fence_signal_process(struct kbase_kcpu_command_queue *kcp
+@@ -1779,7 +1782,10 @@ static int kbasep_kcpu_fence_signal_process(struct kbase_kcpu_command_queue *kcp
+ 	if (WARN_ON(!fence_info->fence))
+ 		return -EINVAL;
+ 
+-	ret = dma_fence_signal(fence_info->fence);
++	/* android-mainline: dma_fence_signal() returns void now; the "already
++	 * signalled" case below was treated as success anyway. */
++	dma_fence_signal(fence_info->fence);
++	ret = 0;
+ 
+ 	if (unlikely(ret < 0)) {
+ 		dev_warn(kctx->kbdev->dev, "dma_fence(%d) has been signalled already\n", ret);
+@@ -1799,13 +1805,13 @@ static int kbasep_kcpu_fence_signal_process(struct kbase_kcpu_command_queue *kcp
  #endif
  	} else {
  #ifdef CONFIG_MALI_FENCE_DEBUG
@@ -284,7 +386,7 @@ index e815ff2..c41d9cc 100644
  #endif
  	}
  
-@@ -2901,7 +2901,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
+@@ -2901,7 +2907,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
  			mutex_lock(&kcpu_queue->lock);
  
  			if (atomic_read(&kcpu_queue->fence_signal_pending_cnt)) {
@@ -293,7 +395,7 @@ index e815ff2..c41d9cc 100644
  
  				dev_dbg(kbdev->dev,
  					"Fence signal timeout on KCPU queue(%lu), kctx (%d_%d) was %s on suspend",
-@@ -2911,7 +2911,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
+@@ -2911,7 +2917,7 @@ int kbase_csf_kcpu_queue_halt_timers(struct kbase_device *kbdev)
  
  #ifdef CONFIG_MALI_FENCE_DEBUG
  			if (kcpu_queue->fence_wait_processed) {

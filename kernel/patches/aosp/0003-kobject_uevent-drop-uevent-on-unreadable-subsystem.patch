@@ -8,9 +8,7 @@
  #include <net/sock.h>
  #include <net/netlink.h>
  #include <net/net_namespace.h>
-@@ -535,6 +536,60 @@
- 		return 0;
- 	}
+@@ -537,2 +538,56 @@
  
 +	/*
 +	 * felix: DROP the uevent if the subsystem name is unreadable, instead of
@@ -67,5 +65,3 @@
 +	}
 +
  	/* environment buffer */
- 	env = kzalloc(sizeof(struct kobj_uevent_env), GFP_KERNEL);
- 	if (!env)

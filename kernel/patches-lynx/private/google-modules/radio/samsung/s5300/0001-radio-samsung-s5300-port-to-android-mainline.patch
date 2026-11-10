@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] radio/samsung/s5300: port to Linux 6.18 (lynx)
+Subject: [PATCH] radio/samsung/s5300: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(radio/samsung/s5300: port to Linux 6.18 (lynx))
 
 Port private/google-modules/radio/samsung/s5300 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 Mechanical API migrations, no intended behaviour change:
@@ -18,6 +24,14 @@ Mechanical API migrations, no intended behaviour change:
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * hrtimer_init() + ->function = f  ->  hrtimer_setup(timer, f, ...).
+  * shm_ipc.c: RESERVEDMEM_OF_DECLARE() takes a reserved_mem_ops table;
+    node_init gets the fdt node.
 ---
 diff --git a/cp_thermal_zone.c b/cp_thermal_zone.c
 index bc0ed3a..22a6f40 100644
@@ -124,6 +138,20 @@ index 50572cb..cfb5f92 100644
  		mif_info("register cpufreq notifier\n");
  		tpmon->cpufreq_nb.notifier_call = tpmon_cpufreq_nb;
  		cpufreq_register_notifier(&tpmon->cpufreq_nb, CPUFREQ_POLICY_NOTIFIER);
+diff --git a/direct_dm.c b/direct_dm.c
+index 25f7e1f..10470cd 100644
+--- a/direct_dm.c
++++ b/direct_dm.c
+@@ -1063,8 +1063,7 @@ int direct_dm_create(struct platform_device *pdev)
+ 	tasklet_init(&dc->rx_task, direct_dm_rx_func, (unsigned long)dc);
+ 
+ 	spin_lock_init(&dc->rx_timer_lock);
+-	hrtimer_init(&dc->rx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	dc->rx_timer.function = direct_dm_rx_timer;
++	hrtimer_setup(&dc->rx_timer, direct_dm_rx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 	dev_set_drvdata(dev, dc);
+ 
 diff --git a/dit/dit_hal.c b/dit/dit_hal.c
 index 3887a33..221ce58 100644
 --- a/dit/dit_hal.c
@@ -420,6 +448,22 @@ index 0add65b..038f63b 100644
  	struct napi_struct napi;
  	struct napi_struct *napi_ptr;
  
+diff --git a/link_rx_zerocopy.c b/link_rx_zerocopy.c
+index 7e3a3c7..fa5f077 100644
+--- a/link_rx_zerocopy.c
++++ b/link_rx_zerocopy.c
+@@ -313,9 +313,8 @@ int setup_zerocopy_adaptor(struct sbd_ipc_device *ipc_dev)
+ 		return -ENOMEM;
+ 	}
+ 
+-	hrtimer_init(&zdptr->datalloc_timer,
+-			CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+-	zdptr->datalloc_timer.function = datalloc_timer_func;
++	hrtimer_setup(&zdptr->datalloc_timer, datalloc_timer_func,
++		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 
+ 	allocate_data_in_advance(zdptr);
+ 
 diff --git a/modem_ctrl_s5000ap.c b/modem_ctrl_s5000ap.c
 index b7270d4..cc75c56 100644
 --- a/modem_ctrl_s5000ap.c
@@ -487,10 +531,33 @@ index bfa1109..c11a2b6 100644
  	for (i = 0; i < 4; i++) {
  		char *p;
 diff --git a/shm_ipc.c b/shm_ipc.c
-index 5668298..a373830 100644
+index 5668298..f30000d 100644
 --- a/shm_ipc.c
 +++ b/shm_ipc.c
-@@ -496,9 +496,8 @@ fail:
+@@ -66,7 +66,7 @@ static int cp_rmem_setup_latecall(struct platform_device *pdev)
+ 	return 0;
+ }
+ #else
+-static int __init cp_rmem_setup(struct reserved_mem *rmem)
++static int __init cp_rmem_setup(unsigned long node, struct reserved_mem *rmem)
+ {
+ 	const __be32 *prop;
+ 	int len;
+@@ -93,7 +93,12 @@ static int __init cp_rmem_setup(struct reserved_mem *rmem)
+ 
+ 	return 0;
+ }
+-RESERVEDMEM_OF_DECLARE(modem_if, "exynos,modem_if", cp_rmem_setup);
++/* android-mainline: RESERVEDMEM_OF_DECLARE() takes a reserved_mem_ops table. */
++static const struct reserved_mem_ops modem_if_rmem_ops = {
++	.node_init	= cp_rmem_setup,
++};
++
++RESERVEDMEM_OF_DECLARE(modem_if, "exynos,modem_if", &modem_if_rmem_ops);
+ 
+ #endif
+ 
+@@ -496,9 +501,8 @@ fail:
  	return ret;
  }
  

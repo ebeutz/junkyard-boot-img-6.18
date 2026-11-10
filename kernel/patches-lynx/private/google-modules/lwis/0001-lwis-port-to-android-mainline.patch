@@ -1,0 +1,225 @@
+From: junkyard
+Subject: [PATCH] lwis: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(lwis: port to Linux 6.18 (lynx))
+
+Port private/google-modules/lwis to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
+Mechanical API migrations, no intended behaviour change:
+
+  - iommu_register_device_fault_handler() removed (6.8): use the pixel_iommu fault registry that samsung_iommu.ko exports
+
+Files: platform/busan/lwis_platform_busan.c
+
+lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
+drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * i3c: struct i3c_priv_xfer -> struct i3c_xfer and
+    i3c_device_do_priv_xfers(dev, x, n) -> i3c_device_do_xfers(dev, x, n,
+    I3C_SDR), as upstream renamed them (SDR is what priv xfers were).
+---
+diff --git a/lwis_fence.c b/lwis_fence.c
+index 61a53c1..d014d75 100644
+--- a/lwis_fence.c
++++ b/lwis_fence.c
+@@ -78,7 +78,9 @@ int lwis_dma_fence_signal_with_status(struct dma_fence *fence, int errno)
+ {
+ 	if (errno != 0)
+ 		dma_fence_set_error(fence, errno);
+-	return dma_fence_signal(fence);
++	/* android-mainline: dma_fence_signal() returns void now */
++	dma_fence_signal(fence);
++	return 0;
+ }
+ 
+ static const char *lwis_fence_get_driver_name(struct dma_fence *fence)
+diff --git a/lwis_i3c_proxy.c b/lwis_i3c_proxy.c
+index 024531c..e7c8450 100644
+--- a/lwis_i3c_proxy.c
++++ b/lwis_i3c_proxy.c
+@@ -60,7 +60,7 @@ static inline void release_xfer_context(struct lwis_device *lwis_dev, struct xfe
+ 	lwis_allocator_free(lwis_dev, context->buf);
+ }
+ 
+-static inline int get_xfers_len(struct i3c_priv_xfer *xfers, int nxfers)
++static inline int get_xfers_len(struct i3c_xfer *xfers, int nxfers)
+ {
+ 	int i, total_len = 0;
+ 
+@@ -71,7 +71,7 @@ static inline int get_xfers_len(struct i3c_priv_xfer *xfers, int nxfers)
+ }
+ 
+ static int setup_i3c_read(struct lwis_i2c_device *i3c_dev, uint64_t offset, uint64_t *value,
+-			  struct xfer_context *context, struct i3c_priv_xfer *xfers)
++			  struct xfer_context *context, struct i3c_xfer *xfers)
+ {
+ 	unsigned int offset_bits;
+ 	unsigned int offset_bytes;
+@@ -112,7 +112,7 @@ static int setup_i3c_read(struct lwis_i2c_device *i3c_dev, uint64_t offset, uint
+ }
+ 
+ static int setup_i3c_write(struct lwis_i2c_device *i3c_dev, uint64_t offset, uint64_t value,
+-			   struct xfer_context *context, struct i3c_priv_xfer *xfers)
++			   struct xfer_context *context, struct i3c_xfer *xfers)
+ {
+ 	unsigned int offset_bits;
+ 	unsigned int offset_bytes;
+@@ -165,7 +165,7 @@ static int setup_i3c_write(struct lwis_i2c_device *i3c_dev, uint64_t offset, uin
+ 
+ static int setup_i3c_read_batch(struct lwis_i2c_device *i3c_dev, uint64_t offset, uint8_t *read_buf,
+ 				int read_buf_size, struct xfer_context *context,
+-				struct i3c_priv_xfer *xfers)
++				struct i3c_xfer *xfers)
+ {
+ 	unsigned int offset_bits;
+ 	unsigned int offset_bytes;
+@@ -198,7 +198,7 @@ static int setup_i3c_read_batch(struct lwis_i2c_device *i3c_dev, uint64_t offset
+ 
+ static int setup_i3c_write_batch(struct lwis_i2c_device *i3c_dev, uint64_t offset,
+ 				 uint8_t *write_buf, int write_buf_size,
+-				 struct xfer_context *context, struct i3c_priv_xfer *xfers)
++				 struct xfer_context *context, struct i3c_xfer *xfers)
+ {
+ 	unsigned int offset_bits;
+ 	unsigned int offset_bytes;
+@@ -241,7 +241,7 @@ static int setup_i3c_write_batch(struct lwis_i2c_device *i3c_dev, uint64_t offse
+ }
+ 
+ static int setup_i3c_xfer(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry *entry,
+-			  struct xfer_context *context, struct i3c_priv_xfer *xfers)
++			  struct xfer_context *context, struct i3c_xfer *xfers)
+ {
+ 	if (entry->type == LWIS_IO_ENTRY_READ) {
+ 		return setup_i3c_read(i3c_dev, entry->rw.offset, &entry->rw.val, context, xfers);
+@@ -260,7 +260,7 @@ static int setup_i3c_xfer(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry
+ }
+ 
+ static void parse_i3c_result(struct lwis_io_entry *entry, struct xfer_context *context,
+-			     struct i3c_priv_xfer *xfers)
++			     struct i3c_xfer *xfers)
+ {
+ 	if (entry->type == LWIS_IO_ENTRY_READ) {
+ 		/* for i3c_read, xfers[1].data.in = context->rbuf */
+@@ -270,7 +270,7 @@ static void parse_i3c_result(struct lwis_io_entry *entry, struct xfer_context *c
+ 
+ int lwis_i3c_io_entry_rw(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry *entry)
+ {
+-	struct i3c_priv_xfer xfers[2];
++	struct i3c_xfer xfers[2];
+ 	struct xfer_context context = { .wbuf = { 0 }, .lwbuf = { 0 }, .rbuf = { 0 }, .buf = NULL };
+ 	int ret, nxfers;
+ 	char trace_name[LWIS_MAX_NAME_STRING_LEN];
+@@ -292,7 +292,7 @@ int lwis_i3c_io_entry_rw(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry *
+ 
+ 	scnprintf(trace_name, LWIS_MAX_NAME_STRING_LEN, "i3c_xfer_%s", i3c_dev->base_dev.name);
+ 	LWIS_ATRACE_FUNC_INT_BEGIN(&(i3c_dev->base_dev), trace_name, get_xfers_len(xfers, nxfers));
+-	ret = i3c_device_do_priv_xfers(i3c_dev->i3c, xfers, nxfers);
++	ret = i3c_device_do_xfers(i3c_dev->i3c, xfers, nxfers, I3C_SDR);
+ 	LWIS_ATRACE_FUNC_INT_END(&(i3c_dev->base_dev), trace_name, get_xfers_len(xfers, nxfers));
+ 
+ 	parse_i3c_result(entry, &context, xfers);
+@@ -304,7 +304,7 @@ int lwis_i3c_io_entry_rw(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry *
+ int lwis_i3c_io_entries_rw(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry *entries,
+ 			   int entries_cnt)
+ {
+-	struct i3c_priv_xfer *xfers;
++	struct i3c_xfer *xfers;
+ 	struct xfer_context *contexts;
+ 	int ret = 0;
+ 	int nxfers;
+@@ -319,12 +319,12 @@ int lwis_i3c_io_entries_rw(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry
+ 
+ 	nxfers = get_xfer_count(entries, entries_cnt);
+ 
+-	xfers = lwis_allocator_allocate(&i3c_dev->base_dev, nxfers * sizeof(struct i3c_priv_xfer),
++	xfers = lwis_allocator_allocate(&i3c_dev->base_dev, nxfers * sizeof(struct i3c_xfer),
+ 					GFP_KERNEL);
+ 	if (!xfers)
+ 		return -ENOMEM;
+ 	/* It zeroes the members inside the i3c_priv_xfer struct */
+-	memset(xfers, 0, nxfers * sizeof(struct i3c_priv_xfer));
++	memset(xfers, 0, nxfers * sizeof(struct i3c_xfer));
+ 
+ 	contexts = lwis_allocator_allocate(&i3c_dev->base_dev,
+ 					   entries_cnt * sizeof(struct xfer_context), GFP_KERNEL);
+@@ -345,7 +345,7 @@ int lwis_i3c_io_entries_rw(struct lwis_i2c_device *i3c_dev, struct lwis_io_entry
+ 
+ 	scnprintf(trace_name, LWIS_MAX_NAME_STRING_LEN, "i3c_xfer_%s", i3c_dev->base_dev.name);
+ 	LWIS_ATRACE_FUNC_INT_BEGIN(&(i3c_dev->base_dev), trace_name, get_xfers_len(xfers, nxfers));
+-	ret = i3c_device_do_priv_xfers(i3c_dev->i3c, xfers, nxfers);
++	ret = i3c_device_do_xfers(i3c_dev->i3c, xfers, nxfers, I3C_SDR);
+ 	LWIS_ATRACE_FUNC_INT_END(&(i3c_dev->base_dev), trace_name, get_xfers_len(xfers, nxfers));
+ 
+ 	for (i = 0, xfers_cursor = 0; i < entries_cnt; ++i) {
+diff --git a/platform/busan/lwis_platform_busan.c b/platform/busan/lwis_platform_busan.c
+index ad1bf0f..174be7f 100644
+--- a/platform/busan/lwis_platform_busan.c
++++ b/platform/busan/lwis_platform_busan.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2021 Google, LLC
+  */
+ 
++#include <arm-smmu-v3/pixel-iommu-fault.h>
+ #include "lwis_platform_busan.h"
+ 
+ #include <linux/iommu.h>
+@@ -60,7 +61,12 @@ int lwis_platform_probe(struct lwis_device *lwis_dev)
+ 	return 0;
+ }
+ 
+-static int lwis_iommu_fault_handler(struct iommu_fault *fault, void *param)
++/*
++ * 6.8 removed iommu_register_device_fault_handler(); on gs201 samsung_iommu.ko
++ * provides pixel_iommu_*() (see the Laguna port in platform/dublin).
++ */
++static int lwis_iommu_fault_handler(struct device *dev, unsigned long iova, u32 pasid,
++				    int flags, void *param)
+ {
+ 	int ret;
+ 	struct of_phandle_iterator it;
+@@ -81,7 +87,7 @@ static int lwis_iommu_fault_handler(struct iommu_fault *fault, void *param)
+ 		pr_err("\n");
+ 	}
+ 	pr_err("IOMMU Page Fault at Address: 0x%p Flag: 0x%08x. Check dmesg for sysmmu errors\n",
+-	       (void *)fault->event.addr, fault->event.flags);
++	       (void *)iova, flags);
+ 	pr_err("\n");
+ 	lwis_debug_print_transaction_info(lwis_dev);
+ 	pr_err("\n");
+@@ -93,8 +99,9 @@ static int lwis_iommu_fault_handler(struct iommu_fault *fault, void *param)
+ 	pr_err("\n");
+ 	pr_err("###############################################\n");
+ 
+-	event_payload.fault_address = fault->event.addr;
+-	event_payload.fault_flags = fault->event.flags;
++	event_payload.fault_address = iova;
++	/* as in platform/dublin: the 6.18 report carries a valid address only */
++	event_payload.fault_flags = LWIS_MEM_PAGE_FAULT_ADDRESS_VALID;
+ 	lwis_device_error_event_emit(lwis_dev, LWIS_ERROR_EVENT_ID_MEMORY_PAGE_FAULT,
+ 				     &event_payload, sizeof(event_payload));
+ 
+@@ -138,7 +145,7 @@ int lwis_platform_device_enable(struct lwis_device *lwis_dev)
+ 
+ 	if (of_find_property(lwis_dev->k_dev->of_node, "iommus", &iommus_len) && iommus_len) {
+ 		/* Activate IOMMU for the platform device */
+-		ret = iommu_register_device_fault_handler(lwis_dev->k_dev, lwis_iommu_fault_handler,
++		ret = pixel_iommu_register_fault_handler(lwis_dev->k_dev, lwis_iommu_fault_handler,
+ 							  lwis_dev);
+ 		if (ret < 0) {
+ 			pr_err("Failed to register fault handler for the device: %d\n", ret);
+@@ -198,7 +205,7 @@ int lwis_platform_device_disable(struct lwis_device *lwis_dev)
+ 
+ 	if (of_find_property(lwis_dev->k_dev->of_node, "iommus", &iommus_len) && iommus_len) {
+ 		/* Deactivate IOMMU */
+-		iommu_unregister_device_fault_handler(lwis_dev->k_dev);
++		pixel_iommu_unregister_fault_handler(lwis_dev->k_dev);
+ 	}
+ 
+ 	/* Disable platform device */

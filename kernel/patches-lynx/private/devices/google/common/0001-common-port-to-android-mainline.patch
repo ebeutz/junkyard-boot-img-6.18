@@ -1,0 +1,71 @@
+From: junkyard
+Subject: [PATCH] common: build the Pixel device kernel against android-mainline
+
+kleaf/device glue for an android-mainline (7.3) GKI:
+
+  * device_build.bzl: android-mainline has no KMI, so common/ ships no
+    symbol lists (no gki/aarch64/symbols/, no
+    aarch64_additional_kmi_symbol_lists target) and its GKI does not trim
+    exports. Build the device kernel with no kmi_symbol_list.
+  * device_build.bzl: kleaf main made `pahole` a required kernel_build()
+    argument; use //common:pahole, as common/ does for its own GKI.
+  * build.config.common: android-mainline replaced
+    common/build.config.constants with common/bazel/constants.scl, which kleaf
+    exports itself; only source the old file where it still exists.
+---
+diff --git a/kleaf/device_build.bzl b/kleaf/device_build.bzl
+index 88afaa0..2dcf1bd 100644
+--- a/kleaf/device_build.bzl
++++ b/kleaf/device_build.bzl
+@@ -233,11 +233,10 @@ def device_build(
+             visibility = ["//visibility:private"],
+         )
+ 
+-    select_file(
+-        name = target_kmi_symbol_list,
+-        srcs = "//common:aarch64_additional_kmi_symbol_lists",
+-        subpath = "gki/aarch64/symbols/pixel",
+-    )
++    # junkyard (lynx-mainline): android-mainline has no KMI, so common/ ships no
++    # symbol lists (no gki/aarch64/symbols/, no aarch64_additional_kmi_symbol_lists
++    # target) and its kernel_aarch64 does not trim exports. Build the device
++    # kernel against the untrimmed GKI with no symbol list.
+ 
+     kernel_build(
+         name = target_kernel,
+@@ -254,8 +253,10 @@ def device_build(
+         kconfig_ext = target_kconfig_ext,
+         make_goals = ["modules", "dtbs"],
+         makefile = "//common:Makefile",
++        # junkyard (lynx-mainline): kleaf main made `pahole` a required
++        # kernel_build() argument; use the tool common/ builds for its own GKI.
++        pahole = "//common:pahole",
+         kcflags = COMMON_KCFLAGS,
+-        kmi_symbol_list = target_kmi_symbol_list,
+         module_outs = module_outs,
+         strip_modules = True,
+         visibility = ["//visibility:private"],
+@@ -500,7 +501,6 @@ def device_build(
+         target_kernel_images,
+         target_kernel_modules_install,
+         target_kernel_unstripped_modules_archive,
+-        target_kmi_symbol_list,
+         target_kunit_modules_install,
+         target_kunit_tests_zip,
+         target_merged_ddk_uapi_headers,
+diff --git a/kleaf/files/build.config.common b/kleaf/files/build.config.common
+index 18f0f4d..186dfa5 100644
+--- a/kleaf/files/build.config.common
++++ b/kleaf/files/build.config.common
+@@ -1,4 +1,10 @@
+-. ${ROOT_DIR}/${KERNEL_DIR}/build.config.constants
++# junkyard (lynx-mainline): android-mainline replaced common/build.config.constants
++# with common/bazel/constants.scl, which kleaf reads and exports itself
++# (kernel_env's autoload of branch constants). Source the old file only where it
++# still exists, so the same config works on both.
++if [ -f ${ROOT_DIR}/${KERNEL_DIR}/build.config.constants ]; then
++  . ${ROOT_DIR}/${KERNEL_DIR}/build.config.constants
++fi
+ 
+ BOOT_IMAGE_HEADER_VERSION=4
+ TRIM_UNUSED_MODULES=1

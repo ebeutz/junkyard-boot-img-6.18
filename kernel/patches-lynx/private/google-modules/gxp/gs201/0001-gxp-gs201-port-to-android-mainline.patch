@@ -1,5 +1,11 @@
 From: junkyard
-Subject: [PATCH] gxp/gs201: port to Linux 6.18 (lynx)
+Subject: [PATCH] gxp/gs201: port to android-mainline
+
+One cumulative patch, kept in two sections: the 6.1 -> 6.18 port this
+project first needed for GrapheneOS's 6.18 GKI, then 6.18 -> android-mainline.
+
+== 6.1 -> 6.18 ==
+(gxp/gs201: port to Linux 6.18 (lynx))
 
 Port private/google-modules/gxp/gs201 to the GrapheneOS Linux 6.18 GKI for the gs201 lynx build.
 API migrations. Mostly mechanical; entries that change behaviour say so:
@@ -16,6 +22,13 @@ Files: amalthea-platform.c, gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c, 
 
 lynx-only (kernel/patches-lynx/): felix builds the 6.1 tree these
 drivers were written for.
+
+== 6.18 -> android-mainline ==
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * dma_fence::lock -> dma_fence_{lock_irqsave,unlock_irqrestore}().
+  * thermal_of_cooling_device_register() gained a cdev_id argument (0).
 ---
 diff --git a/amalthea-platform.c b/amalthea-platform.c
 index e37774d..09630c3 100644
@@ -30,6 +43,46 @@ index e37774d..09630c3 100644
  	.driver = {
  			.name = GXP_DRIVER_NAME,
  			.of_match_table = of_match_ptr(gxp_of_match),
+diff --git a/gcip-kernel-driver/drivers/gcip/gcip-dma-fence.c b/gcip-kernel-driver/drivers/gcip/gcip-dma-fence.c
+index ef80a3f..5ec0dee 100644
+--- a/gcip-kernel-driver/drivers/gcip/gcip-dma-fence.c
++++ b/gcip-kernel-driver/drivers/gcip/gcip-dma-fence.c
+@@ -44,15 +44,16 @@ int gcip_signal_dma_fence_with_status(struct dma_fence *fence, int error, bool i
+ 	 * This loop will be executed exactly once for cur == @fence, if @fence is not an array.
+ 	 */
+ 	dma_fence_unwrap_for_each(cur, &iter, fence) {
+-		spin_lock_irqsave(cur->lock, flags);
++		dma_fence_lock_irqsave(cur, flags);
+ 		/* don't signal fence twice */
+ 		if (unlikely(test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &cur->flags)))
+ 			goto cont_unlock;
+ 		if (error)
+ 			dma_fence_set_error(cur, error);
+-		ret = dma_fence_signal_locked(cur);
++		dma_fence_signal_locked(cur);	/* returns void on android-mainline */
++		ret = 0;
+ cont_unlock:
+-		spin_unlock_irqrestore(cur->lock, flags);
++		dma_fence_unlock_irqrestore(cur, flags);
+ 	}
+ 
+ 	return ret;
+@@ -290,7 +291,7 @@ void gcip_dma_fence_array_disable_signaling(struct dma_fence *fence)
+ 	if (!dma_fence_is_array(fence))
+ 		return;
+ 
+-	spin_lock_irqsave(fence->lock, flags);
++	dma_fence_lock_irqsave(fence, flags);
+ 
+ 	if (!test_bit(DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT, &fence->flags))
+ 		goto out;
+@@ -303,5 +304,5 @@ void gcip_dma_fence_array_disable_signaling(struct dma_fence *fence)
+ 	clear_bit(DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT, &fence->flags);
+ 
+ out:
+-	spin_unlock_irqrestore(fence->lock, flags);
++	dma_fence_unlock_irqrestore(fence, flags);
+ }
 diff --git a/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c b/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c
 index 882aa80..24047e5 100644
 --- a/gcip-kernel-driver/drivers/gcip/gcip-domain-pool.c
@@ -89,6 +142,19 @@ index 9259dd8..34b297d 100644
  			else
  				tel->fallback_fn(tel);
  			read_unlock_irqrestore(&tel->ctx_lock, ctx_lock_flags);
+diff --git a/gcip-kernel-driver/drivers/gcip/gcip-thermal.c b/gcip-kernel-driver/drivers/gcip/gcip-thermal.c
+index 939394e..ba277c0 100644
+--- a/gcip-kernel-driver/drivers/gcip/gcip-thermal.c
++++ b/gcip-kernel-driver/drivers/gcip/gcip-thermal.c
+@@ -396,7 +396,7 @@ static int gcip_thermal_cooling_register(struct gcip_thermal *thermal, const cha
+ 		dev_warn(thermal->dev, "Failed to find thermal cooling node: %s\n",
+ 			 node_name ? node_name : "");
+ 
+-	thermal->cdev = thermal_of_cooling_device_register(node, type, thermal, &gcip_thermal_ops);
++	thermal->cdev = thermal_of_cooling_device_register(node, 0, type, thermal, &gcip_thermal_ops);
+ 	/* OK to call it even if @node is NULL. */
+ 	of_node_put(node);
+ 	if (IS_ERR(thermal->cdev))
 diff --git a/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c b/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c
 index c216028..7c0f8a0 100644
 --- a/gcip-kernel-driver/drivers/gcip/iif/iif-signaler-submission-waiter.c

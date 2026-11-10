@@ -1,0 +1,68 @@
+From: junkyard
+Subject: [PATCH] trusty: port to android-mainline
+
+Linux 6.18 -> android-mainline (7.3):
+
+  * dma_map_ops.map_page/unmap_page -> map_phys/unmap_phys. The IPC
+    buffer is in the linear map either way, so phys_to_virt(phys) is the
+    pointer page_to_virt(page) + offset was.
+
+strncpy() in trusty-ipc.c is left alone: aosp/0003 restores it.
+---
+diff --git a/Kbuild b/Kbuild
+index bb075c5..57f9891 100644
+--- a/Kbuild
++++ b/Kbuild
+@@ -1,5 +1,9 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+ subdir-ccflags-y += -I$(src)/include
++# junkyard (lynx-mainline): kbuild no longer appends $(EXTRA_CFLAGS) to every
++# compile (scripts/Makefile.build dropped EXTRA_*FLAGS support), so the flags
++# the Makefile passes that way were silently lost. Restore exactly that.
++subdir-ccflags-y += $(EXTRA_CFLAGS)
+ 
+ obj-y += drivers/trusty/
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index 7334cd3..a78a80c 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -701,18 +701,22 @@ err_share_memory:
+ 	return ret;
+ }
+ 
+-static dma_addr_t trusty_virtio_dma_map_page(struct device *dev,
+-					     struct page *page,
+-					     unsigned long offset, size_t size,
++/*
++ * android-mainline replaced dma_map_ops.map_page/unmap_page with
++ * map_phys/unmap_phys. The buffer is in the linear map either way, so
++ * phys_to_virt(phys) is the same pointer page_to_virt(page) + offset was.
++ */
++static dma_addr_t trusty_virtio_dma_map_phys(struct device *dev,
++					     phys_addr_t phys, size_t size,
+ 					     enum dma_data_direction dir,
+ 					     unsigned long attrs)
+ {
+-	struct tipc_msg_buf *buf = page_to_virt(page) + offset;
++	struct tipc_msg_buf *buf = phys_to_virt(phys);
+ 
+ 	return buf->buf_id;
+ }
+ 
+-static void trusty_virtio_dma_unmap_page(struct device *dev, dma_addr_t addr,
++static void trusty_virtio_dma_unmap_phys(struct device *dev, dma_addr_t addr,
+ 				       size_t size, enum dma_data_direction dir,
+ 				       unsigned long attrs)
+ {
+@@ -720,8 +724,8 @@ static void trusty_virtio_dma_unmap_page(struct device *dev, dma_addr_t addr,
+ }
+ 
+ static const struct dma_map_ops trusty_virtio_dma_map_ops = {
+-	.map_page = trusty_virtio_dma_map_page,
+-	.unmap_page = trusty_virtio_dma_unmap_page,
++	.map_phys = trusty_virtio_dma_map_phys,
++	.unmap_phys = trusty_virtio_dma_unmap_phys,
+ };
+ 
+ static int trusty_virtio_probe(struct platform_device *pdev)
