@@ -170,7 +170,7 @@ if [ -n "$(git status --porcelain -- kernel/patches 'kernel/patches-*' 2>/dev/nu
 fi
 
 # --- enumerate every git project in the checkout -----------------------------
-# Skip out/ (build output, full of generated git-less trees and bazel caches) and
+# Skip out/ (build output, full of generated git-less trees) and
 # .repo/ (repo's own bookkeeping, not a build input — its manifests project
 # carries an untracked file as a matter of course).
 #
@@ -274,7 +274,7 @@ for tgt in "${PROJECTS[@]}"; do
 		want=$(patch_apply "$p" --numstat 2>/dev/null \
 			| awk -v new="$newf" 'BEGIN{n=split(new,a,"\n"); for(i=1;i<=n;i++) skip[a[i]]=1}
 			                     !($3 in skip){print $1" "$2" "$3}' | sort)
-		# A patch that only CREATES files (lynx's kleaf glue) leaves $pfiles
+		# A patch that only CREATES files (e.g. a generated Kbuild) leaves $pfiles
 		# empty, and the bare `--` would then diff the whole project, charging
 		# every other patch's edits to this one. Nothing pre-existing to compare.
 		if [ -n "$pfiles" ]; then

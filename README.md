@@ -31,16 +31,16 @@ just felix     # or just one
 just lynx
 ```
 
-Each of those runs the whole pipeline for its device, including the first-time `repo` sync (~1hr) and the ~2GB vendor-firmware OTA download. Reruns are cheap.
+Each of those runs the whole pipeline for its device, including the first-time kernel source fetch and build (~1hr) and the ~2GB vendor-firmware OTA download. Reruns are cheap.
 
 **Everything is per-device.** Both devices are gs201, but they need different kernels (felix: AOSP `android-gs-felix-6.1`; lynx: GrapheneOS [kernel_pixel_6.18](https://gitlab.com/grapheneos/kernel_pixel_6.18), on the `lynx-mainline` branch that tree's device/module code on an AOSP `android-mainline` GKI, and on `lynx-linus-mainline` the same device/module code on Linus' own tree) and different vendor firmware, so each gets its own artifact tree and its own kernel checkout:
 
 ```
 build/<device>/       sentinels, rootfs.img, super.img, boot.img, vendor_boot.img,
                       module_order.txt, unpack/, vendor-firmware/
-kernel/source-<device>/       its own `repo` checkout, on its own manifest branch
+kernel/source-<device>/       its own kernel checkout (felix: `repo`; lynx: monorepo + plain git)
 kernel/kernel_version.<device>
-devices/<device>.mk           kernel branch, Bazel target, OTA url+sha, SIZE, SUPER_BYTES, hostname
+devices/<device>.mk           kernel source + build description, OTA url+sha, SIZE, SUPER_BYTES, hostname
 ```
 
 Adding a third gs201 Pixel is a new `devices/<name>.mk` plus a one-line recipe.
@@ -74,7 +74,7 @@ It drives the Makefile's sentinel chain. Each stage writes a dotfile on success,
 | --- | --- |
 | `.create_image` | `truncate` + `mkfs.ext4 -F -L rootfs` a fresh `build/<device>/rootfs.img` |
 | `.debootstrap` | Two-stage debootstrap of `trixie` into the mounted image; sets root password and hostname |
-| `.build_kernel` | Bazel-builds the device's kernel (`BAZEL_TARGET` from its fragment) with the custom defconfig fragment; writes `kernel/kernel_version.<device>` |
+| `.build_kernel` | Builds the device's kernel, out-of-tree modules and device tree with plain make/kbuild ([kernel/kbuild.mk](kernel/kbuild.mk)), using the custom defconfig fragment, then writes `kernel/kernel_version.<device>` |
 | `.install_vendor_firmware` | Rsyncs `build/<device>/vendor-firmware/extracted/firmware/` (from `sync_vendor_firmware`) into `/vendor/firmware/` on the mounted image — required for UART input |
 | `.install_packages` | `apt-get install` everything in [rootfs/packages.txt](rootfs/packages.txt); installs kmscon from a pinned Debian-pool `.deb` (trixie dropped it); creates `$(USER_LOGIN)` with passwordless sudo; masks `systemd-backlight@.service`; disables `dhcpcd`, enables `NetworkManager`, seeds a DHCP ethernet profile; rsyncs [rootfs/overlay/](rootfs/overlay/) into the sysroot |
 | `.install_kernel` | Copies modules from the kernel build's staging archives, runs `depmod`, installs kernel headers, composes `build/<device>/module_order.txt` for dracut's force-drivers list (with `bcmdhd4389`/`exynos_mfc` stripped) |
@@ -85,7 +85,7 @@ A device build invokes make twice in sequence: first to build `.build_kernel`, t
 
 Individual stages are also exposed, and take `device=` like everything else: `just build_kernel`, `just build_rootfs`, `just install_apt_packages`, `just update_kernel_modules_and_source`, `just update_initramfs`, `just build_boot_images`, `just device=lynx build_kernel`. See `just --list`.
 
-`just clean` removes built images and sentinels for **every** device, pairing with `just all`; `just device=lynx clean` narrows it to one. It preserves the expensive kernel-build and OTA caches. `just clean_rootfs` and `just clean_kernel` follow the same rule, the latter being the separate knob for the Bazel output.
+`just clean` removes built images and sentinels for **every** device, pairing with `just all`; `just device=lynx clean` narrows it to one. It preserves the expensive kernel-build and OTA caches. `just clean_rootfs` and `just clean_kernel` follow the same rule. `just clean_kernel` is the separate knob for the kernel build output (`kernel/source-<device>/out/<device>/`).
 
 ## Flashing
 
