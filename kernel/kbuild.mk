@@ -109,7 +109,7 @@ CONFIG_INPUTS := $(KERNEL_BASE_DEFCONFIG) $(CONFIG_FRAGMENTS) $(KTREE)/Kconfig \
 # search path); ACK appends to DTC_INCLUDE from the environment instead.
 DTSTREE_REL := $(shell realpath -m --relative-to=$(KTREE) $(SRC)/$(KERNEL_DTSTREE))
 DTS_OUT     := $(abspath $(KOUT)/$(DTSTREE_REL))
-ifneq ($(shell grep -ls 'DTC_INCLUDE +=' $(KTREE)/scripts/Makefile.dtbs $(KTREE)/scripts/Makefile.lib),)
+ifneq ($(shell grep -Els '^DTC_INCLUDE[[:space:]]*\+=' $(KTREE)/scripts/Makefile.dtbs $(KTREE)/scripts/Makefile.lib),)
 DTC_ARGS := dtstree=$(DTSTREE_REL)
 DTC_ENV  := DTC_INCLUDE=$(SRC)/$(KERNEL_DTC_INCLUDE)
 else
@@ -167,30 +167,49 @@ dtbs: kernel
 # ---------------------------------------------------------------------------
 # External modules, from $(KERNEL_EXT_MODULES_MK).
 
-ext_mo = $(MOUT)/build/$(1)
+# Where a module is built. M is always relative to the kernel tree, as Kleaf
+# passed it (soc/gs's Makefile includes $(KERNEL_SRC)/$(M)/Makefile.preinstall).
+# The output goes to MO= where kbuild has it (upstream since 6.13; Linus' tree
+# here), one directory per module. ACK 6.1 (felix) has no MO=; it puts an
+# external module with a relative M at $(O)/$(M), which is outside the source
+# tree too, but per package -- fine for felix, whose modules are all
+# Makefile-based, one per package.
+EXTMOD_HAS_MO := $(shell grep -qs 'origin MO' $(KTREE)/Makefile && echo 1)
+ext_rel = $(shell realpath -m --relative-to=$(KTREE) $(1))
+ext_m   = $(call ext_rel,$(SRC)/$($(1).dir))
+ifeq ($(EXTMOD_HAS_MO),1)
+ext_out    = $(MOUT)/build/$(1)
+ext_mo_arg = MO=$(call ext_out,$(1))
+# DDK modules (a generated Kbuild, no Makefile to care) take M absolute.
+ext_m_ddk  = $(SRC)/$($(1).dir)
+else
+ext_out    = $(abspath $(KOUT)/$(call ext_m,$(1)))
+ext_mo_arg =
+ext_m_ddk  = $(call ext_m,$(1))
+endif
+# The M a module is built (and installed) with.
+ext_m_for  = $(if $(filter ddk,$($(1).kind)),$(call ext_m_ddk,$(1)),$(call ext_m,$(1)))
 
 # ddk: the package Kbuild written by bazel2kbuild, one module per run.
 define build_ddk
-	$(KMAKE) M=$(SRC)/$($(1).dir) MO=$(call ext_mo,$(1)) DDK_MODULE=$($(1).name) \
+	$(KMAKE) M=$(call ext_m_ddk,$(1)) $(call ext_mo_arg,$(1)) DDK_MODULE=$($(1).name) \
 		ROOT_DIR=$(SRC) KBUILD_EXTRA_SYMBOLS="$(addprefix $(MOUT)/,$($(1).extra_symbols))" \
 		modules
 endef
 
 # make: the package's own Makefile, invoked the way Kleaf's kernel_module did
-# (it finds its deps' Module.symvers under COMMON_OUT_DIR itself). M is relative
-# to the kernel tree, as Kleaf passed it: soc/gs's Makefile includes
-# $(KERNEL_SRC)/$(M)/Makefile.preinstall.
+# (it finds its deps' Module.symvers under COMMON_OUT_DIR itself).
 #
 # KCFLAGS is exported (empty) in the ENVIRONMENT, as Kleaf's kernel_env did.
 # These Makefiles add their include paths with `KCFLAGS += ...` (e.g.
 # soc/gs/Makefile.include, which mali includes), and make passes a makefile
 # variable on to kbuild's sub-make only if it came from the environment. Unset,
 # the additions are silently dropped; on the make command line they would
-# override the `+=` instead.
-ext_rel = $(shell realpath -m --relative-to=$(KTREE) $(SRC)/$(1))
+# override the `+=` instead. PAHOLE, conversely, must be on the command line:
+# the kernel's Makefile assigns it, which beats the environment.
 define build_make
-	KCFLAGS= $(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ \
-		M=$(call ext_rel,$($(1).dir)) O=$(KOUT) MO=$(call ext_mo,$(1)) KERNEL_SRC=$(KTREE) \
+	KCFLAGS= $(MAKE) -C $(SRC)/$($(1).dir) ARCH=arm64 LLVM=$(CLANG)/bin/ PAHOLE=$(PAHOLE) \
+		M=$(call ext_m,$(1)) O=$(KOUT) $(call ext_mo_arg,$(1)) KERNEL_SRC=$(KTREE) \
 		ROOT_DIR=$(SRC) COMMON_OUT_DIR=$(MOUT) OUT_DIR=$(KOUT) KERNEL_DIR=$(KERNEL_TREE) \
 		modules
 endef
@@ -201,7 +220,7 @@ ext/$(1): kernel $(addprefix ext/,$($(1).needs))
 	@echo "  MODULE  $(1)"
 	+$$(call build_$($(1).kind),$(1))
 	mkdir -p $$(dir $(MOUT)/$($(1).symvers))
-	cp $(call ext_mo,$(1))/Module.symvers $(MOUT)/$($(1).symvers)
+	cp $(call ext_out,$(1))/Module.symvers $(MOUT)/$($(1).symvers)
 endef
 $(foreach m,$(EXT_MODULES),$(eval $(call ext_module_rule,$(m))))
 
@@ -248,7 +267,7 @@ define install_rule
 .PHONY: install/$(1)
 install/$(1): install-intree
 	@echo "  INSTALL $(1)"
-	+@$$(KMAKE) M=$(SRC)/$($(1).dir) MO=$(call ext_mo,$(1)) INSTALL_MOD_DIR=extra/$($(1).dir) $$(MODINST) >/dev/null
+	+@$$(KMAKE) M=$(call ext_m_for,$(1)) $(call ext_mo_arg,$(1)) INSTALL_MOD_DIR=extra/$($(1).dir) $$(MODINST) >/dev/null
 	@mkdir -p $(OUT)/order; : > $(call order_file,$(1)); \
 	for o in $($(1).outs); do \
 	  f=$$$$(cd $(STAGE)/lib/modules/$$(KVER_SH) && find extra/$($(1).dir) -path "*/$$$$o" | sort | head -n 1); \
