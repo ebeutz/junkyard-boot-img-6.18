@@ -33,7 +33,7 @@ just lynx
 
 Each of those runs the whole pipeline for its device, including the first-time `repo` sync (~1hr) and the ~2GB vendor-firmware OTA download. Reruns are cheap.
 
-**Everything is per-device.** Both devices are gs201, but they need different kernels (felix: AOSP `android-gs-felix-6.1`; lynx: GrapheneOS [kernel_pixel_6.18](https://gitlab.com/grapheneos/kernel_pixel_6.18), and on the `lynx-mainline` branch that tree's device/module code on an AOSP `android-mainline` GKI) and different vendor firmware, so each gets its own artifact tree and its own kernel checkout:
+**Everything is per-device.** Both devices are gs201, but they need different kernels (felix: AOSP `android-gs-felix-6.1`; lynx: GrapheneOS [kernel_pixel_6.18](https://gitlab.com/grapheneos/kernel_pixel_6.18), on the `lynx-mainline` branch that tree's device/module code on an AOSP `android-mainline` GKI, and on `lynx-linus-mainline` the same device/module code on Linus' own tree) and different vendor firmware, so each gets its own artifact tree and its own kernel checkout:
 
 ```
 build/<device>/       sentinels, rootfs.img, super.img, boot.img, vendor_boot.img,

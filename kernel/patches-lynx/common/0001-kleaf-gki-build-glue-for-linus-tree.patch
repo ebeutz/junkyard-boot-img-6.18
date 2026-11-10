@@ -1,0 +1,2015 @@
+From: junkyard
+Subject: [PATCH] kleaf: GKI build glue for Linus' tree
+
+New files only; no existing file is touched and nothing here is compiled
+into the kernel.
+
+kleaf (build/kernel) and the gs201/lynx device build reference a number of
+targets in //common that only an Android Common Kernel provides:
+kernel_aarch64 (and its _sources/_images/_headers/_gki_artifacts siblings),
+the DDK header allowlists (all_headers_aarch64), pahole, checkpatch and
+set_kernel_dir_build_config. This adds them for Linus' v7.3:
+
+  BUILD.bazel              AOSP android-mainline's common/BUILD.bazel cut
+                           down to the aarch64 GKI and those targets; x86,
+                           microdroid, crashdump, db845c/rockpi4/yukawa,
+                           kythe, kselftests and the tools are dropped.
+                           check_defconfig is disabled (see gki_defconfig)
+                           and kcflags is empty: no -D__ANDROID_COMMON_KERNEL__,
+                           which vendor code tests to pick ACK-only paths.
+  bazel/constants.scl      clang r596125 / rustc 1.96.0, i.e. the toolchain
+                           AOSP builds android-mainline 7.3 with. BRANCH is
+                           "linus", so kleaf's stamp step adds no
+                           -mainline/-androidNN localversion.
+  bazel/modules.bzl,
+  bazel/modules_private.bzl
+                           the GKI module lists, as AOSP's minus wonder.ko
+                           (ACK-only).
+  arch/arm64/configs/gki_defconfig
+                           AOSP's, minus the ACK-only symbols (vendor hooks,
+                           incfs, ashmem, dm-bow/default-key, quota2,
+                           uid_sys_stats, cpu_freq_times, debug_kinfo,
+                           wonder, zram Android ioctls, RT softirq-aware
+                           sched, module scmversion), with -linus-4k as
+                           localversion, ARCH_QCOM off (upstream's selects
+                           HAVE_SHARED_GPIOS, i.e. built-in shared-GPIO
+                           proxying, which ACK removes) and
+                           MEDIA_SUPPORT_FILTER on with camera + platform
+                           support (ACK exposes those prompts without the
+                           filter; without it upstream builds every DVB
+                           frontend and tuner).
+  Kconfig.ext              placeholder sourced when no KCONFIG_EXT_PREFIX
+                           is set (see the kbuild hooks patch).
+  init/Kconfig.gki         AOSP's GKI_HIDDEN_* configs: they select hidden
+                           helper symbols (DRM display helpers, regmap,
+                           SND SoC, media, ...) that vendor modules need
+                           built into the GKI. GKI_HIDDEN_QCOM_CONFIGS no
+                           longer selects QCOM_SMEM_STATE unconditionally
+                           (it depends on QCOM_SOC, now off).
+---
+diff --git a/BUILD.bazel b/BUILD.bazel
+new file mode 100644
+index 000000000..03d4c97f5
+--- /dev/null
++++ b/BUILD.bazel
+@@ -0,0 +1,352 @@
++# SPDX-License-Identifier: GPL-2.0
++# Copyright (C) 2021 The Android Open Source Project
++#
++# junkyard (lynx-linus-mainline): kleaf build glue for building Linus' tree as
++# the lynx "GKI". This is AOSP android-mainline's common/BUILD.bazel cut down to
++# the aarch64 GKI and what the gs201/lynx device build consumes from //common
++# (kernel_aarch64 and its _sources/_images/_headers/_gki_artifacts siblings,
++# the DDK header allowlists, pahole, checkpatch, set_kernel_dir_build_config).
++# Everything else in the AOSP file (x86, microdroid, crashdump, db845c/rockpi4/
++# yukawa, kythe, kselftests, tools) is dropped. Nothing here is kernel code.
++
++load("@bazel_skylib//lib:paths.bzl", "paths")
++load("@bazel_skylib//rules:write_file.bzl", "write_file")
++load("@rules_cc//cc:defs.bzl", "cc_library")
++load(
++    "//build/kernel/kleaf:common_kernels.bzl",
++    "common_kernel",
++    "common_kernel_protected_module_names",
++)
++load("//build/kernel/kleaf:constants.bzl", "DEFAULT_GKI_OUTS")
++load("//build/kernel/kleaf:dwarves.bzl", "pahole")
++load(
++    "//build/kernel/kleaf:kernel.bzl",
++    "checkpatch",
++    "ddk_headers",
++    "ddk_headers_archive",
++)
++load(
++    ":bazel/modules_private.bzl",
++    "get_gki_modules_list",
++    "get_gki_modules_superset",
++    "get_gki_unprotected_modules_list",
++    "get_kunit_modules_list",
++    "get_kunit_modules_superset",
++)
++
++package(
++    default_visibility = [
++        "//visibility:public",
++    ],
++)
++
++_GKI_AARCH64_MAKE_GOALS = [
++    "Image",
++    "Image.lz4",
++    "Image.gz",
++    "Image.lzma",
++    "Image.zst",
++    "modules",
++]
++
++# Extra generated headers below $OUT_DIR for external modules.
++_GENERATED_HEADERS_FOR_MODULE = [
++    "security/selinux/flask.h",
++    "security/selinux/av_permissions.h",
++]
++
++checkpatch(
++    name = "checkpatch",
++    checkpatch_pl = "scripts/checkpatch.pl",
++)
++
++write_file(
++    name = "gki_system_dlkm_modules_arm64",
++    out = "gki/aarch64/system_dlkm_modules",
++    # Do not built kunit modules into system_dlkm
++    content = get_gki_modules_list("arm64") + [
++        # Ensure new line at the end.
++        "",
++    ],
++)
++
++common_kernel_protected_module_names(
++    name = "gki_aarch64_protected_module_names",
++    out = "gki/aarch64/protected_module_names",
++    exclude = get_gki_unprotected_modules_list("arm64"),
++    module_names = get_gki_modules_list("arm64") + get_kunit_modules_list("arm64"),
++)
++
++_SET_KERNEL_DIR_CMD = "KERNEL_DIR=\"{kernel_dir}\"".format(
++    kernel_dir = paths.join(
++        package_relative_label(":x").workspace_root,
++        package_relative_label(":x").package,
++    ),
++)
++
++write_file(
++    name = "set_kernel_dir_build_config",
++    out = "set_kernel_dir_build_config/build.config",
++    content = [
++        _SET_KERNEL_DIR_CMD,
++        "",
++    ],
++    visibility = ["//visibility:public"],  # TODO: This should be private
++)
++
++filegroup(
++    name = "common_kernel_sources",
++    srcs = glob(
++        ["**"],
++        exclude = [
++            "BUILD.bazel",
++            "**/*.bzl",
++            ".git/**",
++
++            # ctag files
++            "tags",
++            "TAGS",
++
++            # temporary ctag files
++            "tags.temp",
++            "tags.lock",
++
++            # cscope files
++            "cscope.*",
++            "ncscope.*",
++
++            # ABI and symbol list files
++            "gki/**",
++        ],
++    ),
++    visibility = ["//visibility:public"],
++)
++
++_KUNIT_COMMON_GUIDE = [
++    "Modules for KUnit testing on Android devices only:",
++    "(KUnit: Linux Kernel Unit Testing https://www.kernel.org/doc/html/latest/dev-tools/kunit/)",
++]
++
++write_file(
++    name = "generate_gki_module_info_arm64",
++    out = "generate_gki_module_info_arm64/README",
++    content = _KUNIT_COMMON_GUIDE + get_kunit_modules_list("arm64") + [
++        "",  # keep new line at the end
++    ],
++    visibility = ["//visibility:private"],
++)
++
++common_kernel(
++    name = "kernel_aarch64",
++    outs = DEFAULT_GKI_OUTS,
++    arch = "arm64",
++    build_gki_artifacts = True,
++    # junkyard: arch/arm64/configs/gki_defconfig is AOSP's minus the symbols
++    # Linus' tree does not have, not a `make savedefconfig` of this tree, so
++    # kleaf's "minimized" comparison would always fail. The device build's
++    # fragment check still runs.
++    check_defconfig = "disabled",
++    ddk_headers_archive = ":kernel_aarch64_ddk_headers_archive",
++    ddk_module_headers = [":all_headers_aarch64"],
++    defconfig = "arch/arm64/configs/gki_defconfig",
++    generated_headers_for_module = _GENERATED_HEADERS_FOR_MODULE,
++    gki_system_dlkm_modules = ":gki_system_dlkm_modules_arm64",
++    # junkyard: not COMMON_KCFLAGS (-D__ANDROID_COMMON_KERNEL__). Vendor code
++    # tests that macro to pick ACK-only code paths; this is not an ACK.
++    kcflags = [],
++    make_goals = _GKI_AARCH64_MAKE_GOALS,
++    makefile = ":Makefile",
++    module_implicit_outs = get_gki_modules_list("arm64") + get_kunit_modules_list("arm64"),
++    modules_superset = get_gki_modules_superset("arm64") + get_kunit_modules_superset("arm64"),
++    system_dlkm_extra_archive_files = [":generate_gki_module_info_arm64"],
++    visibility = ["//visibility:public"],
++)
++
++alias(
++    name = "kernel",
++    actual = ":kernel_aarch64",
++)
++
++alias(
++    name = "kernel_dist",
++    actual = ":kernel_aarch64_dist",
++)
++
++cc_library(
++    name = "tools_includes",
++    hdrs = glob([
++        "tools/include/**/*.h",
++    ]),
++    includes = [
++        "tools/include",
++        "tools/include/uapi",
++    ],
++)
++
++cc_library(
++    name = "bpf_x86",
++    srcs = glob([
++        "tools/arch/x86/include/**/*.h",
++        "tools/lib/bpf/*.c",
++    ]),
++    hdrs = glob([
++        "tools/lib/bpf/*.h",
++    ]),
++    implementation_deps = [":tools_includes"],
++    strip_include_prefix = "tools/lib",
++    visibility = ["//visibility:public"],
++    deps = ["//prebuilts/kernel-build-tools:imported_libs"],
++)
++
++pahole(
++    name = "pahole",
++    visibility = ["//visibility:public"],
++    deps = [":bpf_x86"],
++)
++
++# DDK Headers
++# All headers. These are the public targets for DDK modules to use.
++alias(
++    name = "all_headers",
++    actual = "all_headers_aarch64",
++    visibility = ["//visibility:public"],
++)
++
++ddk_headers(
++    name = "all_headers_aarch64",
++    hdrs = [":all_headers_allowlist_aarch64"] + select({
++        "//build/kernel/kleaf:allow_ddk_unsafe_headers_set": [":all_headers_unsafe"],
++        "//conditions:default": [],
++    }),
++    visibility = ["//visibility:public"],
++)
++
++ddk_headers_archive(
++    name = "kernel_aarch64_ddk_headers_archive",
++    srcs = [
++        "all_headers_aarch64",
++    ],
++    visibility = ["//visibility:private"],
++)
++
++ddk_headers(
++    name = "xhci_headers",
++    hdrs = [
++        "drivers/usb/core/hub.h",
++        "drivers/usb/core/usb.h",
++        "drivers/usb/host/pci-quirks.h",
++        "drivers/usb/host/xhci.h",
++        "drivers/usb/host/xhci-caps.h",
++        "drivers/usb/host/xhci-ext-caps.h",
++        "drivers/usb/host/xhci-plat.h",
++        "drivers/usb/host/xhci-port.h",
++    ],
++    linux_includes = [
++        "drivers/usb",
++        "drivers/usb/host",
++    ],
++    visibility = ["//visibility:private"],
++)
++
++ddk_headers(
++    name = "all_headers_allowlist_aarch64",
++    hdrs = [
++        "drivers/dma/dmaengine.h",
++        "drivers/extcon/extcon.h",
++        "drivers/opp/opp.h",
++        "drivers/pci/controller/dwc/pcie-designware.h",
++        "drivers/pci/pci.h",
++        "drivers/thermal/thermal_core.h",
++        "drivers/thermal/thermal_debugfs.h",
++        "drivers/thermal/thermal_netlink.h",
++        "drivers/thermal/thermal_thresholds.h",
++        "drivers/ufs/core/ufshcd-crypto.h",
++        "drivers/ufs/host/ufshcd-pltfrm.h",
++        "drivers/usb/dwc3/core.h",
++        "sound/usb/card.h",
++        "sound/usb/usbaudio.h",
++        ":all_headers_allowlist_aarch64_globs",
++        ":all_headers_allowlist_common_globs",
++        ":all_headers_allowlist_exynos",
++        ":xhci_headers",
++    ],
++    # The list of include directories where source files can #include headers
++    # from. In other words, these are the `-I` option to the C compiler.
++    # These are prepended to LINUXINCLUDE.
++    linux_includes = [
++        "arch/arm64/include",
++        "arch/arm64/include/uapi",
++        "drivers/dma",
++        "drivers/extcon",
++        "drivers/opp",
++        "drivers/pci",
++        "drivers/pci/controller/dwc",
++        "drivers/thermal",
++        "drivers/ufs",
++        "drivers/usb",
++        "sound/usb",
++        "include",
++        "include/uapi",
++    ],
++    visibility = ["//visibility:private"],
++)
++
++# These are separate filegroup targets so the all_headers_allowlist_* are
++# more friendly to batch BUILD file update tools like buildozer.
++
++# globs() for arm64 only
++filegroup(
++    name = "all_headers_allowlist_aarch64_globs",
++    srcs = glob(["arch/arm64/include/**/*.h"]),
++    visibility = ["//visibility:private"],
++)
++
++# globs() for arm only
++# globs() for all architectures
++filegroup(
++    name = "all_headers_allowlist_common_globs",
++    srcs = glob(["include/**/*.h"]),
++    visibility = ["//visibility:private"],
++)
++
++# DDK headers unsafe list. This is the list of all headers and include
++# directories that may be used during migration from kernel_module's, but
++# should be avoided in general.
++# Use with caution; items may:
++# - be removed without notice
++# - be moved into all_headers
++ddk_headers(
++    name = "all_headers_unsafe",
++    hdrs = [
++        "//build/kernel/kleaf:user_ddk_unsafe_headers",
++    ],
++    # The list of include directories where source files can #include headers
++    # from. In other words, these are the `-I` option to the C compiler.
++    # Unsafe include directories are appended to ccflags-y.
++    includes = [
++        ".",
++    ],
++    visibility = ["//visibility:private"],
++)
++
++ddk_headers(
++    name = "all_headers_allowlist_exynos",
++    hdrs = [
++        "drivers/android/binder_alloc.h",
++        "drivers/android/binder_internal.h",
++        "drivers/android/binder_trace.h",
++        "drivers/android/dbitmap.h",
++        "kernel/sched/cpudeadline.h",
++        "kernel/sched/cpupri.h",
++        "kernel/sched/ext/ext.h",
++        "kernel/sched/features.h",
++        "kernel/sched/sched.h",
++        "kernel/sched/stats.h",
++        "kernel/workqueue_internal.h",
++    ],
++    visibility = ["//visibility:private"],
++)
++
++exports_files([
++    "Makefile",
++])
+diff --git a/Kconfig.ext b/Kconfig.ext
+new file mode 100644
+index 000000000..48d805f0b
+--- /dev/null
++++ b/Kconfig.ext
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++# This file is intentionally empty. It's used as a placeholder for when
++# KCONFIG_EXT_PREFIX isn't defined.
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+new file mode 100644
+index 000000000..508ce8cec
+--- /dev/null
++++ b/arch/arm64/configs/gki_defconfig
+@@ -0,0 +1,832 @@
++# junkyard (lynx-linus-mainline): AOSP android-mainline gki_defconfig at the
++# pin in kernel/local-manifests/lynx.xml, minus the symbols that exist only
++# in ACK (vendor hooks, incfs, ashmem, dm-bow/default-key, quota2, uid_sys_stats,
++# cpu_freq_times, debug_kinfo, wonder, zram Android ioctls, ...), and with a
++# -linus localversion. CONFIG_GKI_HACKS_TO_FIX selects the GKI_HIDDEN_* helper
++# symbols from init/Kconfig.gki (part of the same build glue).
++#
++# Two values differ from AOSP's on purpose, both to get the same result from
++# Linus' unmodified Kconfig:
++#  - CONFIG_ARCH_QCOM is off. Upstream ARCH_QCOM selects HAVE_SHARED_GPIOS,
++#    which turns on gpiolib's shared-GPIO proxying (GPIO_SHARED, built in) and
++#    gpio-shared-proxy.ko; ACK deletes that select instead. lynx needs no
++#    Qualcomm SoC support from the GKI.
++#  - CONFIG_MEDIA_SUPPORT_FILTER=y with camera + platform support. ACK makes
++#    the per-category media prompts visible without the filter; upstream they
++#    only exist with it, and without it every DVB frontend/tuner is built.
++CONFIG_LOCALVERSION="-linus-4k"
++CONFIG_AUDIT=y
++CONFIG_REFCOUNT_INTERRUPT_KUNIT_TEST=m
++CONFIG_TIME_KUNIT_TEST=m
++CONFIG_NO_HZ=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_BPF_SYSCALL=y
++CONFIG_BPF_JIT=y
++CONFIG_BPF_JIT_ALWAYS_ON=y
++# CONFIG_BPF_UNPRIV_DEFAULT_OFF is not set
++CONFIG_BPF_LSM=y
++CONFIG_PREEMPT=y
++CONFIG_SCHED_CLASS_EXT=y
++CONFIG_IRQ_TIME_ACCOUNTING=y
++CONFIG_TASKSTATS=y
++CONFIG_TASK_DELAY_ACCT=y
++CONFIG_TASK_XACCT=y
++CONFIG_TASK_IO_ACCOUNTING=y
++CONFIG_PSI=y
++CONFIG_RCU_EXPERT=y
++CONFIG_RCU_BOOST=y
++CONFIG_RCU_NOCB_CPU=y
++CONFIG_RCU_LAZY=y
++CONFIG_RCU_LAZY_DEFAULT_OFF=y
++CONFIG_IKCONFIG=y
++CONFIG_IKCONFIG_PROC=y
++CONFIG_IKHEADERS=m
++CONFIG_UCLAMP_TASK=y
++CONFIG_UCLAMP_BUCKETS_COUNT=20
++CONFIG_CGROUPS=y
++CONFIG_CGROUP_FAVOR_DYNMODS=y
++CONFIG_MEMCG=y
++CONFIG_BLK_CGROUP=y
++CONFIG_CGROUP_SCHED=y
++CONFIG_CFS_BANDWIDTH=y
++CONFIG_UCLAMP_TASK_GROUP=y
++CONFIG_CGROUP_FREEZER=y
++CONFIG_CPUSETS=y
++CONFIG_CPUSETS_V1=y
++CONFIG_CGROUP_CPUACCT=y
++CONFIG_CGROUP_BPF=y
++CONFIG_NAMESPACES=y
++# CONFIG_PID_NS is not set
++CONFIG_RELAY=y
++# CONFIG_RD_BZIP2 is not set
++# CONFIG_RD_LZMA is not set
++# CONFIG_RD_XZ is not set
++# CONFIG_RD_LZO is not set
++CONFIG_BOOT_CONFIG=y
++CONFIG_EXPERT=y
++# CONFIG_FHANDLE is not set
++# CONFIG_RSEQ is not set
++CONFIG_PROFILING=y
++CONFIG_RUST=y
++CONFIG_ARCH_SUNXI=y
++CONFIG_ARCH_HISI=y
++# CONFIG_ARCH_QCOM is not set
++CONFIG_ARCH_TEGRA=y
++CONFIG_ARM64_VA_BITS_39=y
++CONFIG_NR_CPUS=32
++CONFIG_PARAVIRT_TIME_ACCOUNTING=y
++CONFIG_ARM64_SW_TTBR0_PAN=y
++CONFIG_COMPAT=y
++CONFIG_ARMV8_DEPRECATED=y
++CONFIG_SWP_EMULATION=y
++CONFIG_CP15_BARRIER_EMULATION=y
++CONFIG_SETEND_EMULATION=y
++CONFIG_ARM64_PMEM=y
++CONFIG_ARM64_PSEUDO_NMI=y
++CONFIG_RANDOMIZE_BASE=y
++# CONFIG_RANDOMIZE_MODULE_REGION_FULL is not set
++CONFIG_UNWIND_PATCH_PAC_INTO_SCS=y
++CONFIG_CMDLINE="console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard arm64.no32bit_el0"
++# CONFIG_DMI is not set
++CONFIG_HIBERNATION=y
++CONFIG_PM_USERSPACE_AUTOSLEEP=y
++CONFIG_PM_WAKELOCKS=y
++CONFIG_PM_WAKELOCKS_LIMIT=0
++# CONFIG_PM_WAKELOCKS_GC is not set
++CONFIG_PM_DEBUG=y
++CONFIG_PM_ADVANCED_DEBUG=y
++CONFIG_ENERGY_MODEL=y
++CONFIG_CPU_IDLE=y
++CONFIG_CPU_IDLE_GOV_MENU=y
++CONFIG_CPU_IDLE_GOV_TEO=y
++CONFIG_ARM_PSCI_CPUIDLE=y
++CONFIG_CPU_FREQ=y
++CONFIG_CPU_FREQ_STAT=y
++CONFIG_CPU_FREQ_GOV_POWERSAVE=y
++CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
++CONFIG_ARM_SCPI_CPUFREQ=y
++CONFIG_ARM_SCMI_CPUFREQ=y
++# CONFIG_ARM_TEGRA194_CPUFREQ is not set
++CONFIG_VIRTUALIZATION=y
++CONFIG_KVM=y
++CONFIG_KPROBES=y
++CONFIG_SHADOW_CALL_STACK=y
++CONFIG_CFI=y
++CONFIG_MODULES=y
++CONFIG_MODULE_UNLOAD=y
++CONFIG_MODVERSIONS=y
++CONFIG_GENDWARFKSYMS=y
++CONFIG_MODULE_SIG=y
++CONFIG_MODULE_SIG_SHA256=y
++CONFIG_MODPROBE_PATH=""
++CONFIG_BLK_DEV_ZONED=y
++CONFIG_BLK_CGROUP_IOPRIO=y
++CONFIG_GKI_HACKS_TO_FIX=y
++# CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS is not set
++CONFIG_BINFMT_MISC=y
++# CONFIG_SLAB_MERGE_DEFAULT is not set
++CONFIG_SLAB_FREELIST_RANDOM=y
++CONFIG_SLAB_FREELIST_HARDENED=y
++CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
++# CONFIG_COMPAT_BRK is not set
++CONFIG_MEMORY_HOTPLUG=y
++CONFIG_MEMORY_HOTREMOVE=y
++CONFIG_DEFAULT_MMAP_MIN_ADDR=32768
++CONFIG_TRANSPARENT_HUGEPAGE=y
++CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y
++CONFIG_CMA=y
++CONFIG_CMA_DEBUGFS=y
++CONFIG_CMA_SYSFS=y
++CONFIG_CMA_AREAS=16
++# CONFIG_ZONE_DMA is not set
++CONFIG_ANON_VMA_NAME=y
++CONFIG_USERFAULTFD=y
++CONFIG_LRU_GEN=y
++CONFIG_LRU_GEN_ENABLED=y
++CONFIG_NET=y
++CONFIG_PACKET=y
++# CONFIG_AF_UNIX_OOB is not set
++CONFIG_XFRM_USER=y
++CONFIG_XFRM_INTERFACE=y
++CONFIG_XFRM_MIGRATE=y
++CONFIG_XFRM_STATISTICS=y
++CONFIG_NET_KEY=y
++CONFIG_XDP_SOCKETS=y
++CONFIG_IP_MULTICAST=y
++CONFIG_IP_ADVANCED_ROUTER=y
++CONFIG_IP_MULTIPLE_TABLES=y
++CONFIG_NET_IPIP=y
++CONFIG_NET_IPGRE_DEMUX=y
++CONFIG_NET_IPGRE=y
++CONFIG_NET_IPVTI=y
++CONFIG_INET_ESP=y
++CONFIG_INET_UDP_DIAG=y
++CONFIG_INET_DIAG_DESTROY=y
++CONFIG_TCP_CONG_ADVANCED=y
++# CONFIG_TCP_CONG_BIC is not set
++# CONFIG_TCP_CONG_WESTWOOD is not set
++# CONFIG_TCP_CONG_HTCP is not set
++CONFIG_TCP_CONG_BBR=m
++CONFIG_IPV6_ROUTER_PREF=y
++CONFIG_IPV6_ROUTE_INFO=y
++CONFIG_IPV6_OPTIMISTIC_DAD=y
++CONFIG_INET6_ESP=y
++CONFIG_INET6_IPCOMP=y
++CONFIG_IPV6_MIP6=y
++CONFIG_IPV6_VTI=y
++CONFIG_IPV6_SIT=y
++CONFIG_IPV6_GRE=y
++CONFIG_IPV6_MULTIPLE_TABLES=y
++CONFIG_IPV6_SUBTREES=y
++CONFIG_IPV6_MROUTE=y
++CONFIG_IPV6_MROUTE_MULTIPLE_TABLES=y
++CONFIG_NETFILTER=y
++CONFIG_NF_CONNTRACK=y
++CONFIG_NF_CONNTRACK_SECMARK=y
++CONFIG_NF_CONNTRACK_PROCFS=y
++CONFIG_NF_CONNTRACK_EVENTS=y
++CONFIG_NF_CONNTRACK_AMANDA=y
++CONFIG_NF_CONNTRACK_FTP=y
++CONFIG_NF_CONNTRACK_H323=y
++CONFIG_NF_CONNTRACK_IRC=y
++CONFIG_NF_CONNTRACK_NETBIOS_NS=y
++CONFIG_NF_CONNTRACK_PPTP=y
++CONFIG_NF_CONNTRACK_SANE=y
++CONFIG_NF_CONNTRACK_TFTP=y
++CONFIG_NF_CT_NETLINK=y
++CONFIG_NETFILTER_XTABLES_COMPAT=y
++CONFIG_NETFILTER_XTABLES_LEGACY=y
++CONFIG_NETFILTER_XT_TARGET_CLASSIFY=y
++CONFIG_NETFILTER_XT_TARGET_CONNMARK=y
++CONFIG_NETFILTER_XT_TARGET_CONNSECMARK=y
++CONFIG_NETFILTER_XT_TARGET_DSCP=y
++CONFIG_NETFILTER_XT_TARGET_IDLETIMER=y
++CONFIG_NETFILTER_XT_TARGET_LOG=y
++CONFIG_NETFILTER_XT_TARGET_MARK=y
++CONFIG_NETFILTER_XT_TARGET_NFLOG=y
++CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
++CONFIG_NETFILTER_XT_TARGET_NOTRACK=y
++CONFIG_NETFILTER_XT_TARGET_TEE=y
++CONFIG_NETFILTER_XT_TARGET_TPROXY=y
++CONFIG_NETFILTER_XT_TARGET_TRACE=y
++CONFIG_NETFILTER_XT_TARGET_SECMARK=y
++CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
++CONFIG_NETFILTER_XT_MATCH_BPF=y
++CONFIG_NETFILTER_XT_MATCH_COMMENT=y
++CONFIG_NETFILTER_XT_MATCH_CONNBYTES=y
++CONFIG_NETFILTER_XT_MATCH_CONNLIMIT=y
++CONFIG_NETFILTER_XT_MATCH_CONNMARK=y
++CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
++CONFIG_NETFILTER_XT_MATCH_DSCP=y
++CONFIG_NETFILTER_XT_MATCH_ESP=y
++CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
++CONFIG_NETFILTER_XT_MATCH_HELPER=y
++CONFIG_NETFILTER_XT_MATCH_IPRANGE=y
++CONFIG_NETFILTER_XT_MATCH_L2TP=y
++CONFIG_NETFILTER_XT_MATCH_LENGTH=y
++CONFIG_NETFILTER_XT_MATCH_LIMIT=y
++CONFIG_NETFILTER_XT_MATCH_MAC=y
++CONFIG_NETFILTER_XT_MATCH_MARK=y
++CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
++CONFIG_NETFILTER_XT_MATCH_OWNER=y
++CONFIG_NETFILTER_XT_MATCH_POLICY=y
++CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA=y
++CONFIG_NETFILTER_XT_MATCH_SOCKET=y
++CONFIG_NETFILTER_XT_MATCH_STATE=y
++CONFIG_NETFILTER_XT_MATCH_STATISTIC=y
++CONFIG_NETFILTER_XT_MATCH_STRING=y
++CONFIG_NETFILTER_XT_MATCH_TIME=y
++CONFIG_NETFILTER_XT_MATCH_U32=y
++CONFIG_IP_NF_IPTABLES_LEGACY=y
++CONFIG_IP_NF_IPTABLES=y
++CONFIG_IP_NF_MATCH_ECN=y
++CONFIG_IP_NF_MATCH_RPFILTER=y
++CONFIG_IP_NF_MATCH_TTL=y
++CONFIG_IP_NF_FILTER=y
++CONFIG_IP_NF_TARGET_REJECT=y
++CONFIG_IP_NF_NAT=y
++CONFIG_IP_NF_TARGET_MASQUERADE=y
++CONFIG_IP_NF_TARGET_NETMAP=y
++CONFIG_IP_NF_TARGET_REDIRECT=y
++CONFIG_IP_NF_MANGLE=y
++CONFIG_IP_NF_RAW=y
++CONFIG_IP_NF_SECURITY=y
++CONFIG_IP_NF_ARPFILTER=y
++CONFIG_IP_NF_ARP_MANGLE=y
++CONFIG_IP6_NF_IPTABLES_LEGACY=y
++CONFIG_IP6_NF_IPTABLES=y
++CONFIG_IP6_NF_MATCH_RPFILTER=y
++CONFIG_IP6_NF_FILTER=y
++CONFIG_IP6_NF_TARGET_REJECT=y
++CONFIG_IP6_NF_MANGLE=y
++CONFIG_IP6_NF_RAW=y
++CONFIG_TIPC=m
++CONFIG_L2TP=m
++CONFIG_BRIDGE=y
++CONFIG_VLAN_8021Q=m
++CONFIG_6LOWPAN=m
++CONFIG_IEEE802154=m
++CONFIG_IEEE802154_6LOWPAN=m
++CONFIG_MAC802154=m
++CONFIG_NET_SCHED=y
++CONFIG_NET_SCH_HTB=y
++CONFIG_NET_SCH_PRIO=y
++CONFIG_NET_SCH_MULTIQ=y
++CONFIG_NET_SCH_SFQ=y
++CONFIG_NET_SCH_TBF=y
++CONFIG_NET_SCH_NETEM=y
++CONFIG_NET_SCH_CODEL=y
++CONFIG_NET_SCH_FQ_CODEL=y
++CONFIG_NET_SCH_FQ=y
++CONFIG_NET_SCH_INGRESS=y
++CONFIG_NET_CLS_BASIC=y
++CONFIG_NET_CLS_FW=y
++CONFIG_NET_CLS_U32=y
++CONFIG_CLS_U32_MARK=y
++CONFIG_NET_CLS_FLOW=y
++CONFIG_NET_CLS_BPF=y
++CONFIG_NET_CLS_MATCHALL=y
++CONFIG_NET_EMATCH=y
++CONFIG_NET_EMATCH_CMP=y
++CONFIG_NET_EMATCH_NBYTE=y
++CONFIG_NET_EMATCH_U32=y
++CONFIG_NET_EMATCH_META=y
++CONFIG_NET_EMATCH_TEXT=y
++CONFIG_NET_CLS_ACT=y
++CONFIG_NET_ACT_POLICE=y
++CONFIG_NET_ACT_GACT=y
++CONFIG_NET_ACT_MIRRED=y
++CONFIG_NET_ACT_SKBEDIT=y
++CONFIG_NET_ACT_BPF=y
++CONFIG_VSOCKETS=y
++CONFIG_VIRTIO_VSOCKETS=m
++CONFIG_CGROUP_NET_PRIO=y
++CONFIG_CAN=m
++CONFIG_BT=m
++CONFIG_BT_RFCOMM=m
++CONFIG_BT_RFCOMM_TTY=y
++CONFIG_BT_HIDP=m
++CONFIG_BT_HCIBTSDIO=m
++CONFIG_BT_HCIUART=m
++CONFIG_BT_HCIUART_LL=y
++CONFIG_BT_HCIUART_BCM=y
++CONFIG_BT_HCIUART_QCA=y
++CONFIG_CFG80211=m
++CONFIG_NL80211_TESTMODE=y
++CONFIG_CFG80211_CERTIFICATION_ONUS=y
++# CONFIG_CFG80211_REQUIRE_SIGNED_REGDB is not set
++CONFIG_CFG80211_REG_CELLULAR_HINTS=y
++CONFIG_MAC80211=m
++CONFIG_RFKILL=m
++CONFIG_NET_9P=m
++CONFIG_NFC=m
++CONFIG_NETDEV_ADDR_LIST_TEST=m
++CONFIG_PCI=y
++CONFIG_PCIEAER=y
++CONFIG_PCI_IOV=y
++# CONFIG_VGA_ARB is not set
++CONFIG_PCI_HOST_GENERIC=y
++CONFIG_PCIE_KIRIN=y
++CONFIG_PCIE_DW_PLAT_EP=y
++CONFIG_PCIE_QCOM=y
++CONFIG_PCI_ENDPOINT=y
++# CONFIG_PCI_PWRCTRL_TC9563 is not set
++CONFIG_RUST_FW_LOADER_ABSTRACTIONS=y
++CONFIG_FW_LOADER_USER_HELPER=y
++# CONFIG_FW_CACHE is not set
++CONFIG_REGMAP_KUNIT=m
++# CONFIG_SUN50I_DE2_BUS is not set
++# CONFIG_SUNXI_RSB is not set
++CONFIG_ARM_SCMI_PROTOCOL=y
++CONFIG_ARM_SCPI_PROTOCOL=y
++CONFIG_ARM_SDE_INTERFACE=y
++# CONFIG_EFI_ARMSTUB_DTB_LOADER is not set
++# CONFIG_QCOM_SCM is not set
++CONFIG_TEGRA_BPMP=y
++CONFIG_GNSS=m
++CONFIG_ZRAM=m
++CONFIG_ZRAM_BACKEND_LZ4=y
++CONFIG_ZRAM_BACKEND_ZSTD=y
++CONFIG_ZRAM_BACKEND_LZO=y
++CONFIG_ZRAM_WRITEBACK=y
++CONFIG_ZRAM_MULTI_COMP=y
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_BLK_DEV_LOOP_MIN_COUNT=16
++CONFIG_BLK_DEV_RAM=y
++CONFIG_BLK_DEV_RAM_SIZE=8192
++CONFIG_VIRTIO_BLK=m
++CONFIG_BLK_DEV_UBLK=y
++CONFIG_SRAM=y
++CONFIG_OPEN_DICE=m
++CONFIG_VCPU_STALL_DETECTOR=m
++CONFIG_SCSI=y
++# CONFIG_SCSI_PROC_FS is not set
++CONFIG_BLK_DEV_SD=y
++CONFIG_SCSI_SCAN_ASYNC=y
++CONFIG_MD=y
++CONFIG_BLK_DEV_DM=y
++CONFIG_DM_CRYPT=y
++CONFIG_DM_SNAPSHOT=y
++CONFIG_DM_UEVENT=y
++CONFIG_DM_VERITY=y
++CONFIG_DM_VERITY_FEC=y
++CONFIG_NETDEVICES=y
++CONFIG_DUMMY=y
++CONFIG_WIREGUARD=y
++CONFIG_IFB=y
++CONFIG_MACSEC=m
++CONFIG_TUN=y
++CONFIG_VETH=y
++CONFIG_LED_TRIGGER_PHY=y
++CONFIG_AX88796B_PHY=y
++CONFIG_CAN_VCAN=m
++CONFIG_CAN_SLCAN=m
++CONFIG_PPP=m
++CONFIG_PPP_BSDCOMP=m
++CONFIG_PPP_DEFLATE=m
++CONFIG_PPP_MPPE=m
++CONFIG_PPTP=m
++CONFIG_PPPOL2TP=m
++CONFIG_USB_NET_DRIVERS=m
++CONFIG_USB_RTL8150=m
++CONFIG_USB_RTL8152=m
++CONFIG_USB_USBNET=m
++CONFIG_USB_NET_CDC_EEM=m
++# CONFIG_USB_NET_NET1080 is not set
++# CONFIG_USB_NET_CDC_SUBSET is not set
++# CONFIG_USB_NET_ZAURUS is not set
++CONFIG_USB_NET_AQC111=m
++# CONFIG_WLAN_VENDOR_ADMTEK is not set
++# CONFIG_WLAN_VENDOR_ATH is not set
++# CONFIG_WLAN_VENDOR_ATMEL is not set
++# CONFIG_WLAN_VENDOR_BROADCOM is not set
++# CONFIG_WLAN_VENDOR_INTEL is not set
++# CONFIG_WLAN_VENDOR_INTERSIL is not set
++# CONFIG_WLAN_VENDOR_MARVELL is not set
++# CONFIG_WLAN_VENDOR_MEDIATEK is not set
++# CONFIG_WLAN_VENDOR_RALINK is not set
++# CONFIG_WLAN_VENDOR_REALTEK is not set
++# CONFIG_WLAN_VENDOR_RSI is not set
++# CONFIG_WLAN_VENDOR_ST is not set
++# CONFIG_WLAN_VENDOR_TI is not set
++# CONFIG_WLAN_VENDOR_ZYDAS is not set
++# CONFIG_WLAN_VENDOR_QUANTENNA is not set
++CONFIG_WWAN=m
++CONFIG_INPUT_EVDEV=y
++CONFIG_INPUT_KUNIT_TEST=m
++CONFIG_KEYBOARD_GPIO=y
++# CONFIG_MOUSE_PS2 is not set
++CONFIG_INPUT_JOYSTICK=y
++CONFIG_JOYSTICK_XPAD=y
++CONFIG_JOYSTICK_XPAD_FF=y
++CONFIG_JOYSTICK_XPAD_LEDS=y
++CONFIG_INPUT_TOUCHSCREEN=y
++CONFIG_INPUT_MISC=y
++CONFIG_INPUT_UINPUT=y
++# CONFIG_VT is not set
++# CONFIG_LEGACY_PTYS is not set
++CONFIG_SERIAL_8250=y
++CONFIG_SERIAL_8250_CONSOLE=y
++# CONFIG_SERIAL_8250_EXAR is not set
++CONFIG_SERIAL_8250_NR_UARTS=32
++CONFIG_SERIAL_8250_RUNTIME_UARTS=0
++CONFIG_SERIAL_8250_DW=y
++# CONFIG_SERIAL_8250_TEGRA is not set
++CONFIG_SERIAL_OF_PLATFORM=y
++CONFIG_SERIAL_AMBA_PL011=y
++CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
++CONFIG_SERIAL_SAMSUNG=y
++CONFIG_SERIAL_SAMSUNG_CONSOLE=y
++CONFIG_SERIAL_TEGRA_TCU=y
++CONFIG_SERIAL_QCOM_GENI=y
++CONFIG_SERIAL_QCOM_GENI_CONSOLE=y
++CONFIG_SERIAL_SPRD=y
++CONFIG_SERIAL_SPRD_CONSOLE=y
++CONFIG_NULL_TTY=y
++CONFIG_HVC_DCC=y
++CONFIG_SERIAL_DEV_BUS=y
++CONFIG_VIRTIO_CONSOLE=m
++CONFIG_HW_RANDOM=y
++# CONFIG_HW_RANDOM_HISI is not set
++# CONFIG_HW_RANDOM_HISTB is not set
++CONFIG_HW_RANDOM_CCTRNG=m
++# CONFIG_DEVMEM is not set
++# CONFIG_DEVPORT is not set
++# CONFIG_I2C_HELPER_AUTO is not set
++# CONFIG_I2C_TEGRA_BPMP is not set
++CONFIG_I3C=y
++CONFIG_SPI=y
++CONFIG_SPI_MEM=y
++CONFIG_SPI_SLAVE=y
++# CONFIG_SPMI_MSM_PMIC_ARB is not set
++CONFIG_PTP_1588_CLOCK=m
++# CONFIG_PTP_1588_CLOCK_VMCLOCK is not set
++# CONFIG_PINCTRL_MSM is not set
++# CONFIG_PINCTRL_SUN8I_H3_R is not set
++# CONFIG_PINCTRL_SUN50I_A64 is not set
++# CONFIG_PINCTRL_SUN50I_A64_R is not set
++# CONFIG_PINCTRL_SUN50I_A100 is not set
++# CONFIG_PINCTRL_SUN50I_A100_R is not set
++# CONFIG_PINCTRL_SUN50I_H5 is not set
++# CONFIG_PINCTRL_SUN50I_H6 is not set
++# CONFIG_PINCTRL_SUN50I_H6_R is not set
++# CONFIG_PINCTRL_SUN50I_H616 is not set
++# CONFIG_PINCTRL_SUN50I_H616_R is not set
++# CONFIG_PINCTRL_SUN55I_A523 is not set
++# CONFIG_PINCTRL_SUN55I_A523_R is not set
++# CONFIG_PINCTRL_TEGRA238 is not set
++# CONFIG_PINCTRL_TEGRA264 is not set
++CONFIG_GPIO_GENERIC_PLATFORM=y
++# CONFIG_GPIO_TEGRA is not set
++# CONFIG_GPIO_TEGRA186 is not set
++CONFIG_POWER_RESET_HISI=y
++CONFIG_POWER_RESET_SYSCON=y
++# CONFIG_POWER_SEQUENCING_QCOM_WCN is not set
++# CONFIG_HWMON is not set
++CONFIG_THERMAL=y
++CONFIG_THERMAL_NETLINK=y
++CONFIG_THERMAL_EMERGENCY_POWEROFF_DELAY_MS=100
++CONFIG_THERMAL_GOV_BANG_BANG=y
++CONFIG_THERMAL_GOV_USER_SPACE=y
++CONFIG_THERMAL_GOV_POWER_ALLOCATOR=y
++CONFIG_CPU_THERMAL=y
++CONFIG_CPU_IDLE_THERMAL=y
++CONFIG_DEVFREQ_THERMAL=y
++CONFIG_THERMAL_EMULATION=y
++CONFIG_WATCHDOG=y
++CONFIG_WATCHDOG_CORE=y
++CONFIG_MFD_ACT8945A=y
++CONFIG_REGULATOR=y
++CONFIG_REGULATOR_FIXED_VOLTAGE=y
++CONFIG_RC_CORE=y
++CONFIG_BPF_LIRC_MODE2=y
++CONFIG_LIRC=y
++# CONFIG_RC_MAP is not set
++CONFIG_RC_DECODERS=y
++CONFIG_RC_DEVICES=y
++CONFIG_MEDIA_CEC_RC=y
++CONFIG_MEDIA_SUPPORT_FILTER=y
++CONFIG_MEDIA_CAMERA_SUPPORT=y
++CONFIG_MEDIA_PLATFORM_SUPPORT=y
++# CONFIG_MEDIA_ANALOG_TV_SUPPORT is not set
++# CONFIG_MEDIA_DIGITAL_TV_SUPPORT is not set
++# CONFIG_MEDIA_RADIO_SUPPORT is not set
++# CONFIG_MEDIA_SDR_SUPPORT is not set
++# CONFIG_MEDIA_TEST_SUPPORT is not set
++CONFIG_MEDIA_USB_SUPPORT=y
++CONFIG_USB_GSPCA=y
++CONFIG_USB_VIDEO_CLASS=y
++CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_V4L_MEM2MEM_DRIVERS=y
++CONFIG_DRM=y
++# CONFIG_DRM_DEBUG_MODESET_LOCK is not set
++CONFIG_BACKLIGHT_CLASS_DEVICE=y
++CONFIG_DRM_ACCEL=y
++CONFIG_SOUND=y
++CONFIG_SND=y
++CONFIG_SND_HRTIMER=y
++# CONFIG_SND_VERBOSE_PROCFS is not set
++# CONFIG_SND_DRIVERS is not set
++CONFIG_SND_USB_AUDIO=y
++CONFIG_SND_SOC=y
++CONFIG_SND_SOC_TOPOLOGY_KUNIT_TEST=m
++CONFIG_SND_SOC_UTILS_KUNIT_TEST=m
++CONFIG_HID_BATTERY_STRENGTH=y
++CONFIG_HIDRAW=y
++CONFIG_UHID=y
++CONFIG_HID_HAPTIC=y
++CONFIG_HID_APPLE=y
++CONFIG_HID_PRODIKEYS=y
++CONFIG_HID_ELECOM=y
++CONFIG_HID_UCLOGIC=y
++CONFIG_HID_LOGITECH=y
++CONFIG_HID_LOGITECH_DJ=y
++CONFIG_HID_MAGICMOUSE=y
++CONFIG_HID_MICROSOFT=y
++CONFIG_HID_MULTITOUCH=y
++CONFIG_HID_NINTENDO=y
++CONFIG_NINTENDO_FF=y
++CONFIG_HID_PICOLCD=y
++CONFIG_HID_PLANTRONICS=y
++CONFIG_HID_PLAYSTATION=y
++CONFIG_PLAYSTATION_FF=y
++CONFIG_HID_ROCCAT=y
++CONFIG_HID_SONY=y
++CONFIG_SONY_FF=y
++CONFIG_HID_STEAM=y
++CONFIG_HID_WACOM=y
++CONFIG_HID_WIIMOTE=y
++CONFIG_HID_KUNIT_TEST=m
++CONFIG_USB_HIDDEV=y
++CONFIG_USB_ANNOUNCE_NEW_DEVICES=y
++CONFIG_USB_OTG=y
++CONFIG_USB_MON=m
++CONFIG_USB_XHCI_HCD=y
++CONFIG_USB_XHCI_DBGCAP=y
++CONFIG_USB_XHCI_SIDEBAND=y
++CONFIG_USB_EHCI_HCD=y
++CONFIG_USB_EHCI_ROOT_HUB_TT=y
++CONFIG_USB_EHCI_HCD_PLATFORM=y
++CONFIG_USB_ACM=m
++CONFIG_USB_STORAGE=y
++CONFIG_USB_UAS=y
++CONFIG_USB_DWC3=y
++CONFIG_USB_SERIAL=m
++CONFIG_USB_SERIAL_FTDI_SIO=m
++CONFIG_USB_GADGET=y
++CONFIG_USB_CONFIGFS=y
++CONFIG_USB_CONFIGFS_SERIAL=y
++CONFIG_USB_CONFIGFS_ACM=y
++CONFIG_USB_CONFIGFS_NCM=y
++CONFIG_USB_CONFIGFS_ECM=y
++CONFIG_USB_CONFIGFS_EEM=y
++CONFIG_USB_CONFIGFS_MASS_STORAGE=y
++CONFIG_USB_CONFIGFS_F_FS=y
++CONFIG_USB_CONFIGFS_F_UAC2=y
++CONFIG_USB_CONFIGFS_F_MIDI=y
++CONFIG_USB_CONFIGFS_F_HID=y
++CONFIG_USB_CONFIGFS_F_UVC=y
++CONFIG_TYPEC=y
++CONFIG_TYPEC_TCPM=y
++CONFIG_TYPEC_TCPCI=y
++CONFIG_TYPEC_UCSI=y
++CONFIG_TYPEC_DP_ALTMODE=y
++CONFIG_MMC=y
++# CONFIG_PWRSEQ_EMMC is not set
++# CONFIG_PWRSEQ_SIMPLE is not set
++CONFIG_MMC_CRYPTO=y
++CONFIG_MMC_SDHCI=y
++CONFIG_MMC_SDHCI_PLTFM=y
++CONFIG_SCSI_UFSHCD=y
++CONFIG_SCSI_UFS_BSG=y
++CONFIG_SCSI_UFS_CRYPTO=y
++CONFIG_SCSI_UFSHCD_PCI=y
++CONFIG_SCSI_UFSHCD_PLATFORM=y
++CONFIG_SCSI_UFS_DWC_TC_PLATFORM=y
++CONFIG_SCSI_UFS_HISI=y
++CONFIG_LEDS_CLASS_FLASH=y
++CONFIG_LEDS_CLASS_MULTICOLOR=y
++CONFIG_LEDS_TRIGGER_TIMER=y
++CONFIG_LEDS_TRIGGER_TRANSIENT=y
++CONFIG_EDAC=y
++CONFIG_RTC_CLASS=y
++CONFIG_RTC_LIB_KUNIT_TEST=m
++CONFIG_RTC_DRV_PL030=y
++CONFIG_RTC_DRV_PL031=y
++CONFIG_SW_SYNC=y
++CONFIG_UDMABUF=y
++CONFIG_DMABUF_HEAPS=y
++CONFIG_UIO=y
++CONFIG_VIRTIO_PCI=m
++CONFIG_VIRTIO_BALLOON=m
++CONFIG_VHOST_VSOCK=y
++CONFIG_STAGING=y
++CONFIG_COMMON_CLK_SCPI=y
++# CONFIG_SUNXI_CCU is not set
++CONFIG_CLK_KUNIT_TEST=m
++CONFIG_CLK_GATE_KUNIT_TEST=m
++CONFIG_HWSPINLOCK=y
++# CONFIG_SUN50I_ERRATUM_UNKNOWN1 is not set
++CONFIG_TEGRA_HSP_MBOX=y
++CONFIG_IOMMU_IO_PGTABLE_ARMV7S=y
++CONFIG_REMOTEPROC=y
++CONFIG_REMOTEPROC_CDEV=y
++CONFIG_RPMSG_CHAR=y
++# CONFIG_QCOM_AOSS_QMP is not set
++# CONFIG_QCOM_COMMAND_DB is not set
++# CONFIG_QCOM_LLCC is not set
++# CONFIG_QCOM_OCMEM is not set
++# CONFIG_QCOM_PMIC_GLINK is not set
++# CONFIG_QCOM_RMTFS_MEM is not set
++# CONFIG_QCOM_RPMH is not set
++# CONFIG_QCOM_SMEM is not set
++# CONFIG_QCOM_SMD_RPM is not set
++# CONFIG_QCOM_WCNSS_CTRL is not set
++# CONFIG_QCOM_APR is not set
++# CONFIG_QCOM_ICC_BWMON is not set
++# CONFIG_QCOM_PBS is not set
++# CONFIG_ARM_SCMI_POWER_DOMAIN is not set
++# CONFIG_ARM_SCPI_POWER_DOMAIN is not set
++CONFIG_DEVFREQ_GOV_PERFORMANCE=y
++CONFIG_DEVFREQ_GOV_POWERSAVE=y
++CONFIG_DEVFREQ_GOV_USERSPACE=y
++CONFIG_DEVFREQ_GOV_PASSIVE=y
++CONFIG_PM_DEVFREQ_EVENT=y
++CONFIG_MEMORY=y
++CONFIG_IIO=y
++CONFIG_IIO_BUFFER=y
++CONFIG_IIO_TRIGGER=y
++CONFIG_IIO_FORMAT_KUNIT_TEST=m
++CONFIG_PWM=y
++CONFIG_POWERCAP=y
++CONFIG_IDLE_INJECT=y
++CONFIG_USB4=m
++CONFIG_ANDROID_BINDER_IPC_RUST=y
++CONFIG_LIBNVDIMM=y
++CONFIG_MUX_CORE=y
++CONFIG_EXT4_FS=y
++CONFIG_EXT4_FS_POSIX_ACL=y
++CONFIG_EXT4_FS_SECURITY=y
++CONFIG_EXT4_KUNIT_TESTS=m
++CONFIG_F2FS_FS=y
++CONFIG_F2FS_FS_SECURITY=y
++CONFIG_F2FS_FS_COMPRESSION=y
++CONFIG_F2FS_UNFAIR_RWSEM=y
++CONFIG_FS_ENCRYPTION=y
++CONFIG_FS_VERITY=y
++# CONFIG_DNOTIFY is not set
++CONFIG_QUOTA=y
++CONFIG_QFMT_V2=y
++CONFIG_FUSE_FS=y
++CONFIG_VIRTIO_FS=y
++CONFIG_OVERLAY_FS=y
++CONFIG_MSDOS_FS=y
++CONFIG_VFAT_FS=y
++CONFIG_FAT_KUNIT_TEST=m
++CONFIG_EXFAT_FS=y
++CONFIG_TMPFS=y
++# CONFIG_EFIVAR_FS is not set
++CONFIG_PSTORE=y
++CONFIG_PSTORE_CONSOLE=y
++CONFIG_PSTORE_PMSG=y
++CONFIG_PSTORE_RAM=y
++CONFIG_EROFS_FS=y
++CONFIG_EROFS_FS_PCPU_KTHREAD=y
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_CODEPAGE_737=y
++CONFIG_NLS_CODEPAGE_775=y
++CONFIG_NLS_CODEPAGE_850=y
++CONFIG_NLS_CODEPAGE_852=y
++CONFIG_NLS_CODEPAGE_855=y
++CONFIG_NLS_CODEPAGE_857=y
++CONFIG_NLS_CODEPAGE_860=y
++CONFIG_NLS_CODEPAGE_861=y
++CONFIG_NLS_CODEPAGE_862=y
++CONFIG_NLS_CODEPAGE_863=y
++CONFIG_NLS_CODEPAGE_864=y
++CONFIG_NLS_CODEPAGE_865=y
++CONFIG_NLS_CODEPAGE_866=y
++CONFIG_NLS_CODEPAGE_869=y
++CONFIG_NLS_CODEPAGE_936=y
++CONFIG_NLS_CODEPAGE_950=y
++CONFIG_NLS_CODEPAGE_932=y
++CONFIG_NLS_CODEPAGE_949=y
++CONFIG_NLS_CODEPAGE_874=y
++CONFIG_NLS_ISO8859_8=y
++CONFIG_NLS_CODEPAGE_1250=y
++CONFIG_NLS_CODEPAGE_1251=y
++CONFIG_NLS_ASCII=y
++CONFIG_NLS_ISO8859_1=y
++CONFIG_NLS_ISO8859_2=y
++CONFIG_NLS_ISO8859_3=y
++CONFIG_NLS_ISO8859_4=y
++CONFIG_NLS_ISO8859_5=y
++CONFIG_NLS_ISO8859_6=y
++CONFIG_NLS_ISO8859_7=y
++CONFIG_NLS_ISO8859_9=y
++CONFIG_NLS_ISO8859_13=y
++CONFIG_NLS_ISO8859_14=y
++CONFIG_NLS_ISO8859_15=y
++CONFIG_NLS_KOI8_R=y
++CONFIG_NLS_KOI8_U=y
++CONFIG_NLS_MAC_ROMAN=y
++CONFIG_NLS_MAC_CELTIC=y
++CONFIG_NLS_MAC_CENTEURO=y
++CONFIG_NLS_MAC_CROATIAN=y
++CONFIG_NLS_MAC_CYRILLIC=y
++CONFIG_NLS_MAC_GAELIC=y
++CONFIG_NLS_MAC_GREEK=y
++CONFIG_NLS_MAC_ICELAND=y
++CONFIG_NLS_MAC_INUIT=y
++CONFIG_NLS_MAC_ROMANIAN=y
++CONFIG_NLS_MAC_TURKISH=y
++CONFIG_NLS_UTF8=y
++CONFIG_UNICODE=y
++CONFIG_MSEAL_SYSTEM_MAPPINGS=y
++CONFIG_SECURITY=y
++CONFIG_STATIC_USERMODEHELPER=y
++CONFIG_STATIC_USERMODEHELPER_PATH=""
++CONFIG_SECURITY_SELINUX=y
++CONFIG_SECURITY_SAFESETID=y
++CONFIG_SECURITY_LANDLOCK=y
++CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
++CONFIG_FORTIFY_SOURCE=y
++CONFIG_HARDENED_USERCOPY=y
++CONFIG_BUG_ON_DATA_CORRUPTION=y
++CONFIG_CRYPTO_NULL=y
++CONFIG_CRYPTO_ECDH=y
++CONFIG_CRYPTO_DES=y
++CONFIG_CRYPTO_ADIANTUM=y
++CONFIG_CRYPTO_HCTR2=y
++CONFIG_CRYPTO_CHACHA20POLY1305=y
++CONFIG_CRYPTO_CCM=y
++CONFIG_CRYPTO_BLAKE2B=y
++CONFIG_CRYPTO_CMAC=y
++CONFIG_CRYPTO_MD5=y
++CONFIG_CRYPTO_SHA1=y
++CONFIG_CRYPTO_SHA512=y
++CONFIG_CRYPTO_XCBC=y
++CONFIG_CRYPTO_ZSTD=y
++CONFIG_CRYPTO_GHASH_ARM64_CE=y
++CONFIG_CRYPTO_AES_ARM64_CE_BLK=y
++CONFIG_TRACE_MMIO_ACCESS=y
++CONFIG_CRC_KUNIT_TEST=m
++CONFIG_SWIOTLB_DYNAMIC=y
++CONFIG_DMA_RESTRICTED_POOL=y
++CONFIG_DMA_CMA=y
++CONFIG_PRINTK_TIME=y
++CONFIG_PRINTK_CALLER=y
++CONFIG_STACKTRACE_BUILD_ID=y
++CONFIG_DYNAMIC_DEBUG_CORE=y
++CONFIG_DEBUG_INFO_DWARF5=y
++CONFIG_DEBUG_INFO_COMPRESSED_ZSTD=y
++CONFIG_DEBUG_INFO_BTF=y
++CONFIG_MODULE_ALLOW_BTF_MISMATCH=y
++CONFIG_HEADERS_INSTALL=y
++# CONFIG_SECTION_MISMATCH_WARN_ONLY is not set
++CONFIG_MAGIC_SYSRQ=y
++CONFIG_UBSAN=y
++CONFIG_UBSAN_TRAP=y
++# CONFIG_UBSAN_BOOL is not set
++# CONFIG_UBSAN_ENUM is not set
++CONFIG_PAGE_OWNER=y
++CONFIG_MEM_ALLOC_PROFILING=y
++# CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT is not set
++CONFIG_DEBUG_MEMORY_INIT=y
++CONFIG_KASAN=y
++CONFIG_KASAN_HW_TAGS=y
++CONFIG_KFENCE=y
++CONFIG_KFENCE_SAMPLE_INTERVAL=500
++CONFIG_KFENCE_NUM_OBJECTS=63
++CONFIG_PANIC_ON_OOPS=y
++CONFIG_PANIC_TIMEOUT=-1
++CONFIG_HARDLOCKUP_DETECTOR=y
++CONFIG_HARDLOCKUP_DETECTOR_PREFER_BUDDY=y
++CONFIG_WQ_WATCHDOG=y
++CONFIG_SCHEDSTATS=y
++CONFIG_PROVE_LOCKING=y
++# CONFIG_PROVE_RAW_LOCK_NESTING is not set
++CONFIG_LOCKDEP_STACK_TRACE_BITS=19
++CONFIG_LOCKDEP_STACK_TRACE_HASH_BITS=14
++CONFIG_HIST_TRIGGERS=y
++CONFIG_CORESIGHT=m
++CONFIG_CORESIGHT_SOURCE_ETM4X=m
++CONFIG_CORESIGHT_TRBE=m
++CONFIG_KUNIT=m
++CONFIG_KUNIT_TEST=m
++CONFIG_KUNIT_EXAMPLE_TEST=m
++# CONFIG_KUNIT_DEFAULT_ENABLED is not set
++CONFIG_CRYPTO_LIB_AES_CBC_MACS_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_BLAKE2B_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_BLAKE2S_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_CHACHA20POLY1305_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_CURVE25519_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_GHASH_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_MD5_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_NH_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_POLY1305_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_POLYVAL_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_SHA1_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_SHA256_KUNIT_TEST=m
++CONFIG_CRYPTO_LIB_SHA512_KUNIT_TEST=m
+diff --git a/bazel/constants.scl b/bazel/constants.scl
+new file mode 100644
+index 000000000..fdaab34de
+--- /dev/null
++++ b/bazel/constants.scl
+@@ -0,0 +1,6 @@
++BRANCH="linus"
++CLANG_VERSION="r596125"
++RUSTC_VERSION="1.96.0"
++AARCH64_NDK_TRIPLE="aarch64-linux-android31"
++X86_64_NDK_TRIPLE="x86_64-linux-android31"
++ARM_NDK_TRIPLE="armv7a-linux-androideabi31"
+diff --git a/bazel/modules.bzl b/bazel/modules.bzl
+new file mode 100644
+index 000000000..a95702714
+--- /dev/null
++++ b/bazel/modules.bzl
+@@ -0,0 +1,18 @@
++# SPDX-License-Identifier: GPL-2.0 OR Apache-2.0
++# Copyright (C) 2025 The Android Open Source Project
++
++"""Re-exports of symbols for external usage regarding to lists of modules.
++"""
++
++load(
++    ":bazel/modules_private.bzl",
++    _get_gki_modules_list = "get_gki_modules_list",
++    _get_kunit_modules_list = "get_kunit_modules_list",
++    _get_kunit_modules_superset = "get_kunit_modules_superset",
++)
++
++visibility("public")
++
++get_gki_modules_list = _get_gki_modules_list
++get_kunit_modules_list = _get_kunit_modules_list
++get_kunit_modules_superset = _get_kunit_modules_superset
+diff --git a/bazel/modules_private.bzl b/bazel/modules_private.bzl
+new file mode 100644
+index 000000000..9515b4fbc
+--- /dev/null
++++ b/bazel/modules_private.bzl
+@@ -0,0 +1,364 @@
++# SPDX-License-Identifier: GPL-2.0
++# Copyright (C) 2022 The Android Open Source Project
++
++"""
++This module contains a full list of kernel modules
++ compiled by GKI.
++"""
++
++visibility("private")
++
++_COMMON_GKI_MODULES_LIST = [
++    # keep sorted
++    "drivers/block/virtio_blk.ko",
++    "drivers/block/zram/zram.ko",
++    "drivers/bluetooth/btbcm.ko",
++    "drivers/bluetooth/btqca.ko",
++    "drivers/bluetooth/btsdio.ko",
++    "drivers/bluetooth/hci_uart.ko",
++    "drivers/char/virtio_console.ko",
++    "drivers/gnss/gnss.ko",
++    "drivers/misc/open-dice.ko",
++    "drivers/misc/vcpu_stall_detector.ko",
++    "drivers/net/can/dev/can-dev.ko",
++    "drivers/net/can/slcan/slcan.ko",
++    "drivers/net/can/vcan.ko",
++    "drivers/net/macsec.ko",
++    "drivers/net/mii.ko",
++    "drivers/net/ppp/bsd_comp.ko",
++    "drivers/net/ppp/ppp_deflate.ko",
++    "drivers/net/ppp/ppp_generic.ko",
++    "drivers/net/ppp/ppp_mppe.ko",
++    "drivers/net/ppp/pppox.ko",
++    "drivers/net/ppp/pptp.ko",
++    "drivers/net/slip/slhc.ko",
++    "drivers/net/usb/aqc111.ko",
++    "drivers/net/usb/asix.ko",
++    "drivers/net/usb/ax88179_178a.ko",
++    "drivers/net/usb/cdc_eem.ko",
++    "drivers/net/usb/cdc_ether.ko",
++    "drivers/net/usb/cdc_ncm.ko",
++    "drivers/net/usb/r8152.ko",
++    "drivers/net/usb/r8153_ecm.ko",
++    "drivers/net/usb/rtl8150.ko",
++    "drivers/net/usb/usbnet.ko",
++    "drivers/net/wwan/wwan.ko",
++    "drivers/pps/pps_core.ko",
++    "drivers/ptp/ptp.ko",
++    "drivers/thunderbolt/thunderbolt.ko",
++    "drivers/usb/class/cdc-acm.ko",
++    "drivers/usb/mon/usbmon.ko",
++    "drivers/usb/serial/ftdi_sio.ko",
++    "drivers/usb/serial/usbserial.ko",
++    "drivers/virtio/virtio_balloon.ko",
++    "drivers/virtio/virtio_pci.ko",
++    "drivers/virtio/virtio_pci_legacy_dev.ko",
++    "drivers/virtio/virtio_pci_modern_dev.ko",
++    "fs/netfs/netfs.ko",
++    "kernel/kheaders.ko",
++    "lib/crc/crc-ccitt.ko",
++    "lib/crypto/libarc4.ko",
++    "mm/zsmalloc.ko",
++    "net/6lowpan/6lowpan.ko",
++    "net/6lowpan/nhc_dest.ko",
++    "net/6lowpan/nhc_fragment.ko",
++    "net/6lowpan/nhc_hop.ko",
++    "net/6lowpan/nhc_ipv6.ko",
++    "net/6lowpan/nhc_mobility.ko",
++    "net/6lowpan/nhc_routing.ko",
++    "net/6lowpan/nhc_udp.ko",
++    "net/8021q/8021q.ko",
++    "net/9p/9pnet.ko",
++    "net/9p/9pnet_fd.ko",
++    "net/bluetooth/bluetooth.ko",
++    "net/bluetooth/hidp/hidp.ko",
++    "net/bluetooth/rfcomm/rfcomm.ko",
++    "net/can/can.ko",
++    "net/can/can-bcm.ko",
++    "net/can/can-gw.ko",
++    "net/can/can-raw.ko",
++    "net/ieee802154/6lowpan/ieee802154_6lowpan.ko",
++    "net/ieee802154/ieee802154.ko",
++    "net/ieee802154/ieee802154_socket.ko",
++    "net/ipv4/tcp_bbr.ko",
++    "net/l2tp/l2tp_core.ko",
++    "net/l2tp/l2tp_ppp.ko",
++    "net/mac80211/mac80211.ko",
++    "net/mac802154/mac802154.ko",
++    "net/nfc/nfc.ko",
++    "net/rfkill/rfkill.ko",
++    "net/tipc/tipc.ko",
++    "net/tipc/tipc_diag.ko",
++    "net/vmw_vsock/vmw_vsock_virtio_transport.ko",
++    "net/wireless/cfg80211.ko",
++]
++
++_RUST_GKI_MODULES_LIST = [
++]
++
++_ARM_GKI_MODULES_LIST = [
++    # keep sorted
++    "drivers/ptp/ptp_kvm.ko",
++]
++
++_ARM64_GKI_MODULES_LIST = [
++    # keep sorted
++    "drivers/char/hw_random/cctrng.ko",
++    "drivers/hwtracing/coresight/coresight.ko",
++    "drivers/hwtracing/coresight/coresight-etm4x.ko",
++    "drivers/hwtracing/coresight/coresight-funnel.ko",
++    "drivers/hwtracing/coresight/coresight-replicator.ko",
++    "drivers/hwtracing/coresight/coresight-trbe.ko",
++    "drivers/ptp/ptp_kvm.ko",
++]
++
++_X86_GKI_MODULES_LIST = [
++    # keep sorted
++    "drivers/power/sequencing/pwrseq-core.ko",
++    "drivers/ptp/ptp_kvm.ko",
++]
++
++_X86_64_GKI_MODULES_LIST = [
++    # keep sorted
++    "drivers/power/sequencing/pwrseq-core.ko",
++    "drivers/ptp/ptp_kvm.ko",
++]
++
++def _apply(map_each, lst):
++    if not map_each:
++        return lst
++    ret = []
++    for elem in lst:
++        mapped = map_each(elem)
++        if mapped:
++            ret.append(mapped)
++    return ret
++
++def _get_gki_modules_list_minus_select(arch, map_each):
++    """ Provides the list of GKI modules, minus those in select() branches.
++
++    Args:
++        arch: One of [arm, arm64, i386, x86_64].
++        map_each: A function that takes the module name as parameter, and returns
++            the mapped value. If the module should be filtered out, the function
++            should return None.
++
++    Returns:
++        The list of GKI modules for the given |arch|.
++    """
++    if not arch in ("arm64", "x86_64", "arm", "i386"):
++        fail("{}: arch {} not supported. Use one of [arm, arm64, i386, x86_64]".format(
++            str(native.package_relative_label(":x")).removesuffix(":x"),
++            arch,
++        ))
++
++    if arch == "arm":
++        return _apply(map_each, _COMMON_GKI_MODULES_LIST + _ARM_GKI_MODULES_LIST)
++
++    if arch == "i386":
++        return _apply(map_each, _COMMON_GKI_MODULES_LIST + _X86_GKI_MODULES_LIST)
++
++    gki_modules_list = _apply(map_each, [] + _COMMON_GKI_MODULES_LIST)
++    if arch == "arm64":
++        gki_modules_list += _apply(map_each, _ARM64_GKI_MODULES_LIST)
++    elif arch == "x86_64":
++        gki_modules_list += _apply(map_each, _X86_64_GKI_MODULES_LIST)
++
++    return gki_modules_list
++
++# buildifier: disable=unnamed-macro
++def get_gki_modules_list(arch = None, map_each = None):
++    """Provides the list of GKI modules.
++
++    Args:
++        arch: One of [arm, arm64, i386, x86_64].
++        map_each: A function that takes the module name as parameter, and
++            returns the mapped value. If the module should be filtered out, the
++            function should return None.
++
++    Returns:
++        An opaque expression that represents the list of GKI modules for the
++        given |arch|. Do not treat the returned value as a list (e.g. use
++        list comprehension); instead, use the |map_each| argument.
++    """
++
++    ret = _get_gki_modules_list_minus_select(arch, map_each)
++
++    # CONFIG_RUST depends on !CONFIG_KASAN_SW_TAGS
++    ret += select({
++        "//build/kernel/kleaf:kasan_sw_tags_is_true": [],
++        "//conditions:default": _apply(map_each, _RUST_GKI_MODULES_LIST),
++    })
++
++    return ret
++
++# buildifier: disable=unnamed-macro
++def get_gki_modules_superset(arch = None, map_each = None):
++    """Provides the list of superset of GKI modules.
++
++    This includes all modules on each branch of the conditionals. For example,
++    Rust modules may always be included regardless of the value of
++    --kasan_sw_tags.
++
++    Args:
++        arch: One of [arm, arm64, i386, x86_64].
++        map_each: A function that takes the module name as parameter, and
++            returns the mapped value. If the module should be filtered out, the
++            function should return None.
++
++    Returns:
++        A list that contains the superset of GKI modules for the given |arch|.
++    """
++    return _get_gki_modules_list_minus_select(arch, map_each) + \
++           _apply(map_each, _RUST_GKI_MODULES_LIST)
++
++_KUNIT_FRAMEWORK_MODULES = [
++    "lib/kunit/kunit.ko",
++]
++
++# Modules defined by tools/testing/kunit/configs/android/kunit_defconfig
++_KUNIT_COMMON_MODULES_LIST = [
++    # keep sorted
++    "drivers/base/regmap/regmap-kunit.ko",
++    "drivers/base/regmap/regmap-ram.ko",
++    "drivers/base/regmap/regmap-raw-ram.ko",
++    "drivers/hid/hid-uclogic-test.ko",
++    "drivers/iio/test/iio-test-format.ko",
++    "drivers/input/tests/input_test.ko",
++    "drivers/of/of_kunit_helpers.ko",
++    "drivers/rtc/test_rtc_lib.ko",
++    "fs/ext4/ext4-test.ko",
++    "fs/fat/fat_test.ko",
++    "kernel/irq/refcount_interrupt_test.ko",
++    "kernel/time/time_test.ko",
++    "lib/crc/tests/crc_kunit.ko",
++    "lib/crypto/tests/aes_cbc_macs_kunit.ko",
++    "lib/crypto/tests/blake2b_kunit.ko",
++    "lib/crypto/tests/blake2s_kunit.ko",
++    "lib/crypto/tests/chacha20poly1305_kunit.ko",
++    "lib/crypto/tests/curve25519_kunit.ko",
++    "lib/crypto/tests/ghash_kunit.ko",
++    "lib/crypto/tests/md5_kunit.ko",
++    "lib/crypto/tests/nh_kunit.ko",
++    "lib/crypto/tests/poly1305_kunit.ko",
++    "lib/crypto/tests/polyval_kunit.ko",
++    "lib/crypto/tests/sha1_kunit.ko",
++    "lib/crypto/tests/sha224_kunit.ko",
++    "lib/crypto/tests/sha256_kunit.ko",
++    "lib/crypto/tests/sha384_kunit.ko",
++    "lib/crypto/tests/sha512_kunit.ko",
++    "lib/kunit/backtrace-suppression-test.ko",
++    "lib/kunit/kunit-example-test.ko",
++    "lib/kunit/kunit-test.ko",
++    "lib/kunit/platform-test.ko",
++    # "mm/kfence/kfence_test.ko",
++    "net/core/dev_addr_lists_test.ko",
++    "sound/soc/soc-topology-test.ko",
++    "sound/soc/soc-utils-test.ko",
++]
++
++# Modules defined by tools/testing/kunit/configs/android/kunit_clk_defconfig
++_KUNIT_CLK_MODULES_LIST = [
++    "drivers/clk/clk-gate_test.ko",
++    "drivers/clk/clk-test.ko",
++    "drivers/clk/clk_kunit_helpers.ko",
++]
++
++def _get_kunit_modules_list_minus_select(arch, map_each):
++    """ Provides the list of KUnit modules, minus those in select() branches.
++
++    Args:
++        arch: One of [arm, arm64, i386, x86_64].
++        map_each: A function that takes the module name as parameter, and returns
++            the mapped value. If the module should be filtered out, the function
++            should return None.
++    Returns:
++        The list of KUnit modules for the given |arch|.
++    """
++    if not arch in ("arm64", "x86_64", "arm", "i386"):
++        fail("{}: arch {} not supported. Use one of [arm, arm64, i386, x86_64]".format(
++            str(native.package_relative_label(":x")).removesuffix(":x"),
++            arch,
++        ))
++
++    kunit_modules_list = _KUNIT_FRAMEWORK_MODULES + _KUNIT_COMMON_MODULES_LIST
++    if arch == "arm":
++        kunit_modules_list += _KUNIT_CLK_MODULES_LIST
++    elif arch == "arm64":
++        kunit_modules_list += _KUNIT_CLK_MODULES_LIST
++    elif arch == "i386":
++        kunit_modules_list.append("drivers/clk/clk_kunit_helpers.ko")
++    elif arch == "x86_64":
++        kunit_modules_list.append("drivers/clk/clk_kunit_helpers.ko")
++
++    return _apply(map_each, kunit_modules_list)
++
++# buildifier: disable=unnamed-macro
++def get_kunit_modules_list(arch = None, map_each = None):
++    """ Provides the list of KUnit modules.
++
++    Args:
++        arch: One of [arm, arm64, i386, x86_64].
++        map_each: A function that takes the module name as parameter, and returns
++            the mapped value. If the module should be filtered out, the function
++            should return None.
++
++    Returns:
++        An opaque expression that represents the list of Kunit modules for the
++        given |arch|. Do not treat the returned value as a list (e.g. use
++        list comprehension); instead, use the |map_each| argument.
++    """
++
++    return select({
++        "//conditions:default": _get_kunit_modules_list_minus_select(arch, map_each),
++    })
++
++# buildifier: disable=unnamed-macro
++def get_kunit_modules_superset(arch = None, map_each = None):
++    """Provides the list of superset of KUnit modules.
++
++    This includes all modules on each branch of the conditionals.
++
++    Args:
++        arch: One of [arm, arm64, i386, x86_64].
++        map_each: A function that takes the module name as parameter, and
++            returns the mapped value. If the module should be filtered out, the
++            function should return None.
++
++    Returns:
++        A list of superset of KUnit modules for the given |arch|.
++    """
++    return _get_kunit_modules_list_minus_select(arch, map_each)
++
++_COMMON_UNPROTECTED_MODULES_LIST = []
++
++# buildifier: disable=unused-variable
++def get_gki_unprotected_modules_list(arch = None):
++    return select({
++        "//conditions:default": _COMMON_UNPROTECTED_MODULES_LIST,
++    })
++
++# buildifier: disable=unnamed-macro
++def get_gki_kunit_modules(arch, page_size = None):
++    """Returns the list of labels pointing to the GKI modules for KUnit.
++
++    Args:
++        arch: one of arm64, x86_64
++        page_size: if arch is arm64, the page_size ("4k" or "16k")
++
++    Returns:
++        The list of labels pointing to the GKI modules for KUnit.
++    """
++    if arch == "arm64":
++        if page_size == "16k":
++            return get_kunit_modules_list(arch, map_each = lambda e: ":kernel_aarch64_16k/" + e)
++        if page_size == "4k":
++            return get_kunit_modules_list(arch, map_each = lambda e: ":kernel_aarch64/" + e)
++    if arch == "x86_64":
++        return get_kunit_modules_list(arch, map_each = lambda e: ":kernel_x86_64/" + e)
++
++    fail("{}: arch {} (page_size {}) not supported. Use one of [arm64, x86_64]".format(
++        str(native.package_relative_label(":x")).removesuffix(":x"),
++        arch,
++        page_size,
++    ))
+diff --git a/init/Kconfig.gki b/init/Kconfig.gki
+new file mode 100644
+index 000000000..213d4e904
+--- /dev/null
++++ b/init/Kconfig.gki
+@@ -0,0 +1,349 @@
++config GKI_HIDDEN_DRM_CONFIGS
++	bool "Hidden DRM configs needed for GKI"
++	select AUXILIARY_BUS if (X86)
++	select DRM_KMS_HELPER if (HAS_IOMEM && DRM)
++	select DRM_GEM_SHMEM_HELPER if (DRM)
++	select DRM_MIPI_DSI
++	select DRM_PRIVACY_SCREEN if (X86)
++	select DRM_TTM if (HAS_IOMEM && DRM)
++	select DRM_BRIDGE_CONNECTOR
++	select DRM_DISPLAY_DP_HELPER
++	select DRM_DISPLAY_HDCP_HELPER
++	select DRM_DISPLAY_HDMI_HELPER
++	select GPU_BUDDY if (DRM && X86)
++	select HMM_MIRROR if (DRM)
++	select VIDEOMODE_HELPERS
++	select WANT_DEV_COREDUMP
++	select INTERVAL_TREE
++	help
++	  Dummy config option used to enable hidden DRM configs.
++	  These are normally selected implicitly when including a
++	  DRM module, but for GKI, the modules are built out-of-tree.
++
++config GKI_HIDDEN_MCP251XFD_CONFIGS
++        bool "Hidden MCP251XFD configs needed for GKI"
++        select CAN_RX_OFFLOAD
++        help
++          Dummy config option used to enable hidden MCP251XFD configs.
++          These are normally selected implicitly when including a
++          MCP251XFD module, but for GKI, the modules are built out-of-tree.
++
++config GKI_HIDDEN_REGMAP_CONFIGS
++	bool "Hidden Regmap configs needed for GKI"
++	select REGMAP_IRQ
++	select REGMAP_MMIO
++	select REGMAP_SPMI
++	select SPMI
++	help
++	  Dummy config option used to enable hidden regmap configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_CRYPTO_CONFIGS
++	bool "Hidden CRYPTO configs needed for GKI"
++	select CRYPTO_ENGINE
++	help
++	  Dummy config option used to enable hidden CRYPTO configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_SND_CONFIGS
++	bool "Hidden SND configs needed for GKI"
++	select SND_COMPRESS_ACCEL
++	select SND_VMASTER
++	select SND_PCM_ELD
++	select SND_JACK
++	select SND_JACK_INPUT_DEV
++	select SND_INTEL_NHLT if (ACPI)
++	help
++	  Dummy config option used to enable hidden SND configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_SND_SOC_CONFIGS
++	bool "Hidden SND_SOC configs needed for GKI"
++	select SND_SOC_GENERIC_DMAENGINE_PCM if (SND_SOC && SND)
++	select SND_PCM_IEC958
++	select SND_SOC_COMPRESS if (SND_SOC && SND)
++	select SND_SOC_TOPOLOGY if (SND_SOC && SND)
++	select DMADEVICES
++	select DMA_VIRTUAL_CHANNELS
++	help
++	  Dummy config option used to enable hidden SND_SOC configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_UFS_CONFIGS
++	bool "Hidden UFS configs needed for GKI"
++	select SCSI_UFS_VARIABLE_SG_ENTRY_SIZE if SCSI_UFS_CRYPTO
++	help
++	  Dummy config option used to enable hidden UFS configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_MMC_CONFIGS
++	bool "Hidden MMC configs needed for GKI"
++	select MMC_SDHCI_IO_ACCESSORS if (MMC_SDHCI)
++	help
++	  Dummy config option used to enable hidden MMC configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_GPIO_CONFIGS
++	bool "Hidden GPIO configs needed for GKI"
++	select PINCTRL_SINGLE if (PINCTRL && OF && HAS_IOMEM)
++	select GPIO_PL061 if (HAS_IOMEM && ARM_AMBA && GPIOLIB)
++	select GPIO_SWNODE_UNDEFINED if (X86)
++	select GPIOLIB_IRQCHIP if (GPIOLIB && X86)
++	help
++	  Dummy config option used to enable hidden GPIO configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_X86_CONFIGS
++	bool "Hidden X86 configs needed for GKI"
++	select ACPI_THERMAL_LIB if (X86 && ACPI)
++	select CHECK_SIGNATURE if (X86 && DMI)
++	select INTEL_SCU if (X86)
++	select INTEL_TCC if (X86)
++	select P2SB if (X86)
++	help
++	  Dummy config option used to enable hidden X86 configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++# If this file is included on a 32-bit allmodconfig build, the select for
++# IOMMU_IO_PGTABLE_LPAE will trigger an "unmet direct dependency" warning
++# because this option is incompatible with GENERIC_ATOMIC64, which is
++# required by CPU_V6 and implied by ARCH_BCM2835. ARCH_BCM2835 is enabled
++# in the ARM defconfig (multi_v7_defconfig) and implied by many BCM2835
++# drivers, so it is lower impact to disable IOMMU_IO_PGTABLE_LPAE here
++config GKI_HIDDEN_QCOM_CONFIGS
++	bool "Hidden QCOM configs needed for GKI"
++	select QCOM_SMEM_STATE if QCOM_SOC
++	select QCOM_GDSC if (ARCH_QCOM)
++	select IOMMU_IO_PGTABLE_LPAE if (ARCH_QCOM && 64BIT)
++	select INTERCONNECT_QCOM if (ARCH_QCOM)
++	select AUXILIARY_BUS if (ARCH_QCOM)
++
++	help
++	  Dummy config option used to enable hidden QCOM configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_MTK_CONFIGS
++	bool "Hidden MTK configs needed for GKI"
++	select MTK_TIMER
++	help
++	  This dummy config option is used to enable hidden MediaTek (MTK)
++	  configs required for GKI. Specifically, it selects MTK_TIMER.
++	  These configurations are normally selected implicitly when an
++	  in-tree module or driver that depends on them is enabled.
++	  However, for GKI, modules are often built out-of-tree, meaning
++	  these implicit selections do not occur, necessitating this option.
++
++config GKI_HIDDEN_MEDIA_CONFIGS
++	bool "Hidden Media configs needed for GKI"
++	select VIDEOBUF2_CORE
++	select V4L2_MEM2MEM_DEV
++	select MEDIA_CONTROLLER
++	select MEDIA_CONTROLLER_REQUEST_API
++	select MEDIA_SUPPORT
++	select FRAME_VECTOR
++	select CEC_CORE
++	select CEC_NOTIFIER
++	select CEC_PIN
++	select VIDEOBUF2_DMA_CONTIG
++	select VIDEOBUF2_DMA_SG
++	select VIDEO_V4L2_SUBDEV_API
++	help
++	  Dummy config option used to enable hidden media configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_VIRTUAL_CONFIGS
++	bool "Hidden Virtual configs needed for GKI"
++	select HVC_DRIVER
++	select DIMLIB
++	help
++	  Dummy config option used to enable hidden virtual device configs.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++# LEGACY_WEXT_ALLCONFIG Discussed upstream, soundly rejected as a unique
++# problem for GKI to solve.  It should be noted that these extensions are
++# in-effect deprecated and generally unsupported and we should pressure
++# the SOC vendors to drop any modules that require these extensions.
++config GKI_LEGACY_WEXT_ALLCONFIG
++	bool "Hidden wireless extension configs needed for GKI"
++	select WIRELESS_EXT
++	select WEXT_CORE
++	select WEXT_PROC
++	select WEXT_SPY
++	select WEXT_PRIV
++	help
++	  Dummy config option used to enable all the hidden legacy wireless
++	  extensions to the core wireless network functionality used by
++	  add-in modules.
++
++	  If you are not building a kernel to be used for a variety of
++	  out-of-kernel built wireless modules, say N here.
++
++config GKI_HIDDEN_USB_CONFIGS
++	bool "Hidden USB configurations needed for GKI"
++	select USB_PHY
++	help
++	  Dummy config option used to enable all USB related hidden configs.
++	  These configurations are usually only selected by another config
++	  option or a combination of them.
++
++	  If you are not building a kernel to be used for a variety of
++	  out-of-kernel build USB drivers, say N here.
++
++config GKI_HIDDEN_SOC_BUS_CONFIGS
++	bool "Hidden SoC bus configuration needed for GKI"
++	select SOC_BUS
++	  help
++	    Dummy config option used to enable SOC_BUS hidden Kconfig.
++	    The configuration is required for SoCs to register themselves to the bus.
++
++	    If you are not building a kernel to be used for a variety of SoCs and
++	    out-of-tree drivers, say N here.
++
++config GKI_HIDDEN_RPMSG_CONFIGS
++	bool "Hidden RPMSG configuration needed for GKI"
++	select RPMSG
++	help
++	  Dummy config option used to enable the hidden RPMSG config.
++	  This configuration is usually only selected by another config
++	  option or a combination of them.
++
++	  If you are not building a kernel to be used for a variety of
++	  out-of-kernel build RPMSG drivers, say N here.
++
++config GKI_HIDDEN_GPU_CONFIGS
++	bool "Hidden GPU configuration needed for GKI"
++	select TRACE_GPU_MEM
++	help
++	  Dummy config option used to enable the hidden GPU config.
++	  These are normally selected implicitly when a module
++	  that relies on it is configured.
++
++config GKI_HIDDEN_IRQ_CONFIGS
++	bool "Hidden IRQ configuration needed for GKI"
++	select GENERIC_IRQ_CHIP
++	select IRQ_DOMAIN_HIERARCHY
++	select IRQ_FASTEOI_HIERARCHY_HANDLERS
++	help
++	  Dummy config option used to enable GENERIC_IRQ_CHIP hidden
++	  config, required by various SoC platforms. This is usually
++	  selected by ARCH_*.
++
++config GKI_HIDDEN_HYPERVISOR_CONFIGS
++	bool "Hidden hypervisor configuration needed for GKI"
++	select SYS_HYPERVISOR
++	help
++	  Dummy config option used to enable the SYS_HYPERVISOR hidden
++	  config, required by various SoC platforms. This is usually
++	  selected by XEN or S390.
++
++config GKI_HIDDEN_NET_CONFIGS
++	bool "Hidden networking configuration needed for GKI"
++	select PAGE_POOL
++	select NET_PTP_CLASSIFY
++	select NET_DEVLINK
++	help
++	  Dummy config option used to enable the networking hidden
++	  config, required by various SoC platforms.
++
++config GKI_HIDDEN_PHY_CONFIGS
++	bool "Hidden PHY configuration needed for GKI"
++	select GENERIC_PHY_MIPI_DPHY
++	help
++	  Dummy config option used to enable the hidden PHY configs,
++	  required by various SoC platforms.
++
++config GKI_HIDDEN_MM_CONFIGS
++	bool "Hidden MM configuration needed for GKI"
++	select PAGE_REPORTING
++	select BALLOON_COMPACTION
++	select MEMORY_BALLOON
++	help
++	  Dummy config option used to enable hidden MM configs,
++	  currently required for VIRTIO_BALLOON
++
++config GKI_HIDDEN_ETHERNET_CONFIGS
++	bool "Hidden Ethernet configuration needed for GKI"
++	select PHYLINK
++	help
++	  Dummy config option used to enable the hidden Ethernet PHYLINK
++	  configs, required by various ethernet devices.
++
++config GKI_HIDDEN_IOMMU_CONFIGS
++	bool "Hidden IOMMU configuration needed for GKI"
++	select IOMMU_SVA if (ARM64 || X86)
++	help
++	  Dummy config used to enable hidden IOMMU configs. These are
++	  normally selected implicitly when a module that relies on it is
++	  configured.
++
++config GKI_HIDDEN_DMA_CONFIGS
++	bool "Hidden DMA configuration needed for GKI"
++	select ASYNC_TX_ENABLE_CHANNEL_SWITCH
++	select DMA_ENGINE_RAID
++	help
++	  Dummy config option used to enable the hidden DMA configs,
++	  required by various SoC platforms.
++
++config GKI_HIDDEN_XFRM_OFFLOAD_CONFIGS
++	bool "Hidden IPsec offload configuration needed for GKI"
++	select XFRM_OFFLOAD
++	help
++	  Dummy config option used to enable the IPsec offload hidden
++	  config, required by various SoC platforms.
++
++# Atrocities needed for
++# a) building GKI modules in separate tree, or
++# b) building drivers that are not modularizable
++#
++# All of these should be reworked into an upstream solution
++# if possible.
++#
++config GKI_HACKS_TO_FIX
++	bool "GKI Dummy config options"
++	select GKI_HIDDEN_CRYPTO_CONFIGS
++	select GKI_HIDDEN_DRM_CONFIGS
++	select GKI_HIDDEN_MCP251XFD_CONFIGS
++	select GKI_HIDDEN_REGMAP_CONFIGS
++	select GKI_HIDDEN_SND_CONFIGS
++	select GKI_HIDDEN_SND_SOC_CONFIGS
++	select GKI_HIDDEN_UFS_CONFIGS
++	select GKI_HIDDEN_MMC_CONFIGS
++	select GKI_HIDDEN_GPIO_CONFIGS
++	select GKI_HIDDEN_X86_CONFIGS
++	select GKI_HIDDEN_QCOM_CONFIGS
++	select GKI_HIDDEN_MTK_CONFIGS if (ARM64)
++	select GKI_LEGACY_WEXT_ALLCONFIG
++	select GKI_HIDDEN_MEDIA_CONFIGS
++	select GKI_HIDDEN_VIRTUAL_CONFIGS
++	select GKI_HIDDEN_USB_CONFIGS
++	select GKI_HIDDEN_SOC_BUS_CONFIGS
++	select GKI_HIDDEN_RPMSG_CONFIGS
++	select GKI_HIDDEN_GPU_CONFIGS
++	select GKI_HIDDEN_IRQ_CONFIGS
++	select GKI_HIDDEN_HYPERVISOR_CONFIGS
++	select GKI_HIDDEN_NET_CONFIGS
++	select GKI_HIDDEN_PHY_CONFIGS
++	select GKI_HIDDEN_MM_CONFIGS
++	select GKI_HIDDEN_ETHERNET_CONFIGS
++	select GKI_HIDDEN_DMA_CONFIGS
++	select GKI_HIDDEN_IOMMU_CONFIGS
++	select GKI_HIDDEN_XFRM_OFFLOAD_CONFIGS
++	select MIN_HEAP
++
++	help
++	  Dummy config option used to enable core functionality used by
++	  modules that may not be selectable in this config.
++
++	  Unless you are building a GKI kernel to be used with modules
++	  built from a different config, say N here.

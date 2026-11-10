@@ -352,7 +352,18 @@ clone_kernel_source:
         else
             rm -f .repo/local_manifests/junkyard.xml
         fi
-        {{ _repo }} sync --current-branch --no-tags $force -j {{ num_cpus() }}
+        # Fetch, then check out: in between, tools/sparse-prebuilts.sh limits the
+        # clang/rust prebuilt checkouts to the versions this kernel uses
+        # (KERNEL_CLANG_VERSION / KERNEL_RUSTC_VERSION in devices/<device>.mk).
+        # Those repos hold every release side by side, and checking all of them
+        # out filled a 40 GB build host before the kernel build even started.
+        {{ _repo }} sync -n --current-branch --no-tags $force -j {{ num_cpus() }}
+        clang=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_CLANG_VERSION DEVICE={{ device }} | tail -1)
+        rustc=$({{ _make }} --no-print-directory -C {{ justfile_directory() }} print-KERNEL_RUSTC_VERSION DEVICE={{ device }} | tail -1)
+        if [ -n "$clang" ]; then
+            {{ justfile_directory() }}/tools/sparse-prebuilts.sh "$PWD" "$clang" "$rustc"
+        fi
+        {{ _repo }} sync -l --current-branch --no-tags $force -j {{ num_cpus() }}
         # The monorepo root is itself a git project, so tools/kernel-drift.sh
         # sees anything untracked at its top as FATAL drift. These two are ours
         # (the fragment symlink below) and bazel's (bzlmod lockfile), not
