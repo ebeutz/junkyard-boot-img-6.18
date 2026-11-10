@@ -44,6 +44,16 @@ Kleaf's own generated makefiles. That covers object lists and order, conditional
 objects, compile flags (as the compiler sees them), LINUXINCLUDE, and
 Module.symvers deps. The set of shipped modules matches too. `dtbo.img` from
 [tools/mkdtboimg.py](../../tools/mkdtboimg.py) is byte-identical to Kleaf's.
+The full make build's dist matches the last Kleaf lynx dist: the same modules
+in each staging archive and `*.modules.load` list (the lists' order differs
+in places; both are dependency orders), and byte-identical dtbs, `dtb.img`
+and `dtbo.img`.
+
+**felix** (6.1, all Makefile-based modules) builds the same way. It was
+checked by the build's own gates, since there is no Kleaf felix build here
+to diff against: 325 modules, every declared out present, `depmod -e` with
+no unknown symbols, every fragment value in the final `.config`, and the
+release Kleaf gave it (`6.1.124-android14-11-g8769cc47188c`).
 
 ## Where plain kbuild differs from Kleaf
 
