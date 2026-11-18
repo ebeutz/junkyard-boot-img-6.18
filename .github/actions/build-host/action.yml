@@ -17,11 +17,6 @@ runs:
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-    - name: Install just
-      if: runner.environment == 'github-hosted'
-      shell: bash
-      run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/bin
-
     # The justfile `require()`s repo, debootstrap, rsync, fallocate, mkfs.ext4,
     # curl, unzip and make before any recipe runs, so even a kernel-only job
     # needs the rootfs tools.
@@ -33,13 +28,32 @@ runs:
         sudo apt-get update
         sudo apt-get install -y eatmydata
         sudo eatmydata apt-get install -y \
-          repo debootstrap systemd-container qemu-user-binfmt \
+          just repo debootstrap systemd-container qemu-user-binfmt \
           e2fsprogs kmod rsync curl unzip xxd zstd util-linux \
           flex bison bc perl python3 cpio lz4 libssl-dev libelf-dev libdw-dev \
           zlib1g-dev cmake
         # The rootfs stages run aarch64 binaries in the sysroot.
         test -e /proc/sys/fs/binfmt_misc/qemu-aarch64 || sudo systemctl restart systemd-binfmt
         cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+    # The justfile uses require() (just >= 1.39). Ubuntu's just is normally
+    # new enough; if it is not, fetch a release with just's installer, which
+    # is a third-party download that has answered 403 now and then, so retry.
+    - name: Ensure just >= 1.39
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        ok() { command -v just >/dev/null && printf '1.39.0\n%s\n' "$(just --version | cut -d' ' -f2)" | sort -C -V; }
+        if ! ok; then
+          for i in 1 2 3 4 5; do
+            curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+              | sudo bash -s -- --to /usr/local/bin && break
+            sleep $((i * 10))
+          done
+        fi
+        hash -r
+        just --version
+        ok
 
     # kernel/kbuild.mk needs pahole >= 1.27 for BTF; Ubuntu's may be older.
     - name: Build pahole
