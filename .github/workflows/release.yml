@@ -139,7 +139,7 @@ jobs:
           sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get update
           sudo eatmydata apt-get install -y \
-            repo age debootstrap systemd-container qemu-user-static binfmt-support \
+            repo age debootstrap systemd-container qemu-user-binfmt \
             e2fsprogs kmod rsync curl unzip xxd zstd util-linux \
             flex bison bc perl python3 cpio lz4 libssl-dev libelf-dev libdw-dev \
             zlib1g-dev cmake eatmydata
