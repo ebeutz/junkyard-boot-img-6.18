@@ -1,4 +1,5 @@
-# Builds the full image trio for every device and publishes it as a GitHub release.
+# Builds the full image trio and publishes it as a GitHub release. Releases are
+# lynx-only by default (the `devices` input and the matrix fallback below).
 #
 # Triggers:
 #   - push of a tag vX.Y.Z (release-please's tags count only if it runs with a
@@ -10,7 +11,7 @@
 #     to publish under, the runner and the devices. The tag is created at the
 #     commit that was built if it does not exist yet.
 #
-# One job per device builds `just <device>` from scratch (kernel, rootfs, boot
+# One job per device (lynx by default) builds `just <device>` from scratch (kernel, rootfs, boot
 # images, super.img), and tools/release-assets.sh turns the result into assets:
 # boot/vendor_boot/dtbo images, zstd-compressed rootfs.img and super.img
 # (split into .partNN pieces if over GitHub's 2 GiB asset limit) and SHA256SUMS.
@@ -53,7 +54,9 @@ on:
       devices:
         description: "Devices to build (JSON list)"
         type: string
-        default: '["felix", "lynx"]'
+        # felix is left out of releases: its build has died on a GitHub-hosted
+        # runner with no log. Add it here (or pass it) to build it.
+        default: '["lynx"]'
       prerelease:
         description: "Mark the release as a pre-release"
         type: boolean
@@ -78,7 +81,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        device: ${{ fromJSON(inputs.devices || '["felix", "lynx"]') }}
+        device: ${{ fromJSON(inputs.devices || '["lynx"]') }}
     env:
       # See the NDA note at the top. Must stay a path that does not exist.
       ARM_BLOBS_ENC: /nonexistent/arm-mali-blobs.tar.age
@@ -230,7 +233,7 @@ jobs:
             echo "Download one device's assets into a directory, then:"
             echo
             echo '```bash'
-            echo 'd=lynx   # or felix'
+            echo 'd=lynx'
             echo 'for p in $d-*.part00; do [ -e "$p" ] && cat "${p%.part00}".part* > "${p%.part00}"; done'
             echo 'zstd -d $d-rootfs.img.zst $d-super.img.zst'
             echo 'sha256sum -c --ignore-missing $d-SHA256SUMS'

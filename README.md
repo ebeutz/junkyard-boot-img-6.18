@@ -119,7 +119,7 @@ Because the rootfs half is not rollback-safe, a run is **canaried and waved**: `
 
 ## Releases
 
-[.github/workflows/release.yml](.github/workflows/release.yml) builds every device from scratch and publishes the images as a GitHub release. It runs on a pushed `v*` tag, on a published release (to which it adds the assets), or by hand from the Actions tab (pick the branch, a tag, the runner and the devices).
+[.github/workflows/release.yml](.github/workflows/release.yml) builds lynx (the `devices` input can add felix) from scratch and publishes the images as a GitHub release. It runs on a pushed `v*` tag, on a published release (to which it adds the assets), or by hand from the Actions tab (pick the branch, a tag, the runner and the devices).
 
 Each device's assets come from [tools/release-assets.sh](tools/release-assets.sh): `boot.img`, `vendor_boot.img` and `dtbo.img`, zstd-compressed `rootfs.img` and `super.img`, the image version, and `SHA256SUMS` covering both the uncompressed images and every asset. A file at or over GitHub's 2 GiB asset limit is split into `.partNN` pieces. The release notes give the steps to rejoin, verify and flash them.
 
