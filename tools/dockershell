@@ -12,13 +12,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Namespaced by checkout directory, NOT a bare "junkyard-build". The mainline
 # track (../jboot-mainline) ships its own copy of this script and its own
-# Dockerfile, and the two dependency lists differ — this one needs `age` for
-# tools/arm-blobs.sh, mainline's does not. Sharing one image name means
+# Dockerfile, and the two dependency lists differ. Sharing one image name means
 # whichever repo built last wins, and the other silently runs in a container
 # missing its own dependencies while the staleness check below reports the
 # image as fresh (it compares image-create-time to *this* Dockerfile's mtime,
-# which a cross-repo build leaves untouched). That cost a build failing at
-# justfile parse time with `could not find executable 'age'`.
+# which a cross-repo build leaves untouched). That once cost a build failing at
+# justfile parse time on a missing executable.
 DOCKERFILE="$REPO_ROOT/tools/Dockerfile"
 IMAGE="${JUNKYARD_IMAGE:-junkyard-build-$(basename "$REPO_ROOT")}"
 

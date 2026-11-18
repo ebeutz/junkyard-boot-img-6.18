@@ -123,7 +123,7 @@ Because the rootfs half is not rollback-safe, a run is **canaried and waved**: `
 
 Each device's assets come from [tools/release-assets.sh](tools/release-assets.sh): `boot.img`, `vendor_boot.img` and `dtbo.img`, zstd-compressed `rootfs.img` and `super.img`, the image version, and `SHA256SUMS` covering both the uncompressed images and every asset. A file at or over GitHub's 2 GiB asset limit is split into `.partNN` pieces. The release notes give the steps to rejoin, verify and flash them.
 
-A device build takes hours and ~30 GB of disk, which is near the limits of a GitHub-hosted runner. Use a self-hosted one where you can: the manual run's `runner` input, or the repository variable `RELEASE_RUNNER` for tag runs. Release images never contain the ARM NDA GPU blobs: the workflow points `ARM_BLOBS_ENC` at a path that does not exist, and fails if the build log shows them being installed.
+A device build takes hours and ~30 GB of disk, which is near the limits of a GitHub-hosted runner. Use a self-hosted one where you can: the manual run's `runner` input, or the repository variable `RELEASE_RUNNER` for tag runs.
 
 ## rootfs A/B
 

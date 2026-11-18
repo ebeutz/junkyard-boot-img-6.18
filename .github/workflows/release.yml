@@ -24,11 +24,6 @@
 #   builds on /mnt, like build-kernel.yml. Pick a self-hosted runner where one
 #   exists: the manual run's `runner` input, or the repository variable
 #   RELEASE_RUNNER for tag and release runs.
-#
-# ★ The ARM NDA GPU blobs are NEVER in a release. `just <device>` installs them
-#   when the builder can decrypt secrets/arm-mali-blobs.tar.age, which a
-#   self-hosted runner holding a recipient's SSH key could. ARM_BLOBS_ENC points
-#   at a path that does not exist, so tools/arm-blobs.sh skips them.
 
 name: release
 
@@ -82,9 +77,6 @@ jobs:
       fail-fast: true
       matrix:
         device: ${{ fromJSON(inputs.devices || '["lynx"]') }}
-    env:
-      # See the NDA note at the top. Must stay a path that does not exist.
-      ARM_BLOBS_ENC: /nonexistent/arm-mali-blobs.tar.age
     steps:
       # Same reclaim as build-kernel.yml: ubuntu-latest has ~14 GB free on / and a
       # large ephemeral disk at /mnt.
@@ -134,15 +126,14 @@ jobs:
         if: runner.environment == 'github-hosted'
         run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/bin
 
-      # Build-host prerequisites (CLAUDE.md "Build-host prerequisites"). age is
-      # required by the justfile even though no secret is decrypted here.
+      # Build-host prerequisites (CLAUDE.md "Build-host prerequisites").
       - name: Install build dependencies
         if: runner.environment == 'github-hosted'
         run: |
           sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get update
           sudo eatmydata apt-get install -y \
-            repo age debootstrap systemd-container qemu-user-binfmt \
+            repo debootstrap systemd-container qemu-user-binfmt \
             e2fsprogs kmod rsync curl unzip xxd zstd util-linux \
             flex bison bc perl python3 cpio lz4 libssl-dev libelf-dev libdw-dev \
             zlib1g-dev cmake eatmydata
@@ -179,14 +170,6 @@ jobs:
 
       - name: Package release assets
         run: tools/release-assets.sh ${{ matrix.device }} release-assets
-
-      # Last line of defence for the NDA note at the top.
-      - name: Check the rootfs has no ARM NDA blobs
-        run: |
-          if grep -qE 'installing [0-9]+ ARM NDA|ARM NDA GPU drivers installed' build.log; then
-            echo "ERROR: the ARM NDA GPU blobs were installed; refusing to publish this image." >&2
-            exit 1
-          fi
 
       - uses: actions/upload-artifact@v5
         with:
@@ -244,8 +227,6 @@ jobs:
             echo
             echo "\`flash-fastboot.sh\` is in this repository at the tagged commit. It erases \`super\`."
             echo "\`*-SHA256SUMS\` lists both the uncompressed images (as \`<device>-<name>.img\`) and every asset."
-            echo
-            echo "Not included: the ARM NDA GPU (Mali Vulkan/OpenCL) blobs."
           } > notes.md
           cat notes.md
           ls -l release-assets

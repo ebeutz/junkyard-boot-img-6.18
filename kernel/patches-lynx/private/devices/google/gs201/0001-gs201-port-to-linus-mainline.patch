@@ -47,9 +47,15 @@ lynx-linus-mainline (android-mainline -> Linus' v7.3):
   * constants.bzl: lib/crc/crc8.ko is a device-built in-tree module (GBMS
     needs CRC8; Linus' GKI does not build it in), listed first in
     vendor_ramdisk.modules.gs201 because the GBMS modules load from there.
+  * GPU: gs201-gpu.dtsi binds the Mali-G710 to the upstream panthor
+    driver instead of the vendor mali_kbase: "arm,mali-valhall-csf",
+    lowercase interrupt names, the G3D clock from the new
+    gpu-clock-controller node (soc/gs clk-acpm-gpu), an OPP table built
+    from the vendor DVFS table's shader clocks, and the pd_embedded_g3d
+    power domain. BUILD.bazel lists clk-acpm-gpu.ko with the soc modules.
 ---
 diff --git a/BUILD.bazel b/BUILD.bazel
-index e4880b3..de8892c 100644
+index e4880b3..81f3419 100644
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
 @@ -41,7 +41,6 @@ kernel_module(
@@ -60,9 +66,11 @@ index e4880b3..de8892c 100644
          "drivers/iommu/samsung-iommu-group.ko",
          "drivers/iommu/samsung-secure-iova.ko",
          "drivers/iommu/samsung_iommu.ko",
-@@ -81,7 +80,8 @@ kernel_module(
+@@ -80,8 +79,10 @@ kernel_module(
+         "drivers/soc/google/acpm/power_stats.ko",
          "drivers/soc/google/bcm_dbg.ko",
          "drivers/soc/google/cal-if/cmupmucal.ko",
++        "drivers/soc/google/cal-if/clk-acpm-gpu.ko",
          "drivers/soc/google/dbgcore-dump.ko",
 -        "drivers/soc/google/debug/debug-snapshot-debug-kinfo.ko",
 +        # junkyard (lynx-linus-mainline): debug-snapshot-debug-kinfo.ko is not
@@ -70,7 +78,7 @@ index e4880b3..de8892c 100644
          "drivers/soc/google/debug/dss.ko",
          "drivers/soc/google/debug/ehld.ko",
          "drivers/soc/google/debug/etm2dram.ko",
-@@ -116,30 +116,28 @@ kernel_module(
+@@ -116,30 +117,28 @@ kernel_module(
          "drivers/soc/google/modemctl/google_modemctl.ko",
          "drivers/soc/google/pixel_stat/mm/pixel_stat_mm.ko",
          "drivers/soc/google/pixel_stat/pixel_stat_sysfs.ko",
@@ -110,7 +118,7 @@ index e4880b3..de8892c 100644
          "drivers/usb/dwc3/dwc3-exynos-usb.ko",
          "drivers/usb/dwc3/google-role-sw.ko",
          "drivers/usb/gadget/function/usb_f_dm.ko",
-@@ -208,9 +206,10 @@ device_build(
+@@ -208,9 +207,10 @@ device_build(
          "//private/google-modules/misc/sscoredump",
          "//private/google-modules/power/mitigation:bcl",
          "//private/google-modules/power/reset",
@@ -152,6 +160,81 @@ index 3724394..eea14f0 100644
  ]
  
  GS201_DEVICE_MODULE_OUTS = [
+diff --git a/dts/gs201-gpu.dtsi b/dts/gs201-gpu.dtsi
+index 040dd67..6565005 100644
+--- a/dts/gs201-gpu.dtsi
++++ b/dts/gs201-gpu.dtsi
+@@ -7,6 +7,38 @@
+  */
+ 
+ / {
++	/*
++	 * The GPU's ACPM DVFS domains (G3D shader, G3DL2 L2/bus) as common-clk
++	 * clocks, for panthor: cell 0 = G3D, cell 1 = G3DL2. Driver:
++	 * soc/gs drivers/soc/google/cal-if/clk-acpm-gpu.c.
++	 */
++	gpu_clk: gpu-clock-controller {
++		compatible = "google,gs201-acpm-gpu-clk";
++		#clock-cells = <1>;
++	};
++
++	/*
++	 * Shader clock steps of the vendor DVFS table (gpu_dvfs_table_v2's
++	 * gpu1 column below). Voltage is ACPM's business, so no microvolts.
++	 */
++	gpu_opp_table: opp-table-gpu {
++		compatible = "operating-points-v2";
++
++		opp-202000000 { opp-hz = /bits/ 64 <202000000>; };
++		opp-251000000 { opp-hz = /bits/ 64 <251000000>; };
++		opp-302000000 { opp-hz = /bits/ 64 <302000000>; };
++		opp-351000000 { opp-hz = /bits/ 64 <351000000>; };
++		opp-400000000 { opp-hz = /bits/ 64 <400000000>; };
++		opp-434000000 { opp-hz = /bits/ 64 <434000000>; };
++		opp-471000000 { opp-hz = /bits/ 64 <471000000>; };
++		opp-510000000 { opp-hz = /bits/ 64 <510000000>; };
++		opp-572000000 { opp-hz = /bits/ 64 <572000000>; };
++		opp-633000000 { opp-hz = /bits/ 64 <633000000>; };
++		opp-701000000 { opp-hz = /bits/ 64 <701000000>; };
++		opp-762000000 { opp-hz = /bits/ 64 <762000000>; };
++		opp-848000000 { opp-hz = /bits/ 64 <848000000>; };
++	};
++
+ 	mali_mgm: physical-memory-group-manager {
+ 		compatible = "arm,physical-memory-group-manager";
+ 
+@@ -47,18 +79,27 @@
+ 		compatible = "arm,protected-memory-allocator";
+ 	};
+ 
++	/*
++	 * Bound by the upstream panthor driver (Mali-G710 is a Valhall CSF GPU),
++	 * not the vendor mali_kbase, which matches "arm,malit6xx". The vendor
++	 * properties below are kept for reference and ignored by panthor.
++	 */
+ 	mali: mali@28000000 {
+-		compatible = "arm,malit6xx";
++		compatible = "google,gs201-mali", "arm,mali-valhall-csf";
+ 		reg = <0x0 0x28000000 0x480000>;
+ 		interrupts =
+ 			<GIC_SPI IRQ_G3D_IRQJOB_G3D IRQ_TYPE_LEVEL_HIGH>,
+ 			<GIC_SPI IRQ_G3D_IRQMMU_G3D IRQ_TYPE_LEVEL_HIGH>,
+ 			<GIC_SPI IRQ_G3D_IRQGPU_G3D IRQ_TYPE_LEVEL_HIGH>;
+-		interrupt-names = "JOB", "MMU", "GPU";
++		interrupt-names = "job", "mmu", "gpu";
++
++		clocks = <&gpu_clk 0>;
++		clock-names = "core";
++		operating-points-v2 = <&gpu_opp_table>;
+ 
+ 		/* Power */
+-		power-domains = <&pd_g3d>, <&pd_embedded_g3d>;
+-		power-domain-names = "top", "cores";
++		/* The leaf domain; genpd powers its parent pd_g3d with it. */
++		power-domains = <&pd_embedded_g3d>;
+ 		g3d_genpd_name = "pd-embedded_g3d";
+ 		gpu_pmu_status_reg_offset = <0x2004>;
+ 		gpu_pmu_status_local_pwr_mask = <0x1>; /*0x1 << 0*/
 diff --git a/gs201_defconfig b/gs201_defconfig
 index 357e823..1415228 100644
 --- a/gs201_defconfig

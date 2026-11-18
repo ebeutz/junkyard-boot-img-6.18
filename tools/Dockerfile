@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates sudo \
         just qemu-user-static \
         make e2fsprogs rsync debootstrap systemd-container \
-        curl unzip xxd git python3 age \
+        curl unzip xxd git python3 \
         erofs-utils android-sdk-libsparse-utils \
         build-essential bc bison flex libssl-dev libelf-dev \
         lz4 cpio kmod zstd \
