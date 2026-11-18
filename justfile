@@ -207,6 +207,11 @@ _build: clone_kernel_source
     KVER=$(cat {{ justfile_directory() }}/kernel/kernel_version.{{ device }}); \
     {{ _make }} -C {{ justfile_directory() }} stamp_version \
         DEVICE={{ device }} KERNEL_VERSION=$KVER FLEET_ID={{ fleet_id }}
+    # Open GPU userspace (Mesa panvk + rusticl) for devices that set
+    # GPU_USERSPACE := mesa; a no-op for the others. Builds Mesa first if
+    # build/mesa/<rev>/ doesn't have it (docker, slow) unless MESA_PREBUILT
+    # points at a tarball. See tools/build-mesa.sh.
+    {{ _make }} -C {{ justfile_directory() }} install_gpu_userspace DEVICE={{ device }}
     # Return blocks freed during the build (apt cache, pruned kernel trees) to
     # the sparse backing file so build/<device>/rootfs.img doesn't bloat over time.
     just device={{ device }} trim_rootfs
@@ -708,6 +713,15 @@ migrate:
 [group('rootfs')]
 update_snapshot *args:
     {{ justfile_directory() }}/tools/update-snapshot.sh {{ args }}
+
+# Build the open GPU userspace (Mesa, pinned by MESA_REV in the Makefile) into
+# build/mesa/<rev>/, in an arm64 debian:trixie docker container. Shared by every
+# device; `just <device>` runs it on demand. Pass MESA_PREBUILT=<tarball> to
+# make (as an environment variable) to use a CI-built one instead.
+[group('rootfs')]
+[doc('Build Mesa (panvk + rusticl) for the G710')]
+build_mesa:
+    {{ _make }} -C {{ justfile_directory() }} build_mesa DEVICE=lynx
 
 [group('rootfs')]
 build_rootfs:

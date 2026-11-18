@@ -1,5 +1,6 @@
-# Builds the full image trio and publishes it as a GitHub release. Releases are
-# lynx-only by default (the `devices` input and the matrix fallback below).
+# Builds the image trio and publishes it as a GitHub release, and keeps every
+# output as a build artifact. Releases are lynx-only by default (the `devices`
+# input and the matrix fallback below).
 #
 # Triggers:
 #   - push of a tag vX.Y.Z (release-please's tags count only if it runs with a
@@ -11,19 +12,27 @@
 #     to publish under, the runner and the devices. The tag is created at the
 #     commit that was built if it does not exist yet.
 #
-# One job per device (lynx by default) builds `just <device>` from scratch (kernel, rootfs, boot
-# images, super.img), and tools/release-assets.sh turns the result into assets:
-# boot/vendor_boot/dtbo images, zstd-compressed rootfs.img and super.img
-# (split into .partNN pieces if over GitHub's 2 GiB asset limit) and SHA256SUMS.
-# A final job creates or updates the release.
+# Jobs:
+#   mesa     builds the open GPU userspace (tools/build-mesa.sh) natively on an
+#            arm64 runner, in debian:trixie (the image's release). Artifact
+#            mesa-arm64.
+#   build    one per device: `just <device>` from scratch (kernel, rootfs, boot
+#            images, super.img) with MESA_PREBUILT set to mesa's tarball, then
+#            tools/release-assets.sh. Artifacts: release-<device> (the release
+#            assets), kernel-<device> (the kernel dist), build-log-<device>.
+#   publish  creates or updates the release from the artifacts.
 #
-# ★ Runner. A device build needs ~30 GB of disk and runs the kernel plus ~340
-#   modules, then a debootstrap from rate-limited snapshot.debian.org, so it takes
-#   hours. A GitHub-hosted runner (6 h job limit, ~14 GB free on / until the
-#   preinstalled toolchains are deleted) is borderline; the job reclaims disk and
-#   builds on /mnt, like build-kernel.yml. Pick a self-hosted runner where one
-#   exists: the manual run's `runner` input, or the repository variable
-#   RELEASE_RUNNER for tag and release runs.
+# ★ Runner. A device build needs ~30 GB of disk and hours of CPU. A
+#   GitHub-hosted runner (6 h job limit) manages lynx; the job reclaims disk and
+#   builds on /mnt. Pick a self-hosted runner where one exists: the manual run's
+#   `runner` input, or the repository variable RELEASE_RUNNER.
+#
+# ★ The release tag. GITHUB_TOKEN may not create a ref on a commit whose
+#   .github/workflows differ from the default branch's: GitHub answers the
+#   release API with "403 Resource not accessible by integration". So build the
+#   default branch's current head (and don't change the workflows while it
+#   runs), push the tag yourself, or add a RELEASE_TOKEN secret (a PAT with
+#   contents + workflows write), which publish uses when it exists.
 
 name: release
 
@@ -69,8 +78,42 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
 jobs:
+  mesa:
+    name: mesa (arm64)
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 120
+    steps:
+      - name: Install git
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates zstd >/dev/null
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - name: Build Mesa
+        run: |
+          export MESA_URL=$(sed -n 's/^MESA_URL ?= //p' Makefile)
+          export MESA_REV=$(sed -n 's/^MESA_REV ?= //p' Makefile)
+          echo "Mesa $MESA_URL @ $MESA_REV"
+          tools/build-mesa.sh fetch "$RUNNER_TEMP/mesa-src"
+          tools/build-mesa.sh build "$RUNNER_TEMP/mesa-src" "$RUNNER_TEMP/mesa-build" "$RUNNER_TEMP/mesa-out"
+          mkdir -p mesa-artifact
+          tools/build-mesa.sh pack "$RUNNER_TEMP/mesa-out" "mesa-artifact/mesa-arm64-$MESA_REV.tar.zst"
+          ls -l mesa-artifact
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mesa-arm64
+          path: mesa-artifact/
+          retention-days: 30
+          compression-level: 0
+
   build:
     name: build ${{ matrix.device }}
+    needs: mesa
     runs-on: ${{ inputs.runner || vars.RELEASE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 360
     strategy:
@@ -78,8 +121,8 @@ jobs:
       matrix:
         device: ${{ fromJSON(inputs.devices || '["lynx"]') }}
     steps:
-      # Same reclaim as build-kernel.yml: ubuntu-latest has ~14 GB free on / and a
-      # large ephemeral disk at /mnt.
+      # ubuntu-latest has little free space on / and a large ephemeral disk at
+      # /mnt. Drop the preinstalled toolchains we never use.
       - name: Free up disk space on the root volume
         if: runner.environment == 'github-hosted'
         run: |
@@ -116,67 +159,43 @@ jobs:
           # IMAGE_VERSION is version.txt + `git describe`-style revision.
           fetch-depth: 0
 
-      # `repo init` (felix's kernel checkout) wants a git identity.
-      - name: Git identity
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - uses: ./.github/actions/build-host
 
-      - name: Install just
-        if: runner.environment == 'github-hosted'
-        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/bin
-
-      # Build-host prerequisites (CLAUDE.md "Build-host prerequisites").
-      - name: Install build dependencies
-        if: runner.environment == 'github-hosted'
-        run: |
-          sudo rm -f /var/lib/man-db/auto-update
-          sudo apt-get update
-          sudo eatmydata apt-get install -y \
-            repo debootstrap systemd-container qemu-user-binfmt \
-            e2fsprogs kmod rsync curl unzip xxd zstd util-linux \
-            flex bison bc perl python3 cpio lz4 libssl-dev libelf-dev libdw-dev \
-            zlib1g-dev cmake eatmydata
-          # The rootfs stages run aarch64 binaries in the sysroot.
-          test -e /proc/sys/fs/binfmt_misc/qemu-aarch64 || sudo systemctl restart systemd-binfmt
-          cat /proc/sys/fs/binfmt_misc/qemu-aarch64
-
-      # kernel/kbuild.mk needs pahole >= 1.27 for BTF; ubuntu-24.04 ships 1.25.
-      - name: Build pahole
-        if: runner.environment == 'github-hosted'
-        run: |
-          git clone --depth 1 --branch v1.30 --recurse-submodules --shallow-submodules \
-            https://git.kernel.org/pub/scm/devel/pahole/pahole.git "$RUNNER_TEMP/pahole"
-          cmake -S "$RUNNER_TEMP/pahole" -B "$RUNNER_TEMP/pahole/build" \
-            -DCMAKE_BUILD_TYPE=Release -D__LIB=lib -DCMAKE_INSTALL_PREFIX=/usr/local
-          make -C "$RUNNER_TEMP/pahole/build" -j"$(nproc)"
-          sudo make -C "$RUNNER_TEMP/pahole/build" install
-          sudo ldconfig
-          /usr/local/bin/pahole --version
-
-      # pixel-bootctl / pixel-ota are static aarch64-musl binaries linked with
-      # rust-lld (see .build_pixel_bootctl in the Makefile).
-      - name: Rust target
-        run: |
-          command -v rustup >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-musl
+      - uses: actions/download-artifact@v5
+        with:
+          name: mesa-arm64
+          path: ${{ runner.temp }}/mesa
 
       - name: Build ${{ matrix.device }}
         run: |
-          export PAHOLE=$(command -v /usr/local/bin/pahole || command -v pahole)
+          export MESA_PREBUILT=$(ls "$RUNNER_TEMP"/mesa/mesa-arm64-*.tar.zst)
           $(command -v eatmydata || true) just ${{ matrix.device }} 2>&1 | tee build.log
           exit "${PIPESTATUS[0]}"
 
       - name: Package release assets
-        run: tools/release-assets.sh ${{ matrix.device }} release-assets
+        run: |
+          tools/release-assets.sh ${{ matrix.device }} release-assets
+          cp "$RUNNER_TEMP"/mesa/mesa-arm64-*.tar.zst release-assets/
+
+      - name: Collect the kernel dist
+        run: |
+          d=${{ matrix.device }}
+          mkdir -p kernel-artifact
+          cp -a "kernel/source-$d/out/$d/dist"/. kernel-artifact/
+          cp "kernel/kernel_version.$d" kernel-artifact/kernel_version
 
       - uses: actions/upload-artifact@v5
         with:
           name: release-${{ matrix.device }}
           path: release-assets/
-          retention-days: 3
+          retention-days: 30
           compression-level: 0
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: kernel-${{ matrix.device }}
+          path: kernel-artifact/
+          retention-days: 30
 
       - uses: actions/upload-artifact@v5
         if: always()
@@ -192,6 +211,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.release.tag_name || github.ref }}
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v5
         with:
@@ -227,13 +247,37 @@ jobs:
             echo
             echo "\`flash-fastboot.sh\` is in this repository at the tagged commit. It erases \`super\`."
             echo "\`*-SHA256SUMS\` lists both the uncompressed images (as \`<device>-<name>.img\`) and every asset."
+            echo
+            echo "### GPU"
+            echo
+            echo "The images use the upstream panthor kernel driver and Mesa (panvk Vulkan, rusticl OpenCL)."
+            echo "\`mesa-arm64-<rev>.tar.zst\` is that Mesa build on its own: \`root/\` installs at \`/\`."
           } > notes.md
           cat notes.md
           ls -l release-assets
 
+      # See "The release tag" at the top. Fail with that explanation instead
+      # of a bare 403 when the tag would have to be created on a commit whose
+      # workflows differ from the default branch's.
+      - name: Check the release tag can be created
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          HAS_PAT: ${{ secrets.RELEASE_TOKEN != '' }}
+        run: |
+          if [ "$HAS_PAT" = true ] || gh release view "$TAG" >/dev/null 2>&1 \
+             || git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            exit 0
+          fi
+          def=${{ github.event.repository.default_branch }}
+          git fetch -q origin "$def"
+          if [ "$(git rev-parse "$GITHUB_SHA:.github/workflows")" != "$(git rev-parse "FETCH_HEAD:.github/workflows")" ]; then
+            echo "::error::$GITHUB_SHA's .github/workflows differ from $def's, so GITHUB_TOKEN cannot create tag $TAG there. Re-run from $def's head, push the tag yourself, or add a RELEASE_TOKEN secret. The images are in this run's release-* artifacts."
+            exit 1
+          fi
+
       - name: Create or update the release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           # Manual runs: the input. Tag and release runs: a tag with a suffix
           # (v1.8.0-rc1) is a pre-release.
           PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && (inputs.prerelease && 'true' || 'false') || (contains(env.TAG, '-') && 'true' || 'false') }}

@@ -1,25 +1,37 @@
-# This workflow builds a Linux kernel and uploads the compiled artifacts.
-# It is triggered automatically when kernel configuration or source files change,
-# ensuring the kernel artifact stays in sync with the latest committed kernel changes.
-
-# Adapted from: https://github.com/ebeutz/junkyard-slurm/blob/main/.github/workflows/kernel.yml
+# Builds a device's kernel, out-of-tree modules and device tree (plain kbuild,
+# kernel/kbuild.mk) and uploads the dist as a build artifact.
+#
+# Runs on every push to main that touches the kernel's inputs, and by hand from
+# the Actions tab (pick the device and the runner). The artifact,
+# kernel-<device>, holds exactly what the rootfs/boot stages consume: Image(.lz4),
+# System.map, dtb.img, dtbo.img, the dtbs, the vendor_dlkm/system_dlkm staging
+# archives, the *.modules.load lists, kernel headers, and kernel_version.
 
 name: build-kernel
 
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push events, but only when files under the kernel/ directory are modified.
   push:
+    branches:
+      - main
     paths:
       - "kernel/**"
-    branches:
-      - "main"
-
-  # Allows you to run this workflow manually from the Actions tab.
-  # Also lets you pick which runner to build on and which branch to build from
-  # (branch selection is the built-in "Use workflow from" dropdown in the UI).
+      - "devices/**"
+      - "tools/bazel2kbuild.py"
+      - "tools/kconfig-check-fragments.sh"
+      - "tools/kernel-drift.sh"
+      - "tools/mkdtboimg.py"
+      - "tools/modules-load-lists.py"
+      - ".github/workflows/build-kernel.yml"
+      - ".github/actions/build-host/**"
   workflow_dispatch:
     inputs:
+      device:
+        description: "Device whose kernel to build"
+        type: choice
+        default: lynx
+        options:
+          - lynx
+          - felix
       runner:
         description: "Where to run the build"
         type: choice
@@ -28,23 +40,19 @@ on:
           - ubuntu-latest
           - x86-kernel-builder-atkinson
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
-jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # Defaults to the latest available Ubuntu GitHub-hosted runner on push events.
-    # On manual (workflow_dispatch) runs, uses whichever runner was picked in the UI.
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+permissions:
+  contents: read
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
+jobs:
+  build:
+    name: kernel ${{ inputs.device || 'lynx' }}
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 300
+    env:
+      DEVICE: ${{ inputs.device || 'lynx' }}
     steps:
-      # Reclaim space on the root volume. ubuntu-latest ships only ~14 GB free on
-      # / but a ~70 GB ephemeral disk at /mnt. The kernel checkout + build is
-      # tens of GB, so a full kernel build can exhaust / and the runner dies with
-      # "No space left on device". Drop the preinstalled toolchains we never use
-      # to buy back ~25-30 GB on /.
-      # Only needed on GitHub-hosted runners - self-hosted machines aren't disk-constrained
-      # this way and don't have these preinstalled toolchains to begin with.
+      # ubuntu-latest has little free space on / and a large ephemeral disk at
+      # /mnt. Drop the preinstalled toolchains we never use.
       - name: Free up disk space on the root volume
         if: runner.environment == 'github-hosted'
         run: |
@@ -61,77 +69,43 @@ jobs:
           sudo apt-get clean || true
           echo "After:"; df -h / /mnt
 
-      # Mounts a volatile overlayfs over the working directory to speed up the build.
-      # All file writes go to a temporary in-memory layer instead of hitting the disk directly.
-      # The upper/work layers are placed on the large /mnt ephemeral disk (not /),
-      # so the repo checkout and in-tree build outputs don't crowd the small root
-      # volume.
-      # Only needed on GitHub-hosted runners - self-hosted machines have their own
-      # persistent, appropriately-sized disk and don't need this workaround.
-      - name: Mount volatile overlayfs for faster builds
+      # Put the workspace (the kernel checkout and its build output) on /mnt.
+      - name: Mount the workspace on /mnt
         if: runner.environment == 'github-hosted'
         run: |
-          mkdir a
+          mkdir -p a
           sudo mkdir -p /mnt/overlay/upper /mnt/overlay/work
           sudo chown "$(id -u):$(id -g)" /mnt/overlay/upper /mnt/overlay/work
           sudo mount -t overlay overlay \
             -o lowerdir="$PWD/a",upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work,volatile \
             "$PWD"
 
-      # Checks out the repository under $GITHUB_WORKSPACE so subsequent steps
-      # can access the kernel source, config files, and justfiles.
-      # With no ref specified, this checks out whatever triggered the run:
-      # the pushed branch on `push` events, or whichever branch was picked in
-      # the "Use workflow from" dropdown on manual workflow_dispatch runs.
       - uses: actions/checkout@v5
 
-      # Downloads and installs the `just` command runner binary directly from upstream.
-      # Only needed on GitHub-hosted runners - self-hosted machines already have
-      # `just` installed permanently.
-      - name: Install just
-        if: runner.environment == 'github-hosted'
-        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/bin
+      - uses: ./.github/actions/build-host
 
-      # Installs required build dependencies via apt.
-      # - `repo`: Google's tool for managing multi-repo projects (used for kernel source)
-      # - `kmod`: utilities for loading/managing Linux kernel modules
-      # - `debootstrap`: bootstraps a Debian/Ubuntu root filesystem, required by the justfile
-      # `eatmydata` is used throughout to disable fsync/fdatasync calls, which speeds up
-      # apt operations significantly in a throwaway CI environment where data durability
-      # is not a concern.
-      # Only needed on GitHub-hosted runners - self-hosted machines already have
-      # these installed permanently.
-      - name: Install dependencies
-        if: runner.environment == 'github-hosted'
+      - name: Build the ${{ env.DEVICE }} kernel
         run: |
-          sudo rm -f /var/lib/man-db/auto-update
-          sudo apt update
-          sudo eatmydata apt install -y repo kmod debootstrap systemd-container qemu-user-binfmt \
-            flex bison bc cpio lz4 rsync libssl-dev libelf-dev libdw-dev dwarves
-      # NOTE: the kernel build (kernel/kbuild.mk) needs pahole >= 1.27 for BTF;
-      # ubuntu-24.04's dwarves is 1.25 and kbuild.mk refuses it. Supply a newer
-      # one (PAHOLE=/path/to/pahole) on a GitHub-hosted runner.
+          just device="$DEVICE" build_kernel 2>&1 | tee build-kernel.log
+          exit "${PIPESTATUS[0]}"
 
-      # Compiles the kernel and prepares the module tree and source artifacts using
-      # the `just` command runner. Two targets are invoked:
-      # - `build_kernel`: compiles the kernel image from source
-      # - `update_kernel_modules_and_source`: installs kernel modules and packages
-      #   the kernel source/headers needed for out-of-tree module builds
-      - name: Compile Kernel
+      - name: Collect the dist
         run: |
-          eatmydata just build_kernel
-          eatmydata just update_kernel_modules_and_source
+          dist="kernel/source-$DEVICE/out/$DEVICE/dist"
+          mkdir -p artifact
+          cp -a "$dist"/. artifact/
+          cp "kernel/kernel_version.$DEVICE" artifact/kernel_version
+          ls -la artifact
 
-      # Uploads the compiled kernel tarball as a GitHub Actions artifact.
       - uses: actions/upload-artifact@v5
         with:
-          name: kernel
-          path: kernel/kernel.tar
+          name: kernel-${{ env.DEVICE }}
+          path: artifact/
+          retention-days: 30
 
-      # Uploads the full kernel build output directory as a separate artifact.
-      # This includes intermediate build files, Module.symvers, and other outputs
-      # that may be needed for debugging or building external kernel modules.
       - uses: actions/upload-artifact@v5
+        if: always()
         with:
-          name: kernel-build-out
-          path: kernel/out/
+          name: build-kernel-log-${{ env.DEVICE }}
+          path: build-kernel.log
+          retention-days: 14

@@ -1,4 +1,4 @@
-.PHONY: all clean clean_image stamp_version print-%
+.PHONY: all clean clean_image stamp_version install_gpu_userspace print-%
 
 # This Makefile is driven by the justfile; most variables come in via env.
 # Targets with a leading "." are sentinel files that track whether a stage has
@@ -61,6 +61,7 @@ S_PKGS   := $(BUILD_DIR)/.install_packages
 S_INSTK  := $(BUILD_DIR)/.install_kernel
 S_INITRD := $(BUILD_DIR)/.install_initramfs
 S_BOOT   := $(BUILD_DIR)/.build_boot
+S_GPU    := $(BUILD_DIR)/.install_gpu_userspace
 
 RELEASE ?= trixie
 ROOT_PW ?= 0000
@@ -204,6 +205,22 @@ OVERLAY_DIR ?= rootfs/overlay
 # Per-device: each device's OTA supplies its own /vendor/firmware. Also keeps the
 # ~2GB download cached per-device, so switching back and forth doesn't re-fetch.
 VENDOR_FIRMWARE_STAGE := $(BUILD_DIR)/vendor-firmware/extracted
+
+# Open GPU userspace. A device whose fragment sets GPU_USERSPACE := mesa (lynx,
+# whose kernel binds the Mali-G710 with panthor) gets Mesa's panvk (Vulkan) and
+# rusticl (OpenCL) under /usr/local. MESA_URL/MESA_REV pin the source:
+# junkyard-computing/mesa `felix-g710`, which adds the G710 model entry that no
+# upstream or Debian Mesa has (see tools/build-mesa.sh). It is built once,
+# shared by every device, under build/mesa/<rev>/:
+#   - MESA_PREBUILT=<tarball> unpacks a `tools/build-mesa.sh pack` tarball
+#     (the release workflow builds one on a native arm64 runner);
+#   - otherwise tools/build-mesa.sh builds it in an arm64 debian:trixie docker
+#     container, under qemu (slow: hours).
+GPU_USERSPACE ?=
+MESA_URL ?= https://github.com/junkyard-computing/mesa.git
+MESA_REV ?= 3ca7ae7723543eed57eb41ea9ea284aad3065b76
+MESA_DIR := build/mesa/$(MESA_REV)
+MESA_PREBUILT ?=
 
 
 OVERLAY_FILES := $(shell find $(OVERLAY_DIR) -type f 2>/dev/null)
@@ -1013,6 +1030,55 @@ endif
 	just device=$(DEVICE) unmount_rootfs
 	@echo "stamped IMAGE_VERSION=$(IMAGE_VERSION)"
 
+# Open GPU userspace (see GPU_USERSPACE). Run by `just <device>` after
+# .build_boot, like stamp_version: it writes the rootfs only, and super.img is
+# built from the rootfs after it.
+install_gpu_userspace: $(S_GPU)
+
+.PHONY: build_mesa
+build_mesa: $(MESA_DIR)/.built
+
+$(MESA_DIR)/.built: tools/build-mesa.sh
+	rm -rf $(MESA_DIR)/out
+	mkdir -p $(MESA_DIR)
+ifneq ($(strip $(MESA_PREBUILT)),)
+	mkdir -p $(MESA_DIR)/out
+	zstd -dc $(MESA_PREBUILT) | tar -C $(MESA_DIR)/out -xf -
+	@got=$$(cat $(MESA_DIR)/out/MESA_REV 2>/dev/null); \
+	if [ "$$got" != "$(MESA_REV)" ]; then \
+		echo "ERROR: MESA_PREBUILT=$(MESA_PREBUILT) is Mesa '$$got', but this tree pins MESA_REV=$(MESA_REV)."; \
+		exit 1; \
+	fi
+else
+	@command -v docker >/dev/null 2>&1 || { \
+		echo "ERROR: building Mesa needs docker (an arm64 debian:trixie container), or"; \
+		echo "       MESA_PREBUILT=<tarball> from the release workflow's mesa job."; exit 1; }
+	MESA_URL=$(MESA_URL) MESA_REV=$(MESA_REV) tools/build-mesa.sh docker $(MESA_DIR)
+endif
+	touch $@
+
+ifeq ($(GPU_USERSPACE),mesa)
+$(S_GPU): $(S_PKGS) $(MESA_DIR)/.built | $(BUILD_DIR)
+	just device=$(DEVICE) mount_rootfs
+	sudo rsync -a --chown=root:root $(MESA_DIR)/out/root/ $(SYSROOT_DIR)/
+	$(NSPAWN) -D $(SYSROOT_DIR) sh -c "apt-get update"
+	pkgs=$$(tr '\n' ' ' < $(MESA_DIR)/out/runtime-packages.txt); \
+	$(NSPAWN) -D $(SYSROOT_DIR) sh -c \
+		"DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends $$pkgs"
+	$(NSPAWN) -D $(SYSROOT_DIR) sh -c "apt-get clean"
+	# rusticl enables only some drivers by default, and panfrost is not one
+	# of them. Set it for every login (pam_env) and every service.
+	sudo sh -c "sed -i '/^RUSTICL_ENABLE=/d' $(SYSROOT_DIR)/etc/environment && echo RUSTICL_ENABLE=panfrost >> $(SYSROOT_DIR)/etc/environment"
+	sudo mkdir -p $(SYSROOT_DIR)/etc/systemd/system.conf.d
+	printf '[Manager]\nDefaultEnvironment=RUSTICL_ENABLE=panfrost\n' | sudo tee $(SYSROOT_DIR)/etc/systemd/system.conf.d/50-rusticl.conf >/dev/null
+	$(NSPAWN_WRAP) -D $(SYSROOT_DIR) ldconfig
+	just device=$(DEVICE) unmount_rootfs
+	touch $@
+else
+$(S_GPU): $(S_PKGS) | $(BUILD_DIR)
+	touch $@
+endif
+
 # NO usbcore.quirks here — see below.
 #
 # RETIRED 2026-08-03: `usbcore.quirks=0bda:8153:k` (USB_QUIRK_NO_LPM) was added
@@ -1098,7 +1164,7 @@ $(S_BOOT): $(S_INITRD) $(S_INSTFW) | $(BUILD_DIR)
 clean_image:
 	just device=$(DEVICE) unmount_rootfs
 	rm -f $(ROOTFS_IMG)
-	rm -f $(S_CREATE) $(S_DEBOOT) $(S_INSTFW) $(S_PKGS) $(S_INSTK) $(S_INITRD) $(S_BOOT)
+	rm -f $(S_CREATE) $(S_DEBOOT) $(S_INSTFW) $(S_PKGS) $(S_INSTK) $(S_INITRD) $(S_BOOT) $(S_GPU)
 
 clean: clean_image
 	# ★ super.img MUST be removed here, and `all` rebuilds it (both changed

@@ -23,7 +23,6 @@
 #   //private/google-modules/edgetpu/janeiro/drivers/edgetpu:edgetpu.janeiro
 #   //private/google-modules/fingerprint/goodix/fps_touch_handler
 #   //private/google-modules/fingerprint/goodix/gw9608
-#   //private/google-modules/gpu/mali_kbase
 #   //private/google-modules/gpu/mali_pixel
 #   //private/google-modules/gxp/gs201:gxp
 #   //private/google-modules/lwis:lwis.busan
@@ -751,15 +750,6 @@ private/google-modules/gpu/mali_pixel/mali_pixel.needs := private/devices/google
 private/google-modules/gpu/mali_pixel/mali_pixel.symvers := private/google-modules/gpu/mali_pixel/mali_pixel_Module.symvers
 private/google-modules/gpu/mali_pixel/mali_pixel.extra_symbols := private/google-modules/soc/gs/Module.symvers
 
-private/google-modules/gpu/mali_kbase/mali_kbase.kind := make
-private/google-modules/gpu/mali_kbase/mali_kbase.dir := private/google-modules/gpu/mali_kbase
-private/google-modules/gpu/mali_kbase/mali_kbase.name := mali_kbase
-private/google-modules/gpu/mali_kbase/mali_kbase.outs := mali_kbase.ko tests/kutf/mali_kutf.ko tests/mali_kutf_clk_rate_trace/kernel/mali_kutf_clk_rate_trace_test_portal.ko
-private/google-modules/gpu/mali_kbase/mali_kbase.install := 1
-private/google-modules/gpu/mali_kbase/mali_kbase.needs := private/google-modules/gpu/mali_pixel/mali_pixel private/google-modules/power/mitigation/google_bcl private/devices/google/gs201/gs201_soc
-private/google-modules/gpu/mali_kbase/mali_kbase.symvers := private/google-modules/gpu/mali_kbase/Module.symvers
-private/google-modules/gpu/mali_kbase/mali_kbase.extra_symbols := private/google-modules/gpu/mali_pixel/mali_pixel_Module.symvers private/google-modules/power/mitigation/google_bcl_Module.symvers private/google-modules/soc/gs/Module.symvers
-
 private/google-modules/gxp/gs201/gxp.kind := ddk
 private/google-modules/gxp/gs201/gxp.dir := private/google-modules/gxp/gs201
 private/google-modules/gxp/gs201/gxp.name := gxp
@@ -1154,7 +1144,6 @@ EXT_MODULES := \
   private/google-modules/fingerprint/goodix/fps_touch_handler/fps_touch_handler \
   private/google-modules/fingerprint/goodix/gw9608/goodixfp \
   private/google-modules/gpu/mali_pixel/mali_pixel \
-  private/google-modules/gpu/mali_kbase/mali_kbase \
   private/google-modules/gxp/gs201/gxp \
   private/google-modules/lwis/lwis.busan \
   private/google-modules/misc/sscoredump/sscoredump_sample_test \

@@ -1,0 +1,66 @@
+# Build-host setup shared by build-kernel.yml and release.yml: the tools
+# CLAUDE.md "Build-host prerequisites" lists, on a GitHub-hosted Ubuntu runner.
+# A self-hosted runner is expected to have them already, so most steps are
+# skipped there.
+#
+# Run it after actions/checkout (a local action is read from the checkout).
+name: build-host
+description: Install the kernel/rootfs build prerequisites
+
+runs:
+  using: composite
+  steps:
+    # `repo init` (felix's kernel checkout) wants a git identity.
+    - name: Git identity
+      shell: bash
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    - name: Install just
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash -s -- --to /usr/bin
+
+    # The justfile `require()`s repo, debootstrap, rsync, fallocate, mkfs.ext4,
+    # curl, unzip and make before any recipe runs, so even a kernel-only job
+    # needs the rootfs tools.
+    - name: Install build dependencies
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        sudo rm -f /var/lib/man-db/auto-update
+        sudo apt-get update
+        sudo apt-get install -y eatmydata
+        sudo eatmydata apt-get install -y \
+          repo debootstrap systemd-container qemu-user-binfmt \
+          e2fsprogs kmod rsync curl unzip xxd zstd util-linux \
+          flex bison bc perl python3 cpio lz4 libssl-dev libelf-dev libdw-dev \
+          zlib1g-dev cmake
+        # The rootfs stages run aarch64 binaries in the sysroot.
+        test -e /proc/sys/fs/binfmt_misc/qemu-aarch64 || sudo systemctl restart systemd-binfmt
+        cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+    # kernel/kbuild.mk needs pahole >= 1.27 for BTF; Ubuntu's may be older.
+    - name: Build pahole
+      if: runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        git clone --depth 1 --branch v1.30 --recurse-submodules --shallow-submodules \
+          https://git.kernel.org/pub/scm/devel/pahole/pahole.git "$RUNNER_TEMP/pahole"
+        cmake -S "$RUNNER_TEMP/pahole" -B "$RUNNER_TEMP/pahole/build" \
+          -DCMAKE_BUILD_TYPE=Release -D__LIB=lib -DCMAKE_INSTALL_PREFIX=/usr/local
+        make -C "$RUNNER_TEMP/pahole/build" -j"$(nproc)"
+        sudo make -C "$RUNNER_TEMP/pahole/build" install
+        sudo ldconfig
+        echo "PAHOLE=/usr/local/bin/pahole" >> "$GITHUB_ENV"
+        /usr/local/bin/pahole --version
+
+    # pixel-bootctl / pixel-ota are static aarch64-musl binaries linked with
+    # rust-lld (see .build_pixel_bootctl in the Makefile).
+    - name: Rust target
+      shell: bash
+      run: |
+        command -v rustup >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-musl

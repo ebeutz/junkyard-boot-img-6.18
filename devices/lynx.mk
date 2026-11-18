@@ -150,7 +150,6 @@ KBUILD_GEN_ROOTS := \
 	//private/google-modules/edgetpu/janeiro/drivers/edgetpu:edgetpu.janeiro \
 	//private/google-modules/fingerprint/goodix/fps_touch_handler \
 	//private/google-modules/fingerprint/goodix/gw9608 \
-	//private/google-modules/gpu/mali_kbase \
 	//private/google-modules/gpu/mali_pixel \
 	//private/google-modules/gxp/gs201:gxp \
 	//private/google-modules/lwis:lwis.busan \
@@ -228,3 +227,7 @@ HOSTNAME    := lynx
 
 # Human-facing model name, used in the operator-facing provisioning README.
 DEVICE_MODEL := Pixel 7a
+
+# Open GPU userspace: Mesa panvk + rusticl for the panthor-bound G710 (Makefile
+# GPU_USERSPACE, tools/build-mesa.sh).
+GPU_USERSPACE := mesa
