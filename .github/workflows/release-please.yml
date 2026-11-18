@@ -49,3 +49,8 @@ jobs:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          # The branch that was pushed, not the repository's default branch.
+          # Without it release-please reads version.txt/CHANGELOG.md from, and
+          # opens its release PR against, whatever the default branch is, which
+          # need not be main.
+          target-branch: ${{ github.ref_name }}
