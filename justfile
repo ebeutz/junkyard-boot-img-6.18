@@ -327,6 +327,17 @@ clone_kernel_source:
         # tag fails loudly instead of building a different kernel. With patterns,
         # a blob-less partial clone with a non-cone sparse checkout, so only the
         # matching files are ever downloaded.
+        # The fetches below go to git.kernel.org and googlesource, which now
+        # and then do not answer (seen on CI runners); retry with a backoff.
+        retry() {
+            local i
+            for i in 1 2 3 4 5; do
+                "$@" && return 0
+                echo "retrying in $((i * 15))s: $*" >&2
+                sleep $((i * 15))
+            done
+            return 1
+        }
         fetch_at() {
             local dir=$1 u=$2 ref=$3 want=$4; shift 4
             if [ -e "$dir/.git" ]; then
@@ -343,9 +354,9 @@ clone_kernel_source:
                 git -C "$dir" config remote.origin.promisor true
                 git -C "$dir" config remote.origin.partialclonefilter blob:none
                 git -C "$dir" sparse-checkout set --no-cone "$@"
-                git -C "$dir" fetch --depth=1 --filter=blob:none origin "$ref"
+                retry git -C "$dir" fetch --depth=1 --filter=blob:none origin "$ref"
             else
-                git -C "$dir" fetch --depth=1 origin "$ref"
+                retry git -C "$dir" fetch --depth=1 origin "$ref"
             fi
             got=$(git -C "$dir" rev-parse 'FETCH_HEAD^{commit}')
             if [ "$got" != "$want" ]; then

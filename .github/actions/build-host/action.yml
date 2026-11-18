@@ -55,19 +55,35 @@ runs:
         just --version
         ok
 
-    # kernel/kbuild.mk needs pahole >= 1.27 for BTF; Ubuntu's may be older.
-    - name: Build pahole
+    # kernel/kbuild.mk needs pahole >= 1.27 for BTF. Use Ubuntu's (dwarves) if
+    # it is new enough; otherwise build v1.30, from git.kernel.org or, if that
+    # does not answer, its GitHub mirror.
+    - name: pahole >= 1.27
       if: runner.environment == 'github-hosted'
       shell: bash
       run: |
-        git clone --depth 1 --branch v1.30 --recurse-submodules --shallow-submodules \
-          https://git.kernel.org/pub/scm/devel/pahole/pahole.git "$RUNNER_TEMP/pahole"
-        cmake -S "$RUNNER_TEMP/pahole" -B "$RUNNER_TEMP/pahole/build" \
+        sudo apt-get install -y dwarves || true
+        ok() { command -v "$1" >/dev/null && printf '1.27\n%s\n' "$("$1" --version | tr -d v)" | sort -C -V; }
+        if ok pahole; then
+          echo "PAHOLE=$(command -v pahole)" >> "$GITHUB_ENV"
+          pahole --version
+          exit 0
+        fi
+        src="$RUNNER_TEMP/pahole"
+        for i in 1 2 3; do
+          for url in https://git.kernel.org/pub/scm/devel/pahole/pahole.git https://github.com/acmel/dwarves.git; do
+            rm -rf "$src"
+            git clone --depth 1 --branch v1.30 --recurse-submodules --shallow-submodules "$url" "$src" && break 2
+          done
+          sleep $((i * 20))
+        done
+        cmake -S "$src" -B "$src/build" \
           -DCMAKE_BUILD_TYPE=Release -D__LIB=lib -DCMAKE_INSTALL_PREFIX=/usr/local
-        make -C "$RUNNER_TEMP/pahole/build" -j"$(nproc)"
-        sudo make -C "$RUNNER_TEMP/pahole/build" install
+        make -C "$src/build" -j"$(nproc)"
+        sudo make -C "$src/build" install
         sudo ldconfig
         echo "PAHOLE=/usr/local/bin/pahole" >> "$GITHUB_ENV"
+        ok /usr/local/bin/pahole
         /usr/local/bin/pahole --version
 
     # pixel-bootctl / pixel-ota are static aarch64-musl binaries linked with
