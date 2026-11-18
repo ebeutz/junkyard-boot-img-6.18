@@ -60,14 +60,14 @@ nmcli -t -f STATE general 2>/dev/null | while read -r s; do
 done
 
 # Login-surface diagnostics: which targets reached, which units are active or
-# failed. Tells us whether any login path (ssh, getty@, kmsconvt@) is actually
+# failed. Tells us whether any login path (ssh, getty@, serial-getty@) is actually
 # usable on this boot.
 echo "[BEACON] system: $(systemctl is-system-running 2>/dev/null)" > /dev/kmsg
 for tgt in basic.target multi-user.target getty.target network.target network-online.target graphical.target; do
     state=$(systemctl is-active "$tgt" 2>/dev/null)
     echo "[BEACON] target: $tgt = $state" > /dev/kmsg
 done
-for svc in ssh.service NetworkManager.service systemd-logind.service kmsconvt@tty1.service getty@tty1.service serial-getty@ttySAC0.service mark-slot-successful.service; do
+for svc in ssh.service NetworkManager.service systemd-logind.service getty@tty1.service serial-getty@ttySAC0.service mark-slot-successful.service; do
     state=$(systemctl is-active "$svc" 2>/dev/null)
     echo "[BEACON] svc: $svc = $state" > /dev/kmsg
 done

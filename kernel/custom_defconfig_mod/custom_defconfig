@@ -66,3 +66,20 @@ CONFIG_IP6_NF_NAT=y
 # bench and the datacenter.
 CONFIG_NETCONSOLE=y
 CONFIG_NETCONSOLE_DYNAMIC=y
+
+# Panel console: fbcon, through the exynos DRM driver's fbdev emulation (the
+# display/samsung patch registers the fbdev client, on both devices). It is the
+# login VT (getty@tty1); kmscon is gone.
+#
+# FB=y makes the fbdev core, and fbcon with it, built-in rather than a module
+# the panel would wait for. No legacy fbdev hardware driver is enabled: FB only
+# opens that menu. (6.1's DRM_FBDEV_EMULATION also requires FB=y.)
+CONFIG_FB=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+# 8x16 on a ~430 ppi panel is unreadably small. Each <device>_cmdline_defconfig
+# selects this one with fbcon=font:TER16x32 (67x75 characters at 1080x2400).
+CONFIG_FONTS=y
+CONFIG_FONT_8x16=y
+CONFIG_FONT_TER16x32=y

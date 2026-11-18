@@ -4,7 +4,10 @@
 #   kvm-arm.mode=protected -> nvhe   (plain KVM for Debian guests, not pKVM)
 #   cgroup_disable=pressure dropped  (PSI on, for k8s/systemd-oomd)
 # plus the cgroup_enable=* list for k3s.
-CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"
+#
+# fbcon=font:TER16x32: the panel VT console font (custom_defconfig selects it);
+# 8x16 is unreadably small at the panel's density.
+CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard fbcon=font:TER16x32 cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"
 
 # Device-specific only because the symbol is version-specific: 6.1's NFS_V4_2
 # depends on NFS_V4_1; android-mainline (lynx) removed NFS_V4_1 entirely. See

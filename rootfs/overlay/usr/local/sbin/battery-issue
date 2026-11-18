@@ -1,5 +1,5 @@
 #!/bin/sh
-# Refresh the "Battery:" line in /etc/issue so the kmscon login banner shows the
+# Refresh the "Battery:" line in /etc/issue so the console login banner shows the
 # current charge, the same way "IPv4: \4" shows the address. agetty re-renders
 # /etc/issue each time it draws the login prompt; battery-issue.timer reruns this
 # so the value stays current. Reads the kernel fuel gauge under

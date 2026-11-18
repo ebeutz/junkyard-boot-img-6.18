@@ -5,7 +5,6 @@
 !_enter
 !packages.txt
 !debian_snapshot
-!kmscon.env
 !overlay
 !overlay/**
 # The fleet's authorised PUBLIC keys (SSH_AUTHORIZED_KEYS). Tracked on purpose:

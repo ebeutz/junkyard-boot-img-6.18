@@ -15,32 +15,22 @@ directly for debugging (paths are resolved relative to the script, not the cwd).
 
 ## `update-snapshot.sh`
 
-Refreshes the project's two [snapshot.debian.org](https://snapshot.debian.org)
-pins (both committed, both reproducibility anchors):
+Refreshes the project's [snapshot.debian.org](https://snapshot.debian.org) pin,
+the **Debian archive timestamp** in `rootfs/debian_snapshot` (committed), read by
+the Makefile's `SNAPSHOT`/`MIRROR`. Pinning the mirror is what makes the package
+set reproducible: the same pin always resolves the same packages.
 
-- **Debian archive timestamp** → `rootfs/debian_snapshot`, read by the Makefile's
-  `SNAPSHOT`/`MIRROR`. Pinning the mirror is what makes the package set
-  reproducible: the same pin always resolves the same packages.
-- **kmscon `.deb`** → `rootfs/kmscon.env` (`-include`'d by the Makefile as
-  `KMSCON_URL`/`KMSCON_SHA256`). kmscon was dropped from trixie, so it can't come
-  from the pinned suite; instead it's resolved from snapshot.debian.org's
-  machine-readable binary API to a permanent content-addressed `/file/<sha1>` URL,
-  then downloaded to record its sha256.
-
-For the archive pin, snapshot.debian.org redirects any timestamp to the canonical
+snapshot.debian.org redirects any timestamp to the canonical
 nearest snapshot (`302` + `Location`), so the script doesn't enumerate snapshots —
 it requests a target instant, follows the redirect to the real ID, and verifies
 the suite's `Release` resolves there (`HTTP 200`) before writing.
 
 ```sh
-just update_snapshot                      # newest snapshot + refresh kmscon (default)
+just update_snapshot                      # newest snapshot (default)
 just update_snapshot --latest             # same thing, explicit
 just update_snapshot --date 2026-05-01    # nearest snapshot to that day
 just update_snapshot 20260501T083000Z     # canonicalize/verify an exact stamp
 just update_snapshot --suite sid --latest # pin a different suite
-just update_snapshot --no-kmscon          # archive pin only, leave kmscon.env
-just update_snapshot --kmscon-only        # refresh kmscon.env only
-just update_snapshot --kmscon-version X   # pin a different kmscon version
 just update_snapshot --dry-run            # resolve + print, write nothing
 ```
 

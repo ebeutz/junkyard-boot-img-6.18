@@ -1,0 +1,109 @@
+From: junkyard
+Subject: [PATCH] display/samsung: fbdev emulation, so fbcon uses the panel as a VT
+
+The exynos DRM driver registers a modesetting device but never starts an
+fbdev client, so fbcon had nothing to bind to and the only console on the
+panel was kmscon in userspace. kmscon is gone; the login VT is fbcon.
+
+  * exynos_drm_gem.c: .vmap/.vunmap through the dma-buf. Every exynos GEM
+    object is an imported dma-buf (dumb buffers come from the system
+    dma-heap), and the fbdev helper draws through a kernel mapping.
+  * exynos_drm_fb.c: .dirty = drm_atomic_helper_dirtyfb. felix's panels are
+    DSI command-mode: a frame reaches the panel only when a commit sends one,
+    so fbcon's damage has to become an atomic commit.
+  * exynos_drm_drv.c: drm_fbdev_generic_setup(drm, 32) after
+    drm_dev_register(). The generic helper shadows the framebuffer and needs
+    only dumb buffers and GEM vmap.
+
+felix-only (kernel/patches-felix/): the lynx tree carries the same change for
+Linus' DRM client API in its cumulative display/samsung patch.
+---
+diff --git a/exynos_drm_drv.c b/exynos_drm_drv.c
+index f997310..f9a7b4d 100644
+--- a/exynos_drm_drv.c
++++ b/exynos_drm_drv.c
+@@ -20,6 +20,7 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_atomic_uapi.h>
+ #include <drm/drm_drv.h>
++#include <drm/drm_fb_helper.h>
+ #include <drm/drm_ioctl.h>
+ #include <drm/drm_probe_helper.h>
+ #include <drm/drm_self_refresh_helper.h>
+@@ -1212,6 +1213,12 @@ static int exynos_drm_bind(struct device *dev)
+ 	if (ret < 0)
+ 		goto err_cleanup_poll;
+ 
++	/*
++	 * junkyard: fbdev emulation, so fbcon can use the panel as a VT. The
++	 * generic helper needs only dumb buffers and GEM vmap.
++	 */
++	drm_fbdev_generic_setup(drm, 32);
++
+ 	/* create sysfs node for TUI status */
+ 	device_create_file(dev, &dev_attr_tui_status);
+ 
+diff --git a/exynos_drm_fb.c b/exynos_drm_fb.c
+index be52265..6a3eb63 100644
+--- a/exynos_drm_fb.c
++++ b/exynos_drm_fb.c
+@@ -18,6 +18,7 @@
+ #include <drm/drm_bridge.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_crtc_helper.h>
++#include <drm/drm_damage_helper.h>
+ #include <drm/drm_fb_helper.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_fourcc_gs101.h>
+@@ -46,9 +47,16 @@
+ 
+ extern const struct dpp_restriction dpp_drv_data;
+ 
++/*
++ * junkyard: .dirty lets fbdev emulation (fbcon) push its damage to the panel.
++ * The panels are DSI command-mode, so a new frame reaches the panel only when
++ * an atomic commit sends one; drm_atomic_helper_dirtyfb commits the planes
++ * that scan out this framebuffer.
++ */
+ static const struct drm_framebuffer_funcs exynos_drm_fb_funcs = {
+ 	.destroy	= drm_gem_fb_destroy,
+ 	.create_handle	= drm_gem_fb_create_handle,
++	.dirty		= drm_atomic_helper_dirtyfb,
+ };
+ 
+ static struct drm_framebuffer *
+diff --git a/exynos_drm_gem.c b/exynos_drm_gem.c
+index 32bbdbe..e3a74c3 100644
+--- a/exynos_drm_gem.c
++++ b/exynos_drm_gem.c
+@@ -83,8 +83,30 @@ static const struct vm_operations_struct exynos_drm_gem_vm_ops = {
+ 	.close = drm_gem_vm_close,
+ };
+ 
++/*
++ * junkyard: kernel mappings for in-kernel DRM clients (the fbdev emulation
++ * behind fbcon). Every exynos GEM object is an imported dma-buf (dumb buffers
++ * come from the system dma-heap), so map through the exporter. On this kernel
++ * drm_gem_vmap() holds no lock and dma_buf_vmap() takes the dma-buf's own.
++ */
++static int exynos_drm_gem_vmap(struct drm_gem_object *obj, struct iosys_map *map)
++{
++	if (!obj->import_attach)
++		return -EOPNOTSUPP;
++
++	return dma_buf_vmap(obj->import_attach->dmabuf, map);
++}
++
++static void exynos_drm_gem_vunmap(struct drm_gem_object *obj, struct iosys_map *map)
++{
++	if (obj->import_attach)
++		dma_buf_vunmap(obj->import_attach->dmabuf, map);
++}
++
+ static const struct drm_gem_object_funcs exynos_drm_gem_object_funcs = {
+ 	.free = exynos_drm_gem_free_object,
++	.vmap = exynos_drm_gem_vmap,
++	.vunmap = exynos_drm_gem_vunmap,
+ 	.vm_ops = &exynos_drm_gem_vm_ops,
+ };
+ 

@@ -15,4 +15,6 @@
 # and its job, pKVM's MMIO guard, does not apply under kvm-arm.mode=nvhe anyway.
 # `arm64.no32bit_el0` (new in this base string; 6.18's did not have it) is
 # kept: the Debian arm64 rootfs has no 32-bit userspace to run.
-CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig arm64.no32bit_el0 cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"
+#
+# `fbcon=font:TER16x32`: the panel's VT console font (custom_defconfig).
+CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig arm64.no32bit_el0 fbcon=font:TER16x32 cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"

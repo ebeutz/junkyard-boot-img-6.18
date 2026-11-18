@@ -715,12 +715,10 @@ migrate:
 
     echo "migration complete — 'just felix' should now be a no-op"
 
-# Refresh the snapshot.debian.org pins: the Debian archive timestamp
-# (rootfs/debian_snapshot, read via the Makefile's SNAPSHOT/MIRROR) and the
-# kmscon .deb URL+hash (rootfs/kmscon.env, -include'd by the Makefile). With no
-# args, pins the latest snapshot and refreshes kmscon; pass through tool flags
-# otherwise, e.g. `just update_snapshot --date 2026-05-01`,
-# `just update_snapshot --no-kmscon`, or `just update_snapshot --dry-run`.
+# Refresh the snapshot.debian.org pin: the Debian archive timestamp
+# (rootfs/debian_snapshot, read via the Makefile's SNAPSHOT/MIRROR). With no
+# args, pins the latest snapshot; pass through tool flags otherwise, e.g.
+# `just update_snapshot --date 2026-05-01` or `just update_snapshot --dry-run`.
 [group('rootfs')]
 update_snapshot *args:
     {{ justfile_directory() }}/tools/update-snapshot.sh {{ args }}

@@ -67,11 +67,12 @@ new=$(cat "$OUT" 2>/dev/null)
 # dongle (r8152) can take ~130s to enumerate — long after agetty has drawn the
 # login banner, which it reads only once per prompt. Without a nudge the MAC
 # never appears until the next manual login. agetty re-reads the issue when it
-# (re)starts, and kmscon/serial-getty respawn agetty on SIGHUP, so HUPing the
+# (re)starts, and agetty exits on SIGHUP and systemd restarts it (getty@ and
+# serial-getty@ are Restart=always), so HUPing the
 # agettys makes the banner redraw with the freshly written drop-in. Only act on
 # an actual change to avoid redraw loops.
 if [ "$old" != "$new" ]; then
-	# kmscon supervises its agetty; serial-getty runs agetty directly. SIGHUP to
-	# all agetty processes makes each redraw/respawn and re-read the issue.
+	# getty@tty1 (the fbcon VT) and serial-getty@ run agetty directly. SIGHUP
+	# to all agetty processes makes each respawn and re-read the issue.
 	pkill -HUP -x agetty 2>/dev/null || true
 fi

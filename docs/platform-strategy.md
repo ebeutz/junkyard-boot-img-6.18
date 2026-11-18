@@ -919,6 +919,8 @@ overstated the gap):** the *inputs* are already substantially pinned —
 - Debian archive **pinned** to a snapshot.debian.org timestamp
   (`rootfs/debian_snapshot`, e.g. `20260529T144010Z`) — not a live mirror.
 - kmscon **pinned** by URL + SHA256 (`rootfs/kmscon.env`, verified at build).
+  *(Since removed: the panel console is the kernel's fbcon VT, so there is no
+  kmscon pin any more.)*
 - Kernel source **pinned** by `kernel/kernel-manifest.xml` (per-project SHAs).
 
 So input-addressing is *most of the way there*. What remains unpinned/nondeter-
