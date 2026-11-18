@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  felix: repo local manifest layered on kernel/kernel-manifest.felix.xml (or the
+  android-gs-felix-6.1-android16 branch) by clone_kernel_source.
+
+  The kernel is built with make (kernel/kbuild.mk), so the projects that exist
+  only for Kleaf/Bazel are not fetched: Kleaf itself, Bazel and its JDK and
+  rules, Kleaf's hermetic host tools and sysroot, and the NDK. mkbootimg comes
+  from this repo's own tools/mkbootimg submodule. What remains is the kernel
+  (aosp/), the device and module trees (private/), and the clang prebuilt,
+  which clone_kernel_source sparse-checks-out to the one release the kernel
+  uses (KERNEL_CLANG_VERSION in devices/felix.mk).
+-->
+<manifest>
+  <remove-project name="kernel/build"/>
+  <remove-project name="kernel/prebuilts/build-tools"/>
+  <remove-project name="platform/build/bazel_common_rules"/>
+  <remove-project name="platform/external/bazel-skylib"/>
+  <remove-project name="platform/external/python/absl-py"/>
+  <remove-project name="platform/external/stardoc"/>
+  <remove-project name="platform/prebuilts/bazel/linux-x86_64"/>
+  <remove-project name="platform/prebuilts/build-tools"/>
+  <remove-project name="platform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8"/>
+  <remove-project name="platform/prebuilts/jdk/jdk11"/>
+  <remove-project name="platform/system/tools/mkbootimg"/>
+  <remove-project name="toolchain/prebuilts/ndk/r23"/>
+</manifest>

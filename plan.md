@@ -45,7 +45,7 @@ work (Garage needs far less kernel and userspace plumbing than Ceph).
   `BRIDGE_NETFILTER`, `VXLAN`, netfilter xt matches) and the `cgroup_enable=*`
   args in `CONFIG_CMDLINE`. Userspace ([rootfs/packages.txt](rootfs/packages.txt))
   is a bare Debian system — no k8s/storage packages today.
-- The **kernel build is the expensive, role-independent step** (~1hr Bazel build,
+- The **kernel build is the expensive, role-independent step** (~1hr kernel build,
   same felix hardware either way). Every rootfs target depends on
   `kernel_version` being current, and kernel↔rootfs modules must stay in lockstep.
 - **Garage needs almost no special kernel support.** It is a single static Rust

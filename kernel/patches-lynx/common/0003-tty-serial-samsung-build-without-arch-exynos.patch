@@ -1,0 +1,23 @@
+From: junkyard
+Subject: [PATCH] tty: serial: samsung: build without ARCH_EXYNOS
+
+The one Kconfig dependency the lynx GKI needs relaxed. gs201's console
+UART is a Samsung UART, and earlycon=exynos4210 (gs201.dtsi bootargs) is
+provided only by the built-in samsung_tty driver. Upstream it depends on
+ARCH_EXYNOS, but enabling ARCH_EXYNOS would also build upstream's Exynos
+clock, pinctrl, PMU and MCT drivers into the GKI, which collide with the
+gs201 vendor modules that provide those. AOSP's GKI drops the same
+dependency line for the same reason; this is that hunk.
+---
+diff --git a/drivers/tty/serial/Kconfig b/drivers/tty/serial/Kconfig
+index cf7dba473..297f07674 100644
+--- a/drivers/tty/serial/Kconfig
++++ b/drivers/tty/serial/Kconfig
+@@ -219,7 +219,6 @@ config SERIAL_CLPS711X_CONSOLE
+ 
+ config SERIAL_SAMSUNG
+ 	tristate "Samsung SoC serial support"
+-	depends on PLAT_SAMSUNG || ARCH_S5PV210 || ARCH_EXYNOS || ARCH_APPLE || ARCH_ARTPEC || COMPILE_TEST
+ 	select SERIAL_CORE
+ 	help
+ 	  Support for the on-chip UARTs on the Samsung

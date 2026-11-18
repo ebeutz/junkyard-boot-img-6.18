@@ -398,8 +398,8 @@ been under-weighting repro-env's. Side by side:
   on-call person debugs a NixOS system (store paths, `nixos-rebuild`-isms) — and
   team overlap with the Nix-fluent fleet folks is **partial** (operator). This is
   the genuine, recurring Nix tax and it does not go away.
-- **Foreign builds are still hand-pinned.** Kernel (AOSP Bazel / mainline kbuild
-  via `repo`) and vendor firmware are not nixpkgs; you wrap them in fixed-output
+- **Foreign builds are still hand-pinned.** Kernel (kbuild against `repo`- or
+  git-pinned sources) and vendor firmware are not nixpkgs; you wrap them in fixed-output
   derivations with manually-declared hashes — *the same hand-pinning repro-env
   would need.* Nix gives no free lock for the hardest, most security-critical
   components. (Neutral, but it caps Nix's "totality" upside.)

@@ -1,12 +1,18 @@
-# lynx (GrapheneOS kernel_pixel_6.18) — kernel command line.
+# lynx (lynx-mainline: GrapheneOS device tree on AOSP android-mainline GKI) —
+# kernel command line.
 #
-# 6.18 gki_defconfig's CONFIG_CMDLINE:
+# android-mainline (7.3) gki_defconfig's CONFIG_CMDLINE:
 #   console=ttynull stack_depot_disable=on cgroup_disable=pressure
-#   kasan.stacktrace=off kvm-arm.mode=protected bootconfig
+#   kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard
+#   arm64.no32bit_el0
 # with the SAME deliberate deltas felix carries over its 6.1 base:
 #   kvm-arm.mode=protected -> nvhe   (plain KVM for Debian guests, not pKVM)
 #   cgroup_disable=pressure dropped  (PSI on, for k8s/systemd-oomd)
-# plus the cgroup_enable=* list for k3s. felix's `kasan.page_alloc.sample=10` and
-# `ioremap_guard` are NOT carried over: they are in 6.1's base string, not 6.18's,
-# and ioremap_guard no longer exists (it would be handed to init as an argument).
-CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"
+# plus the cgroup_enable=* list for k3s.
+#
+# `ioremap_guard` is dropped: nothing in the 7.3 tree parses it any more (no
+# early_param/__setup), so the kernel would hand it to init as an argument —
+# and its job, pKVM's MMIO guard, does not apply under kvm-arm.mode=nvhe anyway.
+# `arm64.no32bit_el0` (new in this base string; 6.18's did not have it) is
+# kept: the Debian arm64 rootfs has no 32-bit userspace to run.
+CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig arm64.no32bit_el0 cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"

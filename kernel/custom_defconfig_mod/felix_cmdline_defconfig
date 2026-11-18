@@ -5,3 +5,8 @@
 #   cgroup_disable=pressure dropped  (PSI on, for k8s/systemd-oomd)
 # plus the cgroup_enable=* list for k3s.
 CONFIG_CMDLINE="console=ttynull stack_depot_disable=on kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard cgroup_enable=cpuset cgroup_enable=cpu cgroup_enable=devices cgroup_enable=freezer cgroup_enable=blkio"
+
+# Device-specific only because the symbol is version-specific: 6.1's NFS_V4_2
+# depends on NFS_V4_1; android-mainline (lynx) removed NFS_V4_1 entirely. See
+# the note in custom_defconfig.
+CONFIG_NFS_V4_1=y
