@@ -20,6 +20,11 @@ handled here rather than restored in the kernel, see kernel/patches/README.md):
   * Kbuild for the ddk_modules here, generated from BUILD.bazel by
     tools/bazel2kbuild.py, for the make-only build (kernel/kbuild.mk):
       Kbuild
+  * The fbdev blank-notifier path (fb_register_client + FB_EVENT_BLANK) is
+    used only where the kernel still has FB_EVENT_BLANK. It used to be keyed
+    on CONFIG_FB, which this tree now enables for fbcon, and Linus' tree has
+    no blank events any more; without it the driver takes the path it took
+    before CONFIG_FB was on.
 ---
 diff --git a/Kbuild b/Kbuild
 new file mode 100644
@@ -108,7 +113,7 @@ index b467607..4b1857f 100644
  
  	ret = goodix_fw_sysfs_init(core_data, &core_data->update_ctrl);
 diff --git a/goodix_ts_core.c b/goodix_ts_core.c
-index 33637fb..983585d 100644
+index 33637fb..28ad3ef 100644
 --- a/goodix_ts_core.c
 +++ b/goodix_ts_core.c
 @@ -21,6 +21,8 @@
@@ -141,6 +146,42 @@ index 33637fb..983585d 100644
  	if (r < 0)
  		return -EINVAL;
  
+@@ -2589,7 +2600,7 @@ static int goodix_ts_resume(struct goodix_ts_core *core_data)
+ 	return 0;
+ }
+ 
+-#if IS_ENABLED(CONFIG_FB)
++#if GOODIX_FB_NOTIFIER
+ /**
+  * goodix_ts_fb_notifier_callback - Framebuffer notifier callback
+  * Called by kernel during framebuffer blanck/unblank phrase
+@@ -2617,7 +2628,7 @@ static int goodix_ts_fb_notifier_callback(
+ #endif
+ 
+ #if IS_ENABLED(CONFIG_PM)
+-#if !IS_ENABLED(CONFIG_FB) && !IS_ENABLED(CONFIG_HAS_EARLYSUSPEND)
++#if !GOODIX_FB_NOTIFIER && !IS_ENABLED(CONFIG_HAS_EARLYSUSPEND)
+ /**
+  * goodix_ts_pm_suspend - PM suspend function
+  * Called by kernel during system suspend phrase
+@@ -2675,7 +2686,7 @@ static int goodix_ts_stage2_init(struct goodix_ts_core *cd)
+ 		mutex_init(&cd->ble_data.lock);
+ 	}
+ 
+-#if IS_ENABLED(CONFIG_FB)
++#if GOODIX_FB_NOTIFIER
+ 	cd->fb_notifier.notifier_call = goodix_ts_fb_notifier_callback;
+ 	if (fb_register_client(&cd->fb_notifier))
+ 		ts_err("Failed to register fb notifier client:%d", ret);
+@@ -2883,7 +2894,7 @@ err_alloc_workqueue:
+ err_init_apis:
+ 	goodix_ts_sysfs_exit(cd);
+ err_init_sysfs:
+-#if IS_ENABLED(CONFIG_FB)
++#if GOODIX_FB_NOTIFIER
+ 	fb_unregister_client(&cd->fb_notifier);
+ #endif
+ 	goodix_ts_pen_dev_remove(cd);
 @@ -3137,7 +3148,7 @@ err_out:
  	return ret;
  }
@@ -150,6 +191,15 @@ index 33637fb..983585d 100644
  {
  	struct goodix_ts_core *core_data = platform_get_drvdata(pdev);
  	struct goodix_ts_hw_ops *hw_ops = core_data->hw_ops;
+@@ -3167,7 +3178,7 @@ static int goodix_ts_remove(struct platform_device *pdev)
+ 		touch_apis_deinit(&core_data->pdev->dev);
+ #endif
+ 		goodix_ts_sysfs_exit(core_data);
+-#if IS_ENABLED(CONFIG_FB)
++#if GOODIX_FB_NOTIFIER
+ 		fb_unregister_client(&core_data->fb_notifier);
+ #endif
+ 		goodix_ts_pen_dev_remove(core_data);
 @@ -3183,8 +3194,6 @@ static int goodix_ts_remove(struct platform_device *pdev)
  	goodix_set_pinctrl_state(core_data, PINCTRL_MODE_SUSPEND);
  	mutex_destroy(&core_data->gesture_data_lock);
@@ -159,8 +209,17 @@ index 33637fb..983585d 100644
  }
  
  #if IS_ENABLED(CONFIG_PM)
+@@ -3204,7 +3213,7 @@ static struct platform_driver goodix_ts_driver = {
+ 		.name = GOODIX_CORE_DRIVER_NAME,
+ 		.owner = THIS_MODULE,
+ #if IS_ENABLED(CONFIG_PM)
+-#if !IS_ENABLED(CONFIG_FB) && !IS_ENABLED(CONFIG_HAS_EARLYSUSPEND) &&          \
++#if !GOODIX_FB_NOTIFIER && !IS_ENABLED(CONFIG_HAS_EARLYSUSPEND) &&          \
+ 	!IS_ENABLED(CONFIG_GTI_PM)
+ 		.pm = &dev_pm_ops,
+ #endif
 diff --git a/goodix_ts_core.h b/goodix_ts_core.h
-index 5a25249..5042b37 100644
+index 5a25249..fcd0403 100644
 --- a/goodix_ts_core.h
 +++ b/goodix_ts_core.h
 @@ -21,7 +21,7 @@
@@ -172,6 +231,35 @@ index 5a25249..5042b37 100644
  #include <linux/vmalloc.h>
  #include <linux/kthread.h>
  #include <linux/delay.h>
+@@ -38,9 +38,18 @@
+ #include <linux/of_gpio.h>
+ #include <linux/regulator/consumer.h>
+ #endif
+-#if IS_ENABLED(CONFIG_FB)
++/*
++ * junkyard: CONFIG_FB used to mean "suspend on the fbdev blank notifier". The
++ * notifier's blank events (FB_EVENT_BLANK) are gone upstream, and fbdev is now
++ * there only for fbcon, so use that path only on a kernel that still has the
++ * events, and the PM ops otherwise.
++ */
+ #include <linux/fb.h>
+ #include <linux/notifier.h>
++#if IS_ENABLED(CONFIG_FB) && defined(FB_EVENT_BLANK)
++#define GOODIX_FB_NOTIFIER 1
++#else
++#define GOODIX_FB_NOTIFIER 0
+ #endif
+ #include "touch_apis.h"
+ #if IS_ENABLED(CONFIG_TOUCHSCREEN_MOTION_FILTER)
+@@ -935,7 +944,7 @@ struct goodix_ts_core {
+ 
+ 	struct goodix_ts_esd ts_esd;
+ 
+-#if IS_ENABLED(CONFIG_FB)
++#if GOODIX_FB_NOTIFIER
+ 	struct notifier_block fb_notifier;
+ #endif
+ 
 diff --git a/goodix_ts_inspect.c b/goodix_ts_inspect.c
 index 03c68c9..70e7531 100644
 --- a/goodix_ts_inspect.c

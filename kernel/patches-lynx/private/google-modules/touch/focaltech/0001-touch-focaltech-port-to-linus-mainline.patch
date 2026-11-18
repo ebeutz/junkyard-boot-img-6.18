@@ -31,6 +31,11 @@ handled here rather than restored in the kernel, see kernel/patches/README.md):
   * Kbuild for the ddk_modules here, generated from BUILD.bazel by
     tools/bazel2kbuild.py, for the make-only build (kernel/kbuild.mk):
       ft3658/Kbuild
+  * The fbdev blank-notifier path (fb_register_client + FB_EVENT_BLANK) is
+    used only where the kernel still has FB_EVENT_BLANK. It used to be keyed
+    on CONFIG_FB, which this tree now enables for fbcon, and Linus' tree has
+    no blank events any more; without it the driver takes the path it took
+    before CONFIG_FB was on.
 ---
 diff --git a/ft3658/BUILD.bazel b/ft3658/BUILD.bazel
 index 7e9c65f..6f32a8d 100644
@@ -127,7 +132,7 @@ index 0000000..2885edc
 +  -I$(ROOT_DIR)/private/google-modules/soc/gs/include/linus-compat
 +endif
 diff --git a/ft3658/focaltech_core.c b/ft3658/focaltech_core.c
-index a30a392..87be898 100644
+index a30a392..a44932f 100644
 --- a/ft3658/focaltech_core.c
 +++ b/ft3658/focaltech_core.c
 @@ -31,6 +31,7 @@
@@ -138,7 +143,25 @@ index a30a392..87be898 100644
  #include <linux/module.h>
  #include <linux/init.h>
  #include <linux/of.h>
-@@ -1111,7 +1112,7 @@ int fts_ts_set_bus_ref(struct fts_ts_data *ts, u16 ref, bool enable)
+@@ -38,7 +39,16 @@
+ #include <linux/of_gpio.h>
+ #include <linux/of_irq.h>
+ #include <linux/pinctrl/consumer.h>
+-#if defined(CONFIG_FB)
++/*
++ * junkyard: the fbdev blank notifier (FB_EVENT_BLANK) is gone upstream, and
++ * fbdev is now there only for fbcon. Use it only on a kernel that still has
++ * the events; otherwise take the DRM panel path, as without CONFIG_FB.
++ */
++#include <linux/fb.h>
++#if defined(CONFIG_FB) && defined(FB_EVENT_BLANK)
++#define FTS_FB_NOTIFIER 1
++#endif
++#if defined(FTS_FB_NOTIFIER)
+ #include <linux/notifier.h>
+ #include <linux/fb.h>
+ #elif defined(CONFIG_DRM)
+@@ -1111,7 +1121,7 @@ int fts_ts_set_bus_ref(struct fts_ts_data *ts, u16 ref, bool enable)
      return result;
  }
  
@@ -147,7 +170,7 @@ index a30a392..87be898 100644
  {
      struct drm_connector *connector;
      struct drm_connector_list_iter conn_iter;
-@@ -1135,7 +1136,8 @@ static bool bridge_is_lp_mode(struct drm_connector *connector)
+@@ -1135,7 +1145,8 @@ static bool bridge_is_lp_mode(struct drm_connector *connector)
      return false;
  }
  
@@ -157,7 +180,7 @@ index a30a392..87be898 100644
  {
      struct fts_ts_data *ts =
          container_of(bridge, struct fts_ts_data, panel_bridge);
-@@ -1144,7 +1146,8 @@ static void panel_bridge_enable(struct drm_bridge *bridge)
+@@ -1144,7 +1155,8 @@ static void panel_bridge_enable(struct drm_bridge *bridge)
          fts_ts_set_bus_ref(ts, FTS_TS_BUS_REF_SCREEN_ON, true);
  }
  
@@ -167,7 +190,7 @@ index a30a392..87be898 100644
  {
      struct fts_ts_data *ts =
          container_of(bridge, struct fts_ts_data, panel_bridge);
-@@ -1184,8 +1187,12 @@ static void panel_bridge_mode_set(struct drm_bridge *bridge,
+@@ -1184,8 +1196,12 @@ static void panel_bridge_mode_set(struct drm_bridge *bridge,
  }
  
  static const struct drm_bridge_funcs panel_bridge_funcs = {
@@ -182,6 +205,33 @@ index a30a392..87be898 100644
      .mode_set = panel_bridge_mode_set,
  };
  
+@@ -2641,7 +2657,7 @@ static void fts_resume_work(struct work_struct *work)
+     mutex_unlock(&ts_data->device_mutex);
+ }
+ 
+-#if defined(CONFIG_FB)
++#if defined(FTS_FB_NOTIFIER)
+ static int fb_notifier_callback(struct notifier_block *self,
+                                 unsigned long event, void *data)
+ {
+@@ -3131,7 +3147,7 @@ static int fts_ts_probe_entry(struct fts_ts_data *ts_data)
+     ts_data->pm_suspend = false;
+ #endif
+ 
+-#if defined(CONFIG_FB)
++#if defined(FTS_FB_NOTIFIER)
+     ts_data->fb_notif.notifier_call = fb_notifier_callback;
+     ret = fb_register_client(&ts_data->fb_notif);
+     if (ret) {
+@@ -3280,7 +3296,7 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
+ 
+     cpu_latency_qos_remove_request(&ts_data->pm_qos_req);
+ 
+-#if defined(CONFIG_FB)
++#if defined(FTS_FB_NOTIFIER)
+     if (fb_unregister_client(&ts_data->fb_notif))
+         FTS_ERROR("[FB]Error occurred while unregistering fb_notifier.");
+ #elif defined(CONFIG_DRM)
 diff --git a/ft3658/focaltech_test/focaltech_test.c b/ft3658/focaltech_test/focaltech_test.c
 index 92d8911..59af01b 100644
 --- a/ft3658/focaltech_test/focaltech_test.c
