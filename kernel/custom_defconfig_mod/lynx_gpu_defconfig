@@ -1,0 +1,4 @@
+# lynx GPU: the upstream panthor DRM driver for the Mali-G710 (Valhall CSF),
+# with Mesa's panfrost/panvk as userspace. Replaces the vendor mali_kbase +
+# proprietary userspace. Linus' tree only: felix's 6.1 ACK has no panthor.
+CONFIG_DRM_PANTHOR=m

@@ -1,4 +1,4 @@
-.PHONY: all clean clean_image stamp_version install_arm_blobs print-%
+.PHONY: all clean clean_image stamp_version print-%
 
 # This Makefile is driven by the justfile; most variables come in via env.
 # Targets with a leading "." are sentinel files that track whether a stage has
@@ -136,12 +136,19 @@ APT_PACKAGES_FILE ?= rootfs/packages.txt
 
 # Sysroot-relative paths retired from rootfs/overlay/. See the rm -f in
 # .install_packages for why deleting an overlay file is not enough on its own.
+# The last three are the proprietary Mali GPU driver and its OpenCL/Vulkan
+# manifests, which an earlier build step installed from an encrypted tarball
+# (at the paths that tarball was documented to use). The GPU now uses the
+# upstream panthor driver.
 RETIRED_OVERLAY_PATHS ?= \
 	usr/local/sbin/slot-autocommit \
 	etc/systemd/system/slot-autocommit.service \
 	etc/systemd/system/multi-user.target.wants/slot-autocommit.service \
 	etc/systemd/system/multi-user.target.wants/netcheck-recover.service \
-	etc/systemd/system/multi-user.target.wants/mark-slot-successful.service
+	etc/systemd/system/multi-user.target.wants/mark-slot-successful.service \
+	usr/lib/aarch64-linux-gnu/libmali.so \
+	etc/OpenCL/vendors/mali.icd \
+	usr/share/vulkan/icd.d/mali_icd.json
 # Per-device: this list is composed from THIS device's kernel staging archives
 # and is consumed by dracut --force-drivers. Sharing one path between devices
 # lets a lynx build leave a lynx module list behind that a later felix
@@ -198,17 +205,6 @@ OVERLAY_DIR ?= rootfs/overlay
 # ~2GB download cached per-device, so switching back and forth doesn't re-fetch.
 VENDOR_FIRMWARE_STAGE := $(BUILD_DIR)/vendor-firmware/extracted
 
-# ARM NDA GPU userland blobs (Mali Vulkan + OpenCL). Committed only as an
-# age-encrypted, rootfs-rooted overlay tarball, encrypted to every pubkey in
-# $(ARM_RECIPIENTS); tools/arm-blobs.sh decrypts (with the builder's own SSH
-# key) and installs it. Not a recipient / no key / blob absent => warning, not a
-# build failure. See secrets/README.md. ARM_NDA_KEY optionally pins a specific
-# identity (private key) file; empty => fall back to the builder's ~/.ssh keys.
-SECRETS_DIR ?= secrets
-ARM_BLOBS_ENC ?= $(SECRETS_DIR)/arm-mali-blobs.tar.age
-ARM_RECIPIENTS ?= $(SECRETS_DIR)/recipients.txt
-ARM_NDA_KEY ?=
-ARM_BLOBS_SCRIPT ?= tools/arm-blobs.sh
 
 OVERLAY_FILES := $(shell find $(OVERLAY_DIR) -type f 2>/dev/null)
 
@@ -912,7 +908,11 @@ $(S_INSTK): $(S_KERNEL) $(S_PKGS) | $(BUILD_DIR)
 	# nothing and removes a boot-blocking dependency on a peripheral we never
 	# touch. Paired with a blacklist entry so udev cannot autoload it later by
 	# modalias — the sed only stops dracut force-loading it.
-	sudo sed -i '/^bcmdhd4389$$/d; /^exynos_mfc$$/d; /^st21nfc$$/d' $(MODULE_ORDER_PATH)
+	#
+	# panthor (lynx's GPU driver) is left out too: it loads its CSF firmware
+	# (/lib/firmware/arm/mali/...) at probe, which is not in the initramfs, and
+	# a failed probe there is not retried. udev loads it from the real root.
+	sudo sed -i '/^bcmdhd4389$$/d; /^exynos_mfc$$/d; /^st21nfc$$/d; /^panthor$$/d' $(MODULE_ORDER_PATH)
 	# Prune module/header/boot trees from other kernel versions so a
 	# KERNEL_VERSION bump doesn't accumulate stale ones in the image. (The new
 	# version's initrd is (re)created later in .install_initramfs.)
@@ -1012,23 +1012,6 @@ else
 endif
 	just device=$(DEVICE) unmount_rootfs
 	@echo "stamped IMAGE_VERSION=$(IMAGE_VERSION)"
-
-# Decrypt + install the ARM NDA GPU userland blobs into the rootfs. PHONY (no
-# sentinel), like stamp_version: it re-runs every build so a builder who fixes
-# their key (or gets added as a recipient + re-pulls the blob) picks the drivers
-# up on the next `just all` with nothing to remember. tools/arm-blobs.sh exits 0
-# when the blob/key is absent or the builder isn't a recipient, so this NEVER
-# fails the build — it just warns and skips. Decoupled from .build_boot because
-# the blobs land in rootfs.img (flashed to super), not in boot/vendor_boot.img;
-# `just all` runs this after .build_boot. ldconfig refreshes the loader cache so
-# a freshly-installed .so is found at runtime.
-install_arm_blobs: $(S_PKGS)
-	just device=$(DEVICE) mount_rootfs
-	SECRETS_DIR=$(SECRETS_DIR) ARM_BLOBS_ENC=$(ARM_BLOBS_ENC) \
-		ARM_RECIPIENTS=$(ARM_RECIPIENTS) ARM_NDA_KEY=$(ARM_NDA_KEY) \
-		$(ARM_BLOBS_SCRIPT) install $(SYSROOT_DIR)
-	$(NSPAWN_WRAP) -D $(SYSROOT_DIR) ldconfig || true
-	just device=$(DEVICE) unmount_rootfs
 
 # NO usbcore.quirks here — see below.
 #
